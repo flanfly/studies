@@ -5,13 +5,18 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "duckdb>=1.4.2",
     "ipykernel>=7.1.0",
     "ipython>=9.7.0",
     "jupyter>=1.1.1",
     "lightweight-charts>=2.1",
     "matplotlib>=3.10.1",
+    "numba>=0.62.1",
     "pandas[pyarrow]>=2.2.3",
+    "polars>=1.35.2",
     "requests>=2.32.3",
+    "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
     "yfinance>=0.2.55",
 ]
