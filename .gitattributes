@@ -4,4 +4,5 @@ pd-data/*.parquet filter=lfs diff=lfs merge=lfs -text
 pred-nox-60lb-1fc-pd.parquet filter=lfs diff=lfs merge=lfs -text
 pred-wx-60lb-1fc-pd.parquet filter=lfs diff=lfs merge=lfs -text
 .env filter=git-crypt diff=git-crypt
-
+binance-1d-spot-stable-pairs.parquet filter=lfs diff=lfs merge=lfs -text
+binance-1d-spot.parquet filter=lfs diff=lfs merge=lfs -text
