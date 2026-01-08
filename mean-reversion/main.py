@@ -84,8 +84,9 @@ def retrieve_data():
             lambda s: [s.symbol, s.base_asset],
             filter(
                 lambda s: s.is_spot_trading_allowed
-                and s.quote_asset in stables
-                and s.base_asset not in stables,
+                and s.symbol.isascii()
+                and s.quote_asset.upper() in stables
+                and s.base_asset.upper() not in stables,
                 info.symbols,
             ),
         )
