@@ -34,6 +34,7 @@ copy (
         MIN(low) AS low,
         arg_max(close, timestamp) AS close,
         SUM(volume) AS volume,
+        SUM(qty_volume) AS qty_volume,
         SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume,
         SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume
     from (

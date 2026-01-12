@@ -21,7 +21,7 @@ from datetime import datetime
 l.basicConfig(level=l.INFO)
 dotenv.load_dotenv()
 
-stables = set(
+usd_stables = set(
     [
         "USDT",
         "BUSD",
@@ -34,11 +34,15 @@ stables = set(
         "UST",
         "FDUSD",
         "USD1",
+        "XUSD",
+        "USD",
+    ]
+)
+other_stables = set(
+    [
         "EURC",
         "EURI",
-        "XUSD",
         "AEUR",
-        "USD",
         "EUR",
         "GBP",
         "JPY",
@@ -49,6 +53,7 @@ stables = set(
         "KRW",
     ]
 )
+stables = usd_stables.union(other_stables)
 
 
 def main():
@@ -85,7 +90,7 @@ def retrieve_data():
             filter(
                 lambda s: s.is_spot_trading_allowed
                 and s.symbol.isascii()
-                and s.quote_asset.upper() in stables
+                and s.quote_asset.upper() in usd_stables
                 and s.base_asset.upper() not in stables,
                 info.symbols,
             ),
@@ -142,10 +147,13 @@ def build_portfolio(df: pd.DataFrame):
     yesterday = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)).normalize()
     labels = list(map(lambda n: f"{n}", range(1, 11)))
 
-    btcregexp = re.compile("^btc(" + "|".join(stables).lower() + ")$")
+    btcregexp = re.compile("^btc(" + "|".join(usd_stables) + ")$", re.IGNORECASE)
     btcpair = list(
         filter(lambda s: btcregexp.match(s), df["symbol"].unique().to_list())
     )[0]
+
+    assert btcpair is not None
+
     if not btcpair:
         l.error("No BTC stablecoin pair found in data")
         return
@@ -322,23 +330,23 @@ def run_strategy(df: pl.DataFrame):
         )
         .sort(["ts"])
         .with_columns(
-            [
-                (pl.col("strategy") - pl.col("ref")).alias("perf"),
-                (pl.col("strategy") - pl.col("ref")).rolling_mean(20).alias("perf20d"),
-            ]
+           [
+               (pl.col("strategy") - pl.col("ref")).alias("perf"),
+               (pl.col("strategy") - pl.col("ref")).rolling_mean(20).alias("perf20d"),
+           ]
         )
         .with_columns(
-            [
-                pl.when(pl.col("perf20d").shift(1) > 0)
-                .then(pl.col("perf"))
-                .otherwise(0)
-                .alias("cond")
-            ]
+           [
+               pl.when(pl.col("perf20d").shift(1) > 0)
+               .then(pl.col("perf"))
+               .otherwise(0)
+               .alias("cond")
+           ]
         )
         .with_columns(
-            [
-                pl.col("cond").cum_sum().alias("equity"),
-            ]
+           [
+               pl.col("cond").cum_sum().alias("equity"),
+           ]
         )
         .to_pandas()
         .set_index("ts")

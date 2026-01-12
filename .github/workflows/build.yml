@@ -1,0 +1,51 @@
+name: Build and Push to Artifact Registry
+
+on:
+  push:
+    branches: [ master ]
+
+env:
+  PROJECT_ID: your-project-id # Update this
+  REGION: us-central1         # Update this
+  REPOSITORY: my-repo         # Update this
+  IMAGE_NAME: my-app-image
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    # Required permissions for Workload Identity Federation
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 1. Authenticate to Google Cloud
+    - id: 'auth'
+      name: 'Authenticate to Google Cloud'
+      uses: 'google-github-actions/auth@v2'
+      with:
+        token_format: 'access_token'
+        workload_identity_provider: 'projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider' # Update this
+        service_account: 'my-service-account@your-project-id.iam.gserviceaccount.com' # Update this
+
+    # 2. Login to Artifact Registry
+    - name: Docker Auth
+      uses: 'docker/login-action@v3'
+      with:
+        username: 'oauth2accesstoken'
+        password: '${{ steps.auth.outputs.access_token }}'
+        registry: '${{ env.REGION }}-docker.pkg.dev'
+
+    # 3. Build and Push
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }:latest
