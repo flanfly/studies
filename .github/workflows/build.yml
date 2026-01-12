@@ -39,6 +39,10 @@ jobs:
         password: '${{ steps.auth.outputs.access_token }}'
         registry: '${{ env.REGION }}-docker.pkg.dev'
 
+    - name: Generate requirements.txt
+      run: |
+        uv export --format requirements.txt --output-file requirements.txt --no-dev
+
     - name: Build and Push Docker Image
       uses: docker/build-push-action@v5
       with:
