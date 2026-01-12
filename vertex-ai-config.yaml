@@ -5,4 +5,8 @@ workerPoolSpecs:
       acceleratorCount: 1
     replicaCount: 1
     containerSpec:
-      imageUri: asia-southeast2-docker.pkg.dev/prj-vertexai-test/default/myimage:latest
+      imageUri: asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/myimage:latest
+scheduling:
+  strategy: SPOT
+  timeout: 3600s
+  restartJobOnWorkerRestart: true
