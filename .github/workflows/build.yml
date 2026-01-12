@@ -32,6 +32,24 @@ jobs:
         remove-codeql: 'true'
         remove-docker-images: 'true'
 
+    - name: Move Docker Root to /home
+      run: |
+        # Stop Docker
+        sudo systemctl stop docker
+
+        # Create the new directory on the larger partition
+        sudo mkdir -p /home/runner/work/docker-root
+
+        # Create or update daemon.json to point to the new location
+        echo '{ "data-root": "/home/runner/work/docker-root" }' | sudo tee /etc/docker/daemon.json
+
+        # Sync existing data (optional but recommended for stability)
+        sudo rsync -aP /var/lib/docker/ /home/runner/work/docker-root/
+
+        # Restart Docker
+        sudo systemctl start docker
+        docker info | grep "Docker Root Dir"
+
     - name: Checkout Code
       uses: actions/checkout@v4
 
@@ -65,8 +83,6 @@ jobs:
       with:
         context: .
         push: true
-        cache-from: type=local,src=/home/runner/work/docker-cache
-        cache-to: type=local,dest=/home/runner/work/docker-cache-new,mode=max
         tags: |
           ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
