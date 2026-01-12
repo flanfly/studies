@@ -2,6 +2,14 @@ locals {
   project_id = "prj-vertexai-test"
   region     = "asia-southeast1" # Singapore
   github_repo = "flanfly/studies"
+
+  required_services = [
+    "iam.googleapis.com",
+    "iamcredentials.googleapis.com",
+    "artifactregistry.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+    "sts.googleapis.com"
+  ]
 }
 
 terraform {
@@ -15,6 +23,15 @@ terraform {
 provider "google" {
   project = local.project_id
   region  = local.region
+}
+
+resource "google_project_service" "enabled_apis" {
+  for_each = toset(local.required_services)
+
+  project = local.project_id
+  service = each.key
+
+  disable_on_destroy = false
 }
 
 import {
