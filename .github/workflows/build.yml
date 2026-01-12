@@ -65,6 +65,8 @@ jobs:
       with:
         context: .
         push: true
+        cache-from: type=local,src=/home/runner/work/docker-cache
+        cache-to: type=local,dest=/home/runner/work/docker-cache-new,mode=max
         tags: |
           ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
