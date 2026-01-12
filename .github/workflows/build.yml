@@ -39,6 +39,12 @@ jobs:
         password: '${{ steps.auth.outputs.access_token }}'
         registry: '${{ env.REGION }}-docker.pkg.dev'
 
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+
     - name: Generate requirements.txt
       run: |
         uv export --format requirements.txt --output-file requirements.txt --no-dev
