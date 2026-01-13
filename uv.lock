@@ -4171,6 +4171,23 @@ wheels = [
 ]
 
 [[package]]
+name = "scrapbook"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ipython", version = "8.38.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "ipython", version = "9.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "jsonschema" },
+    { name = "pandas" },
+    { name = "papermill" },
+    { name = "pyarrow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/44/5f/cb73e0d1c92d73d992c6e77e050f7288e5a1503644822c2792a0e4bad996/scrapbook-0.5.0.tar.gz", hash = "sha256:6875bc804c3278a00544dbc232cb96e7cf8a563c36e02b17dcae329d05470cd0", size = 134804, upload-time = "2021-01-06T19:16:26.4Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/dc/68f9c96997dffbf3632bebe0d88077a519aa2a74585834e84d6690243825/scrapbook-0.5.0-py3-none-any.whl", hash = "sha256:3ae3172a160fbdc6c9bd7941e6cb9f105d53b813f4a059211960c88413f91c8e", size = 34681, upload-time = "2021-01-06T19:16:24.254Z" },
+]
+
+[[package]]
 name = "seaborn"
 version = "0.13.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4308,6 +4325,7 @@ dependencies = [
     { name = "polars" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "scrapbook" },
     { name = "seaborn" },
     { name = "torch" },
     { name = "tqdm" },
@@ -4327,6 +4345,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.36.1" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "requests", specifier = ">=2.32.5" },
+    { name = "scrapbook", specifier = ">=0.5.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "torch", specifier = "<2.4" },
     { name = "tqdm", specifier = ">=4.67.1" },
