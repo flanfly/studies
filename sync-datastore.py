@@ -1,26 +1,65 @@
-import os
-
-# import itertools as it
-# import posixpath
-# import asyncio
-# from asyncio import gather, Semaphore
-# import aiohttp
-# import aiobotocore.session
 import botocore
 import botocore.config as botoconfig
+from aiobotocore.session import get_session as boto_session
 
-# from collections import namedtuple
-# from typing import Dict, Tuple, Iterable
-# from datetime import datetime
-# from urllib.parse import urlparse
-# from tqdm.asyncio import tqdm
-# import requests
+import asyncio
+import aiohttp
+from tqdm.asyncio import tqdm
+
+import os
+from posixpath import join, basename
+import more_itertools as it
+from urllib.parse import urlparse
+import re
+from datetime import date, datetime
+import io
+import zipfile
+from hashlib import sha256
+
+import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pyarrow import fs
 
 from dotenv import load_dotenv
+import logging as l
+
+from typing import Dict, Iterable, Tuple, Set, NamedTuple, List
+from collections import namedtuple
+from dataclasses import dataclass
+
+Pair = namedtuple("Pair", ["base", "quote"])
+
+
+@dataclass(frozen=True, slots=True)
+class Obj:
+    key: str
+    bucket: str
+    last_modified: datetime
+    date: date
+    pair: str
+    public_url: str
+
+    def __init__(self, bucket: str, key: str, last_modified: datetime):
+        pair, day = parse_binance_filename(key)
+
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "bucket", bucket)
+        object.__setattr__(self, "last_modified", last_modified)
+        object.__setattr__(self, "date", day)
+        object.__setattr__(self, "pair", pair)
+        object.__setattr__(
+            self,
+            "public_url",
+            f"https://s3.ap-northeast-1.amazonaws.com/{bucket}/{key}",
+        )
+
+
+class TransientError(Exception):
+    pass
+
 
 load_dotenv()
-
-# from typing import Tuple, Dict, Iterable
 
 BINANCE_API_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 BINANCE_VISION_DAILY_SPOT_ARCHIVE = (
@@ -30,171 +69,13 @@ BINANCE_VISION_DAILY_SPOT_ARCHIVE = (
 R2_ENDPOINT_URL = os.environ.get(
     "R2_ENDPOINT_URL", "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
 )
-DATASTORE_BUCKET = f"r2://studies-binance-archive/spot-1m/%s"
+MIRROR_BUCKET = f"r2://studies-binance-store/spot-1m-mirror/"
+ONE_MINUTE_BUCKET = f"r2://studies-binance-store/spot-1m-store/"
+ONE_DAY_FILE = f"r2://studies-binance-store/spot-1d.parquet"
 
-# S3_REQ_SEMAPHORE = Semaphore(25)
-#
-#
-# async def main():
-#    await tqdm.gather(
-#        *map(
-#            lambda pair: sync_s3_and_r2(
-#                BINANCE_VISION_DAILY_SPOT_ARCHIVE % pair,
-#                posixpath.join(DATASTORE_BUCKET, pair),
-#            ),
-#            spot_pairs().keys(),
-#        )
-#    )
-#
-#
-# def spot_pairs() -> Dict[str, Tuple[str, str]]:
-#    resp = requests.get(BINANCE_API_EXCHANGE_INFO)
-#    resp.raise_for_status()
-#
-#    data = resp.json()
-#
-#    pairs = dict()
-#    for s in data["symbols"]:
-#        if s["isSpotTradingAllowed"] is not True:
-#            continue
-#
-#        pairs[s["symbol"]] = (s["baseAsset"], s["quoteAsset"])
-#
-#    return pairs
-#
-#
-# async def sync_s3_and_r2(s3str: str, r2str: str):
-#    s3url = urlparse(s3str)
-#    r2url = urlparse(r2str)
-#
-#    if s3url.scheme != "s3":
-#        raise ValueError("URL must start with s3://")
-#    if r2url.scheme != "r2":
-#        raise ValueError("URL must start with r2:// for R2")
-#
-#    srcbkt = s3url.netloc
-#    srcprefix = s3url.path.lstrip("/")
-#
-#    dstbkt = r2url.netloc
-#    dstprefix = r2url.path.lstrip("/")
-#
-#    sess = aiobotocore.session.get_session()
-#    async with sess.create_client(
-#        "s3", config=botoconfig.Config(signature_version=botocore.UNSIGNED)
-#    ) as s3, sess.create_client(
-#        "s3",
-#        aws_access_key_id=os.getenv("R2_ACCESS_KEY"),
-#        aws_secret_access_key=os.getenv("R2_SECRET_KEY"),
-#        endpoint_url=f"""https://{os.getenv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com""",
-#        region_name="auto",
-#    ) as r2:
-#        s3keys, r2keys = await gather(
-#            catalog_s3_objects(s3, srcbkt, srcprefix),
-#            catalog_s3_objects(r2, dstbkt, dstprefix),
-#        )
-#
-#        seen = set()
-#        for k in s3keys.keys():
-#            bn = os.path.basename(k)
-#            if bn in seen:
-#                raise ValueError(f"Duplicate S3 object basename detected: {bn}")
-#            seen.add(bn)
-#
-#        Obj = namedtuple("Obj", ["key", "updated"])
-#        s3objs = {os.path.basename(k): Obj(k, v) for k, v in s3keys.items()}
-#        r2objs = {os.path.basename(k): Obj(k, v) for k, v in r2keys.items()}
-#
-#        missing = set(s3objs.keys()) - set(r2objs.keys())
-#        outdated = filter(
-#            lambda k: s3objs[k].updated > r2objs[k].updated,
-#            set(s3objs.keys()).intersection(set(r2objs.keys())),
-#        )
-#        superfluous = set(r2objs.keys()) - set(s3objs.keys())
-#
-#        await gather(
-#            remove_r2_objects(r2, dstbkt, map(lambda f: r2objs[f].key, superfluous)),
-#            copy_s3_object(
-#                s3,
-#                r2,
-#                srcbkt,
-#                dstbkt,
-#                dstprefix,
-#                map(lambda f: s3objs[f].key, missing | set(outdated)),
-#            ),
-#        )
-#
-#
-# async def remove_r2_objects(r2, dstbkt: str, keys: Iterable[str]):
-#    for batch in it.batched(tqdm(list(keys), "delete superfluous file"), 1000):
-#        with S3_REQ_SEMAPHORE:
-#            print(f"Deleting r2://{dstbkt}/{{{', '.join(batch)}}}")
-#            await r2.delete_objects(
-#                Bucket=dstbkt, Delete={"Objects": [{"Key": k} for k in batch]}
-#            )
-#
-#
-# async def copy_s3_object(
-#    s3, r2, srcbkt: str, dstbkt: str, dstprefix: str, keys: Iterable[str]
-# ):
-#    srcurls = dict(
-#        map(
-#            lambda key: (
-#                key,
-#                [
-#                    f"https://s3.amazonaws.com/{srcbkt}/{key}",
-#                    posixpath.join(dstprefix, os.path.basename(key)),
-#                ],
-#            ),
-#            keys,
-#        )
-#    )
-#
-#    for key, (s3url, r2key) in tqdm(srcurls.items(), "copy missing/outdated file"):
-#        with S3_REQ_SEMAPHORE:
-#            print(f"Copying {s3url} to r2://{dstbkt}/{r2key}")
-#            try:
-#                async with aiohttp.ClientSession() as sess:
-#                    async with sess.get(s3url) as resp:
-#                        resp.raise_for_status()
-#                        await r2.put_object(
-#                            Bucket=dstbkt,
-#                            Key=r2key,
-#                            Body=await resp.read(),  # For small files (klines), reading into RAM is faster/safer
-#                            ContentType=resp.headers.get("Content-Type"),
-#                        )
-#            except Exception as e:
-#                print(f"Failed to copy {s3url}: {e}")
-#
-#
-# async def catalog_s3_objects(client, bucket: str, prefix: str) -> Dict[str, datetime]:
-#    paginator = client.get_paginator("list_objects_v2")
-#    obj_map = {}
-#
-#    async with S3_REQ_SEMAPHORE:
-#        async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-#            for obj in page.get("Contents", []):
-#                if not obj["Key"].endswith("/"):
-#                    obj_map[obj["Key"]] = obj["LastModified"]
-#    return obj_map
+EPOCH_S_MS_THRESHOLD = 10_000_000_000
 
-import asyncio
-import aiohttp
-from aiobotocore.session import get_session as boto_session
-from os.path import basename
-import logging as log
-import more_itertools as it
-from urllib.parse import urlparse
-from tqdm.asyncio import tqdm
-
-from typing import Dict, Iterable
-from collections import namedtuple
-
-Pair = namedtuple("Pair", ["base", "quote"])
-Obj = namedtuple("Obj", ["key", "last_modified"])
-
-BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
-
-log.basicConfig(level=log.INFO)
+l.basicConfig(level=l.INFO)
 
 
 def new_r2(sess):
@@ -207,42 +88,111 @@ def new_r2(sess):
     )
 
 
+def new_r2_fs():
+    return fs.S3FileSystem(
+        access_key=os.getenv("R2_ACCESS_KEY"),
+        secret_key=os.getenv("R2_SECRET_KEY"),
+        endpoint_override=f"""https://{os.getenv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com""",
+        region="auto",
+    )
+
+
 def new_s3(sess):
     return sess.create_client(
         "s3", config=botoconfig.Config(signature_version=botocore.UNSIGNED)
     )
 
 
+def parse_binance_filename(filename: str) -> Tuple[str, date]:
+    # ETHBTC-1m-2021-01-01.zip
+    m = re.match(
+        r"^(\w+)-\w+-(\d{4}-\d{2}-\d{2}).(csv|zip(.CHECKSUM)?)$", basename(filename)
+    )
+    if m is None:
+        raise ValueError(f"Unexpected archive filename format: {filename}")
+
+    pair = m[1]
+    day = date.fromisoformat(m[2])
+    return pair, day
+
+
+def parse_object_store_url(url: str) -> Tuple[str, str]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("s3", "r2"):
+        raise ValueError("URL must start with s3:// or r2://")
+
+    bucket = parsed.netloc
+    prefix = parsed.path.lstrip("/")
+
+    return bucket, prefix
+
+
 async def main():
-    pairs = await retrieve_spot_pairs()
+    async with aiohttp.ClientSession() as httpsess:
+        pairs = await retrieve_spot_pairs(httpsess)
 
-    sess = boto_session()
-    async with new_s3(sess) as s3, new_r2(sess) as r2:
-        for pair in pairs.keys():
-            log.info(f"Syncing pair {pair}")
-            await sync_archive_for_prefix(
-                s3,
-                r2,
-                BINANCE_VISION_DAILY_SPOT_ARCHIVE % pair,
-                DATASTORE_BUCKET % pair,
-            )
-
-
-async def retrieve_spot_pairs() -> Dict[str, Pair]:
-    async with aiohttp.ClientSession() as sess:
-        async with sess.get(BINANCE_EXCHANGE_INFO_URL) as resp:
-            return {
-                symbol["symbol"]: Pair(
-                    base=symbol["baseAsset"], quote=symbol["quoteAsset"]
+        botosess = boto_session()
+        async with new_s3(botosess) as s3, new_r2(botosess) as r2:
+            for pair in list(pairs.keys()):
+                l.info(f"Fetching changes for {pair}")
+                avail, have = await asyncio.gather(
+                    catalog_bucket(s3, BINANCE_VISION_DAILY_SPOT_ARCHIVE % pair),
+                    catalog_bucket(r2, MIRROR_BUCKET),
                 )
-                for symbol in (await resp.json())["symbols"]
-                if symbol["isSpotTradingAllowed"]
-            }
+
+                have = set(
+                    [
+                        basename(obj.key).replace(".csv", ".zip")
+                        for obj in have
+                        if obj.key.endswith(".csv")
+                    ]
+                )
+                todo = [obj for obj in avail if basename(obj.key) not in have]
+
+                l.info(f"Verifying and extracting pair {pair}")
+                changed_days = await verify_and_extract_partitioned(
+                    httpsess,
+                    todo,
+                    r2,
+                    MIRROR_BUCKET,
+                )
+
+            changed_months = set(
+                [
+                    (day.year, day.month)
+                    for days in changed_days.values()
+                    for day in days
+                ]
+            )
+            for year, month in changed_months:
+                l.info(f"Compacting year={year}, month={month} to parquet")
+                partition = f"year={year}/month={month:02d}"
+                objs = await catalog_bucket(r2, join(MIRROR_BUCKET, partition))
+
+                await compact_prefix_to_parquet(
+                    r2,
+                    objs,
+                    join(ONE_MINUTE_BUCKET, partition, f"data.parquet"),
+                )
+
+            l.info("Derive daily klines")
+            files = await catalog_hive(r2, ONE_MINUTE_BUCKET)
+            await resample_daily_klines(r2, files, ONE_DAY_FILE)
 
 
-async def catalog_bucket(c, bucket: str, prefix: str) -> Dict[str, Obj]:
-    ret: Dict[str, Obj] = {}
+async def retrieve_spot_pairs(session: aiohttp.ClientSession) -> Dict[str, Pair]:
+    async with session.get(BINANCE_API_EXCHANGE_INFO) as resp:
+        return {
+            symbol["symbol"]: Pair(base=symbol["baseAsset"], quote=symbol["quoteAsset"])
+            for symbol in (await resp.json())["symbols"]
+            if symbol["isSpotTradingAllowed"]
+        }
 
+
+async def catalog_hive(c, url: str) -> List[str]:
+    ret: List[str] = []
+
+    bucket, prefix = parse_object_store_url(url)
     pg = c.get_paginator("list_objects_v2")
     async for page in pg.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
@@ -252,164 +202,295 @@ async def catalog_bucket(c, bucket: str, prefix: str) -> Dict[str, Obj]:
             bn = basename(key)
             if bn.startswith("."):
                 continue
-            if bn in ret:
-                log.warn(f"Dup archive: {ret[bn].key}, {key})")
+
+            m = re.match(r"^[\w,-]+/year=(\d{4})/month=(\d{2})/\w+.parquet$", key)
+            if m is None:
+                l.warning(f"Unexpected file in hive partitioned store: {key}")
                 continue
-            ret[bn] = Obj(key=key, last_modified=obj["LastModified"])
+            ret.append(f"s3://{bucket}/{key}")
 
     return ret
 
 
-async def sync_archive_for_prefix(s3, r2, src: str, dst: str):
-    srcurl = urlparse(src)
-    dsturl = urlparse(dst)
+async def catalog_bucket(c, url: str) -> List[Obj]:
+    ret: List[Obj] = []
 
-    if srcurl.scheme != "s3":
-        raise ValueError("source URL must start with s3://")
-    if dsturl.scheme != "r2":
-        raise ValueError("destination URL must start with r2://")
+    bucket, prefix = parse_object_store_url(url)
+    pg = c.get_paginator("list_objects_v2")
+    async for page in pg.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            bn = basename(key)
+            if bn.startswith("."):
+                continue
+            ret.append(Obj(bucket=bucket, key=key, last_modified=obj["LastModified"]))
 
-    srcbkt = srcurl.netloc
-    srcprefix = srcurl.path.lstrip("/")
+    return ret
 
-    dstbkt = dsturl.netloc
-    dstprefix = dsturl.path.lstrip("/")
 
-    srcobjs, dstobjs = await asyncio.gather(
-        catalog_bucket(s3, srcbkt, srcprefix), catalog_bucket(r2, dstbkt, dstprefix)
+def decompress_csv(zip_bytes):
+    with io.BytesIO(zip_bytes) as bio:
+        with zipfile.ZipFile(bio) as zf:
+            if len(zf.namelist()) != 1:
+                raise ValueError("Unexpected number of files in zip archive.")
+
+            csv_filename = zf.namelist()[0]
+            if not csv_filename.endswith(".csv"):
+                raise ValueError("Expected a CSV file in the zip archive.")
+
+            with zf.open(csv_filename) as csv_file:
+                return csv_file.read()
+
+
+async def process_single_archive(
+    r2, session: aiohttp.ClientSession, dsturl: str, obj: Obj
+) -> pl.DataFrame:
+    async with session.get(obj.public_url) as resp:
+        body = await asyncio.to_thread(decompress_csv, await resp.read())
+
+    dstbkt, dstkey = parse_object_store_url(
+        join(
+            dsturl,
+            f"year={obj.date.year}",
+            f"month={obj.date.month:02d}",
+            f"day={obj.date.day:02d}",
+            basename(obj.key),
+        )
     )
 
-    missing = set(srcobjs.keys()) - set(dstobjs.keys())
-    superfluous = set(dstobjs.keys()) - set(srcobjs.keys())
-    outdated = {
-        k
-        for k in (set(srcobjs.keys()) & set(dstobjs.keys()))
-        if srcobjs[k].last_modified > dstobjs[k].last_modified
+    await r2.put_object(Bucket=dstbkt, Key=dstkey, Body=body)
+
+
+async def read_csv_object(r2, obj: Obj) -> pl.DataFrame:
+    resp = await r2.get_object(Bucket=obj.bucket, Key=obj.key)
+    async with resp["Body"] as body:
+        return await asyncio.to_thread(transform_csv_data, await body.read(), obj.pair)
+
+
+async def read_parquet_object(r2, url: str) -> pl.DataFrame:
+    bucket, key = parse_object_store_url(url)
+    resp = await r2.get_object(Bucket=bucket, Key=key)
+    async with resp["Body"] as body:
+        return pl.read_parquet(io.BytesIO(await body.read()))
+
+
+def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
+    return (
+        pl.read_csv(
+            io.BytesIO(data),
+            has_header=False,
+            new_columns=[
+                "open_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "base_volume",
+                "close_time",
+                "quote_volume",
+                "trades",
+                "taker_buy_base_volume",
+                "taker_buy_quote_volume",
+                "ignore",
+            ],
+            schema_overrides={
+                "open_time": pl.Int64,
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "base_volume": pl.Float64,
+                "close_time": pl.Int64,
+                "quote_volume": pl.Float64,
+                "trades": pl.Int64,
+                "taker_buy_base_volume": pl.Float64,
+                "taker_buy_quote_volume": pl.Float64,
+                "ignore": pl.Int64,
+            },
+        )
+        .with_columns(
+            [
+                pl.when(pl.col("open_time") > EPOCH_S_MS_THRESHOLD)
+                .then(pl.from_epoch("open_time", time_unit="ms"))
+                .otherwise(pl.from_epoch("open_time", time_unit="s"))
+                .dt.replace_time_zone("UTC")
+                .alias("open_time"),
+                pl.when(pl.col("close_time") > EPOCH_S_MS_THRESHOLD)
+                .then(pl.from_epoch("close_time", time_unit="ms"))
+                .otherwise(pl.from_epoch("close_time", time_unit="s"))
+                .dt.replace_time_zone("UTC")
+                .alias("ts"),
+                pl.lit(pair).alias("symbol"),
+            ]
+        )
+        .drop("ignore")
+        .sort("ts")
+    )
+
+
+async def compact_prefix_to_parquet(r2, objs: List[Obj], pqurl: str):
+    wrfd = new_r2_fs()
+    objs = sorted(objs, key=lambda o: (o.date, o.pair))
+    writer = None
+    num = (len(objs) + 19) // 20
+
+    for batch in tqdm(it.batched(objs, 20), total=num, desc="compacting to parquet"):
+        fut = [read_csv_object(r2, obj) for obj in batch]
+        df = pl.concat(await asyncio.gather(*fut))
+        table = df.to_arrow()
+
+        if writer is None:
+            schema = table.schema
+            writer = pq.ParquetWriter(
+                pqurl.replace("r2://", ""),
+                schema,
+                filesystem=wrfd,
+                compression="zstd",
+            )
+
+        writer.write_table(table)
+
+
+async def resample_daily_klines(r2, files: List[str], pqurl: str):
+    wrfd = new_r2_fs()
+    writer = None
+
+    files = sorted(files)
+    num = (len(files) + 19) // 20
+
+    for batch in tqdm(it.batched(files, 20), total=num, desc="resampling daily klines"):
+        fut = [read_parquet_object(r2, file) for file in batch]
+        for df in await asyncio.gather(*fut):
+            daily = (
+                df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
+                .group_by(["ts", "symbol"])
+                .agg(
+                    [
+                        pl.col("open").first().alias("open"),
+                        pl.col("high").max().alias("high"),
+                        pl.col("low").min().alias("low"),
+                        pl.col("close").last().alias("close"),
+                        pl.col("base_volume").sum().alias("base_volume"),
+                        pl.col("quote_volume").sum().alias("quote_volume"),
+                        pl.col("close_time").max().alias("close_time"),
+                        pl.col("trades").sum().alias("trades"),
+                        pl.col("taker_buy_base_volume")
+                        .sum()
+                        .alias("taker_buy_base_volume"),
+                        pl.col("taker_buy_quote_volume")
+                        .sum()
+                        .alias("taker_buy_quote_volume"),
+                    ]
+                )
+                .sort(["ts", "symbol"])
+            )
+
+            table = daily.to_arrow()
+            if writer is None:
+                schema = table.schema
+                writer = pq.ParquetWriter(
+                    pqurl.replace("r2://", ""),
+                    schema,
+                    filesystem=wrfd,
+                    compression="zstd",
+                )
+            writer.write_table(table)
+
+
+extract_object_partitioned_sem = asyncio.Semaphore(20)
+
+
+async def extract_object_partitioned(
+    session: aiohttp.ClientSession, r2, prefix, zip, chksm, csv
+) -> Tuple[str, date] | None:
+    async with extract_object_partitioned_sem:
+        # see if csv exists and is up to date
+        if csv is not None:
+            if csv.last_modified >= zip.last_modified:
+                return None
+            else:
+                l.info(f"Archive {zip} outdated, re-extracting.")
+
+        # fetch zip and verify checksum
+        async with session.get(zip.public_url) as resp:
+            compressed = await resp.read()
+
+        if chksm is not None:
+            if chksm.last_modified >= zip.last_modified:
+                got = sha256(compressed).hexdigest()
+                async with session.get(chksm.public_url) as resp:
+                    want = (await resp.read()).decode("utf-8").split()[0]
+
+                if got != want:
+                    l.info(f"Archive {zip} checksum mismatch: got {got}, want {want}")
+                    raise TransientError("Checksum mismatch, re-download required.")
+        else:
+            l.warn(f"Archive {zip} missing checksum file, skipping verification.")
+
+        # decompress csv and upload
+        try:
+            csv_data = decompress_csv(compressed)
+        except Exception as e:
+            l.error(f"Failed to decompress archive {zip}: {e}")
+            raise TransientError("Decompression failed, re-download required.") from e
+
+        pair, day = parse_binance_filename(zip.key)
+        dsturl = join(
+            prefix,
+            f"year={day.year}",
+            f"month={day.month:02d}",
+            f"day={day.day:02d}",
+            basename(zip.key).replace(".zip", ".csv"),
+        )
+        dstbkt, dstkey = parse_object_store_url(dsturl)
+        await r2.put_object(
+            Bucket=dstbkt,
+            Key=dstkey,
+            Body=csv_data,
+        )
+
+        return pair, day
+
+
+async def verify_and_extract_partitioned(
+    session, objs: List[Obj], r2, prefix: str
+) -> Dict[str, Set[date]]:
+    by_basename = {basename(obj.key): obj for obj in objs}
+
+    # zip -> checksum
+    files: Dict[Obj, Tuple[Obj | None, Obj | None]] = {
+        zip: (
+            by_basename.get(basename(zip.key).replace(".zip", ".zip.CHECKSUM")),
+            by_basename.get(basename(zip.key).replace(".zip", ".csv")),
+        )
+        for zip in [obj for obj in by_basename.values() if obj.key.endswith(".zip")]
     }
 
-    await asyncio.gather(
-        copy_objects(
-            s3,
-            r2,
-            srcbkt,
-            dstbkt,
-            dstprefix,
-            map(lambda k: srcobjs[k], missing | outdated),
-        ),
-        delete_objects(r2, dstbkt, map(lambda k: dstobjs[k], superfluous)),
-    )
-
-
-async def delete_objects(r2, dstbkt, objs: Iterable[Obj]):
     fut = [
-        r2.delete_objects(
-            Bucket=dstbkt,
-            Delete={"Objects": [{"Key": o.key} for o in b], "Quiet": True},
-        )
-        for b in it.batched(objs, 1000)
+        extract_object_partitioned(session, r2, prefix, zip, chksm, csv)
+        for zip, (chksm, csv) in files.items()
     ]
-    await asyncio.gather(*fut)
+    if len(fut) == 0:
+        return {}
 
-
-copy_objects_sem = asyncio.Semaphore(20)
-
-
-async def copy_objects(s3, r2, srcbkt, dstbkt, dstprefix, objs: Iterable[Obj]):
-    async with aiohttp.ClientSession() as sess:
-
-        async def _do(s3, r2, sess, srcbkt, dstbkt, obj: Obj):
-            async with copy_objects_sem:
-                url = f"https://s3.amazonaws.com/{srcbkt}/{obj.key}"
-                async with sess.get(url) as resp:
-                    await r2.put_object(
-                        Bucket=dstbkt,
-                        Key=os.path.join(dstprefix, obj.key),
-                        Body=await resp.read(),
-                    )
-
-        objs = list(objs)
-        fut = [_do(s3, r2, sess, srcbkt, dstbkt, obj) for obj in objs]
-        await tqdm.gather(
-            *fut,
-            total=len(objs),
-            desc=f"copying objects from {basename(srcbkt)} to {os.path.join(dstbkt, dstprefix)}",
-        )
-
-
-def download_daily_archive():
-    retry = False
-
-    sync_s3()
-    seen = verify_and_extract_daily_archives()
-
-    con = duckdb.connect("binance-1m-spot", hive_partitioning=True)
-    todo = con.sql(
-        """
-        all ts, symbol missing from ?
-    """,
-        seen,
-    )
-
-    for year in todo:
-        pl.concat(todo[year]).sort(["ts", "symbol"]).write_parquet(
-            f"binance-1m-spot/year={year}/data-{ord}.parquet"
-        )
-
-    compact_1m_partitions()
-
-
-def derive_1d_klines():
-    for year in s3.ls_dirs("binance-1m-spot/"):
-        s3.rm(f"binance-1d-spot/year={year}/")
-
-        check_its_sorted("binance-1m-spot/year={year}/*.parquet", ["ts", "symbol"])
-        pl.read_parquet(f"binance-1m-spot/year={year}/*.parquet").with_columns(
-            [(pl.col("ts").dt.truncate("1d")).alias("ts_1d")]
-        ).groupby(["ts_1d", "symbol"]).agg(
+    return dict(
+        it.map_reduce(
             [
-                pl.col("open").first().alias("open"),
-                pl.col("high").max().alias("high"),
-                pl.col("low").min().alias("low"),
-                pl.col("close").last().alias("close"),
-                pl.col("volume").sum().alias("volume"),
-            ]
-        ).sort(
-            ["ts_1d", "symbol"]
-        ).write_parquet(
-            f"binance-1d-spot/year={year}/data.parquet"
+                (x[0], x[1])
+                for x in await tqdm.gather(
+                    *fut,
+                    total=len(fut),
+                    desc="verifying and extracting daily archives",
+                )
+                if x is not None
+            ],
+            keyfunc=lambda a: a[0],
+            valuefunc=lambda a: a[1],
+            reducefunc=set,
         )
-
-
-def verify_and_extract_daily_archives():
-    seen = dict()
-
-    for zip_file in s3.ls("*.zip"):
-        try:
-            symbol, date = re.match(
-                r"^(.*)_(\d{4}-\d{2}-\d{2})\.zip$", zip_file
-            ).groups()
-            if symbol not in seen:
-                seen[symbol] = [date]
-            else:
-                seen[symbol].append(date)
-        except Exception as e:
-            l.warn(f"Failed to parse filename {zip_file}: {e}")
-            continue
-
-        if not s3.exists(zip_file.replace(".zip", ".csv")):
-            if s3.exists(zip_file.replace(".zip", ".CHECKSUM")):
-                if s3.read(zip_file.replace(".zip", ".CHECKSUM")) != s3.sha256(
-                    zip_file
-                ):
-                    l.info(f"Archive {zip_file} checksum mismatch, re-extracting.")
-                    s3.remove(zip_file)
-                    raise TransientError("Checksum mismatch, re-download required.")
-            else:
-                l.warn(f"Archive {zip_file} missing checksum file, re-extracting.")
-            s3.write(zip.unpack(zip_file), zip_file.replace(".zip", ".csv"))
-            l.info(f"Extracted archive {zip_file}.")
-
-    return seen
+    )
 
 
 if __name__ == "__main__":
