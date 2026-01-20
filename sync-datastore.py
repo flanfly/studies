@@ -23,6 +23,7 @@ from pyarrow import fs
 
 from dotenv import load_dotenv
 import logging as l
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from typing import Dict, Iterable, Tuple, Set, NamedTuple, List
 from collections import namedtuple
@@ -66,16 +67,17 @@ BINANCE_VISION_DAILY_SPOT_ARCHIVE = (
     "s3://data.binance.vision/data/spot/daily/klines/%s/1m"
 )
 
-R2_ENDPOINT_URL = os.environ.get(
-    "R2_ENDPOINT_URL", "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
-)
 MIRROR_BUCKET = f"r2://studies-binance-store/spot-1m-mirror/"
 ONE_MINUTE_BUCKET = f"r2://studies-binance-store/spot-1m-store/"
 ONE_DAY_FILE = f"r2://studies-binance-store/spot-1d.parquet"
 
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
 
-l.basicConfig(level=l.INFO)
+l.basicConfig(
+    format="[%(asctime)s] %(levelname)s    %(message)s",
+    level=l.INFO,
+    datefmt="%H:%M:%S",
+)
 
 
 def new_r2(sess):
@@ -133,20 +135,21 @@ async def main():
 
         botosess = boto_session()
         async with new_s3(botosess) as s3, new_r2(botosess) as r2:
-            for pair in list(pairs.keys()):
+            l.info("Catalog existing mirrored files")
+            have = set(
+                [
+                    basename(obj.key).replace(".csv", ".zip")
+                    for obj in await catalog_bucket(r2, MIRROR_BUCKET)
+                    if obj.key.endswith(".csv")
+                ]
+            )
+
+            for pair in tqdm(list(pairs.keys()), desc="processing pairs", position=0):
                 l.info(f"Fetching changes for {pair}")
-                avail, have = await asyncio.gather(
-                    catalog_bucket(s3, BINANCE_VISION_DAILY_SPOT_ARCHIVE % pair),
-                    catalog_bucket(r2, MIRROR_BUCKET),
+                avail = await catalog_bucket(
+                    s3, BINANCE_VISION_DAILY_SPOT_ARCHIVE % pair
                 )
 
-                have = set(
-                    [
-                        basename(obj.key).replace(".csv", ".zip")
-                        for obj in have
-                        if obj.key.endswith(".csv")
-                    ]
-                )
                 todo = [obj for obj in avail if basename(obj.key) not in have]
 
                 l.info(f"Verifying and extracting pair {pair}")
@@ -164,7 +167,10 @@ async def main():
                     for day in days
                 ]
             )
-            for year, month in changed_months:
+
+            for year, month in tqdm(
+                changed_months, desc="compacting months", position=0
+            ):
                 l.info(f"Compacting year={year}, month={month} to parquet")
                 partition = f"year={year}/month={month:02d}"
                 objs = await catalog_bucket(r2, join(MIRROR_BUCKET, partition))
@@ -336,7 +342,13 @@ async def compact_prefix_to_parquet(r2, objs: List[Obj], pqurl: str):
     writer = None
     num = (len(objs) + 19) // 20
 
-    for batch in tqdm(it.batched(objs, 20), total=num, desc="compacting to parquet"):
+    for batch in tqdm(
+        it.batched(objs, 20),
+        total=num,
+        desc="compacting to parquet",
+        position=1,
+        leave=False,
+    ):
         fut = [read_csv_object(r2, obj) for obj in batch]
         df = pl.concat(await asyncio.gather(*fut))
         table = df.to_arrow()
@@ -360,7 +372,9 @@ async def resample_daily_klines(r2, files: List[str], pqurl: str):
     files = sorted(files)
     num = (len(files) + 19) // 20
 
-    for batch in tqdm(it.batched(files, 20), total=num, desc="resampling daily klines"):
+    for batch in tqdm(
+        it.batched(files, 20), total=num, desc="resampling daily klines", position=0
+    ):
         fut = [read_parquet_object(r2, file) for file in batch]
         for df in await asyncio.gather(*fut):
             daily = (
@@ -483,6 +497,8 @@ async def verify_and_extract_partitioned(
                     *fut,
                     total=len(fut),
                     desc="verifying and extracting daily archives",
+                    position=1,
+                    leave=False,
                 )
                 if x is not None
             ],
@@ -494,4 +510,9 @@ async def verify_and_extract_partitioned(
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    with logging_redirect_tqdm():
+        try:
+            asyncio.run(main())
+            l.info("Sync'd")
+        except Exception as e:
+            l.exception("Fatal error during sync:")
