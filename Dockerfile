@@ -1,11 +1,23 @@
-from asia-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-3.py310:latest
+from nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
+
+label org.opencontainers.image.source=https://github.com/flanfly/studies
+
+copy --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Set environment variables
+env PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 workdir /app
 
-copy requirements.txt .
+run uv python install 3.10
 
-run pip install -r requirements.txt --no-cache-dir
+copy pyproject.toml uv.lock ./
+
+run uv sync --frozen --no-dev --no-install-project
 
 copy . .
 
-entrypoint ["python", "vertex-ai-main.py"]
+entrypoint ["uv", "python", "-v"]

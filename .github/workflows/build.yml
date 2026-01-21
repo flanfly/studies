@@ -17,72 +17,34 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: 'read'
-      id-token: 'write'
+      contents: read
+      id-token: write
+      packages: write
 
     steps:
-    - name: Maximize Build Space
-      uses: easimon/maximize-build-space@v10
-      with:
-        root-reserve-mb: 512
-        swap-size-mb: 1024
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Move Docker Root to /home
-      run: |
-        # Stop Docker
-        sudo systemctl stop docker
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-        # Create the new directory on the larger partition
-        sudo mkdir -p /home/runner/work/docker-root
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/flanfly/studies
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
 
-        # Create or update daemon.json to point to the new location
-        echo '{ "data-root": "/home/runner/work/docker-root" }' | sudo tee /etc/docker/daemon.json
-
-        # Sync existing data (optional but recommended for stability)
-        sudo rsync -aP /var/lib/docker/ /home/runner/work/docker-root/
-
-        # Restart Docker
-        sudo systemctl start docker
-        docker info | grep "Docker Root Dir"
-
-    - name: Checkout Code
-      uses: actions/checkout@v4
-
-    - id: 'auth'
-      name: 'Authenticate to Google Cloud'
-      uses: 'google-github-actions/auth@v2'
-      with:
-        token_format: 'access_token'
-        workload_identity_provider: '${{ env.WIF_PROVIDER }}'
-        service_account: '${{ env.WIF_SA }}'
-
-    - name: Docker Auth
-      uses: 'docker/login-action@v3'
-      with:
-        username: 'oauth2accesstoken'
-        password: '${{ steps.auth.outputs.access_token }}'
-        registry: '${{ env.REGION }}-docker.pkg.dev'
-
-    - name: Set up uv
-      uses: astral-sh/setup-uv@v5
-      with:
-        enable-cache: true
-        cache-dependency-glob: "uv.lock"
-
-    - name: Generate requirements.txt
-      run: |
-        uv export --format requirements.txt --output-file requirements.txt --no-dev
-
-    - name: Build and Push Docker Image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: |
-          ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
