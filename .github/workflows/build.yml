@@ -70,8 +70,10 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     needs: build
+
     permissions:
       packages: write
+
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -92,10 +94,11 @@ jobs:
 
       - name: Create manifest list and push
         run: |
+          cd /tmp/digests
           docker buildx imagetools create \
             -t ${{ env.IMAGE_NAME }}:latest \
             -t ${{ env.IMAGE_NAME }}:master \
-            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' /tmp/digests/*)          
+            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Inspect image
         run: |
