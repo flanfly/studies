@@ -2,9 +2,14 @@ from nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
 
 label org.opencontainers.image.source=https://github.com/flanfly/studies
 
+run apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    git-lfs \
+    git-crypt \
+    && rm -rf /var/lib/apt/lists/*
+
 copy --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Set environment variables
 env PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -20,4 +25,4 @@ run uv sync --frozen --no-dev --no-install-project
 
 copy . .
 
-entrypoint ["uv", "python", "-v"]
+entrypoint ["run.sh"]
