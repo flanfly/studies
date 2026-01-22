@@ -15,6 +15,8 @@ from datetime import date, datetime
 import io
 import zipfile
 from hashlib import sha256
+import argparse
+import re
 
 import polars as pl
 import pyarrow as pa
@@ -129,9 +131,53 @@ def parse_object_store_url(url: str) -> Tuple[str, str]:
     return bucket, prefix
 
 
+def parse_pattern(arg_value: str) -> re.Pattern:
+    try:
+        return re.compile(arg_value)
+    except re.error as e:
+        raise argparse.ArgumentTypeError(f"Invalid regular expression: {e}")
+
+
 async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-s",
+        "--symbol-pattern",
+        type=parse_pattern,
+        help="PCRE pattern to filter trading pairs.",
+        default=".*",
+    )
+    parser.add_argument(
+        "-p",
+        "--archive-pattern",
+        type=parse_pattern,
+        help="PCRE pattern to filter archives.",
+        default=".*",
+    )
+    parser.add_argument(
+        "-l",
+        "--list",
+        action="store_true",
+        help="List available trading pairs and exit, -s is applied.",
+    )
+    args = parser.parse_args()
+
     async with aiohttp.ClientSession() as httpsess:
         pairs = await retrieve_spot_pairs(httpsess)
+
+        num_all = len(pairs)
+        pairs = {k: v for k, v in pairs.items() if args.symbol_pattern.match(k)}
+        num_sel = len(pairs)
+        if num_sel == 0:
+            l.error(f"no trading pairs match '{args.symbol_pattern.pattern}'.")
+            return
+        elif num_sel < num_all:
+            l.info(f"filtered {num_all - num_sel} pairs.")
+
+        if args.list:
+            for symbol, pair in pairs.items():
+                print(f"{symbol}: {pair.base}/{pair.quote}")
+            return
 
         botosess = boto_session()
         async with new_s3(botosess) as s3, new_r2(botosess) as r2:
