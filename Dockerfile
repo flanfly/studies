@@ -25,4 +25,4 @@ run uv sync --frozen --no-dev --no-install-project
 
 copy . .
 
-entrypoint ["run.sh"]
+entrypoint ["bash", "-c", "run.sh"]
