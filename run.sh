@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 KEY_PATH=$(mktemp -t git-crypt-key-XXXXXX)
 
