@@ -269,7 +269,9 @@ async def catalog_bucket(c, url: str) -> List[Obj]:
 
     bucket, prefix = parse_object_store_url(url)
     pg = c.get_paginator("list_objects_v2")
+    bar = tqdm(desc=f"cataloging {bucket}/{prefix}", position=0, unit="page")
     async for page in pg.paginate(Bucket=bucket, Prefix=prefix):
+        bar.update(1)
         for obj in page.get("Contents", []):
             key = obj["Key"]
             if key.endswith("/"):
@@ -278,6 +280,7 @@ async def catalog_bucket(c, url: str) -> List[Obj]:
             if bn.startswith("."):
                 continue
             ret.append(Obj(bucket=bucket, key=key, last_modified=obj["LastModified"]))
+    bar.close()
 
     return ret
 
