@@ -9,6 +9,8 @@ elif [ -f "$GIT_KEY_FILE" ]; then
     cp "$GIT_KEY_FILE" "$KEY_PATH"
 else
     echo "No GIT_KEY or GIT_KEY_FILE found. Skipping unlock."
+    rm -f "$KEY_PATH"
+    KEY_PATH=""
 fi
 
 if [ -f "$KEY_PATH" ]; then
@@ -17,7 +19,9 @@ if [ -f "$KEY_PATH" ]; then
         echo "*" > .git/info/exclude
     fi
 
-    git-crypt unlock "$KEY_PATH"
+    if git-crypt unlock "$KEY_PATH"; then
+        echo "credentials unlocked"
+    fi
     rm -f "$KEY_PATH"
 fi
 

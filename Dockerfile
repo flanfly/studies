@@ -8,7 +8,7 @@ run apt-get update && apt-get install -y --no-install-recommends \
     git-crypt \
     && rm -rf /var/lib/apt/lists/*
 
-copy --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+copy --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /bin/
 
 env PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
