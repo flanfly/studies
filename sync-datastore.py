@@ -7,6 +7,7 @@ import aiohttp
 from tqdm.asyncio import tqdm
 
 import os
+import sys
 from posixpath import join, basename
 import more_itertools as it
 from urllib.parse import urlparse
@@ -79,6 +80,7 @@ l.basicConfig(
     format="[%(asctime)s] %(levelname)s    %(message)s",
     level=l.INFO,
     datefmt="%H:%M:%S",
+    stream=sys.stdout,
 )
 
 
