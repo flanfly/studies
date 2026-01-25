@@ -16,12 +16,19 @@ fi
 if [ -f "$KEY_PATH" ]; then
     if [ ! -d ".git" ]; then
         git init -q
-        echo "*" > .git/info/exclude
     fi
 
-    if git-crypt unlock "$KEY_PATH"; then
-        echo "credentials unlocked"
-    fi
+    git ls-files --cached --others --exclude-standard | git check-attr --stdin filter | while read -r f; do
+      if grep -q 'filter: git-crypt' <<< "$f" ; then
+        file=$(cut -d: -f1 <<< "$f")
+        if [ -f "$file" ]; then
+          echo "decrypting $file"
+          cat "$file" | git-crypt smudge --key-file=$KEY_PATH > "$file".dec
+          mv "$file".dec "$file"
+        fi
+      fi
+    done
+
     rm -f "$KEY_PATH"
 fi
 
