@@ -210,6 +210,20 @@ async def main():
         action="store_true",
         help="List available trading pairs and exit, -s is applied.",
     )
+    parser.add_argument(
+        "-a",
+        "--available",
+        action="store_true",
+        help=
+        "List available archives for selected pairs and exit, -s is applied.")
+    parser.add_argument(
+        "-c",
+        "--compact",
+        action="store_true",
+        help=
+        "Only compact existing mirror data to parquet, do not sync new data, -s and -F are applied.",
+    )
+
     args = parser.parse_args()
 
     async with aiohttp.ClientSession() as httpsess:
@@ -228,8 +242,17 @@ async def main():
             for symbol, pair in pairs.items():
                 print(f"{symbol}: {pair.base}/{pair.quote}")
             return
+
         botosess = boto_session()
         async with new_s3(botosess) as s3, new_r2(botosess) as r2:
+            if args.available:
+                for symbol in pairs.keys():
+                    async for p in catalog_bucket(
+                            s3, make_binance_prefix(symbol, None, None, None)):
+                        if p.filename.endswith(".zip"):
+                            print(p.filename)
+                return
+
             if args.from_date is None:
                 args.from_date = await determine_start_date(r2, s3, "ETHBTC")
                 if args.from_date is None:
@@ -253,29 +276,17 @@ async def main():
             ]
             fut = [
                 exponential_backoff(
-                    lambda: extract_object_partitioned(
-                        httpsess,
-                        r2,
-                        i + ".zip",
-                        i + ".zip.CHECKSUM",
-                    )
-                )
-                for i in archives
+                    extract_object_partitioned,
+                    [httpsess, r2, i + ".zip", i + ".zip.CHECKSUM"],
+                ) for i in archives
             ]
-
-            await tqdm.gather(*fut, desc="synchronizing pairs", position=0)
-            return
-            changed_months = set(
-                [
-                    (day.year, day.month)
-                    for days in changed_days.values()
-                    for day in days
-                ]
-            )
-
-            for year, month in tqdm(
-                changed_months, desc="compacting months", position=0
-            ):
+            months = set([[p[1].month, p[1].year] for p in await tqdm.gather(
+                *fut, desc="synchronizing pairs", position=0)
+                          if p is not None])
+            l.info("Compacting monthly partitions to parquet")
+            for year, month in tqdm(months,
+                                    desc="compacting months",
+                                    position=0):
                 l.info(f"Compacting year={year}, month={month} to parquet")
                 partition = f"year={year}/month={month:02d}"
                 objs = [
@@ -286,13 +297,24 @@ async def main():
                 await compact_prefix_to_parquet(
                     r2,
                     objs,
-                    join(ONE_MINUTE_BUCKET, partition, f"data.parquet"),
+                    join(ONE_MINUTE_BUCKET, partition, "data.parquet"),
                 )
 
             l.info("Derive daily klines")
             files = await catalog_hive(r2, ONE_MINUTE_BUCKET)
             await resample_daily_klines(r2, files, ONE_DAY_FILE)
 
+async def action_synchronize(s3, r2, session: aiohttp.ClientSession,
+                             pairs: List[str], start: date, end: date):
+    pass
+
+async def action_list_symbols(session: aiohttp.ClientSession):
+    pass
+
+async def action_catalog_available_archives(s3, pairs: List[str]):
+    pass
+
+async def action_compact_to_parquet(r2, pairs: List[str], start: date):
 
 async def bisect_bucket(
     c, pair: str, horizon: date, make_prefix: Callable[[str, date], str], find_end=True
@@ -305,7 +327,7 @@ async def bisect_bucket(
         mid = low + timedelta(days=(high - low).days // 2)
         u = urlparse(make_prefix(pair, mid))
         try:
-            resp = await c.head_object(Bucket=u.netloc, Key=u.path.lstrip("/"))
+            await c.head_object(Bucket=u.netloc, Key=u.path.lstrip("/"))
             ret = mid
             if find_end:
                 low = mid + timedelta(days=1)
@@ -627,6 +649,7 @@ async def resample_daily_klines(r2, files: List[str], pqurl: str):
 
 async def exponential_backoff(
     fn: Callable,
+    args: List,
     retries: int | None = None,
     base_delay: float = 100.0,
     growth: float = 2.0,
@@ -635,7 +658,7 @@ async def exponential_backoff(
     i = 0
     while retries is None or retries > 0:
         try:
-            return await fn()
+            return await fn(*args)
         except TransientError:
             delay = base_delay * (growth**i)
             delay = min(delay, max_delay)
@@ -656,7 +679,6 @@ async def extract_object_partitioned(
         # fetch zip and verify checksum
         async with session.get(zip_url) as resp:
             if resp.status == 404:
-                l.info(f"Archive {zip_url} not found, skipping.")
                 return None
             elif resp.status != 200:
                 l.error(f"Failed to fetch archive {zip_url}, status code {resp.status}")
@@ -700,65 +722,10 @@ async def extract_object_partitioned(
         return pair, day
 
 
-async def verify_and_extract_partitioned(
-    session, srcobjs: List[Obj], r2, dstprefix: str
-) -> Dict[str, Set[date]]:
-    """Download, verify and extract zip'd CSV archives into hive partitioned store.
-
-    The zip files in ``srcobjs`` will be unzipped and into a ``dstprefix``/year=/month=/day=. The zip files are assumed to contain a single CSV file named <zipfile>.csv. If ``srcobjs`` contains a corresponding checksum file named <zipfile>.CHECKSUM, the zip file will be verified before extraction. Existing CSV files are overwritten.
-
-    The files in ``srcobjs`` are fetched using their public URLs.
-
-    Args:
-        srcobjs: Objects to copy, can be zip and checksums. Zip and checksum files will be paired by basename.
-        dstprefix: Destination prefix in bucket. Files are stored in ``dstprefix``/year=/month=/day=/.
-
-    Returns:
-        mapping of trading pair to set of changed dates.
-    """
-
-    by_basename = {basename(obj.key): obj for obj in objs}
-
-    # zip -> checksum
-    files: Dict[Obj, Tuple[Obj | None, Obj | None]] = {
-        zip: (
-            by_basename.get(basename(zip.key).replace(".zip", ".zip.CHECKSUM")),
-            by_basename.get(basename(zip.key).replace(".zip", ".csv")),
-        )
-        for zip in [obj for obj in by_basename.values() if obj.key.endswith(".zip")]
-    }
-
-    fut = [
-        extract_object_partitioned(session, r2, prefix, zip, chksm, csv)
-        for zip, (chksm, csv) in files.items()
-    ]
-    if len(fut) == 0:
-        return {}
-
-    return dict(
-        it.map_reduce(
-            [
-                (x[0], x[1])
-                for x in await tqdm.gather(
-                    *fut,
-                    total=len(fut),
-                    desc="verifying and extracting daily archives",
-                    position=1,
-                    leave=False,
-                )
-                if x is not None
-            ],
-            keyfunc=lambda a: a[0],
-            valuefunc=lambda a: a[1],
-            reducefunc=set,
-        )
-    )
-
-
 if __name__ == "__main__":
     with logging_redirect_tqdm():
         try:
             asyncio.run(main())
             l.info("Sync'd")
         except Exception as e:
-            l.exception("Fatal error during sync:")
+            l.exception("Fatal error during sync", exc_info=e)
