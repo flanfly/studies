@@ -5,6 +5,7 @@ from aiobotocore.session import get_session as boto_session
 import asyncio
 import aiohttp
 from tqdm.asyncio import tqdm
+from contextlib import asynccontextmanager
 
 import os
 import sys
@@ -33,6 +34,7 @@ from typing import (
     Dict,
     Iterable,
     Tuple,
+    Any,
     Set,
     NamedTuple,
     List,
@@ -71,6 +73,41 @@ class Obj:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Context:
+    session: aiohttp.ClientSession
+    s3: Any
+    r2: Any
+    r2fs: fs.S3FileSystem
+
+
+@asynccontextmanager
+async def make_context():
+    boto = boto_session()
+    r2key = os.getenv("R2_ACCESS_KEY")
+    r2sec = os.getenv("R2_SECRET_KEY")
+    r2id = os.getenv("R2_ACCOUNT_ID")
+    r2 = boto.create_client(
+        "s3",
+        aws_access_key_id=r2key,
+        aws_secret_access_key=r2sec,
+        endpoint_url=f"https://{r2id}.r2.cloudflarestorage.com",
+        region_name="auto",
+    )
+    r2fs = fs.S3FileSystem(
+        access_key=r2key,
+        secret_key=r2sec,
+        endpoint_override=f"https://{r2id}.r2.cloudflarestorage.com",
+        region="auto",
+    )
+    s3 = boto.create_client(
+        "s3", config=botoconfig.Config(signature_version=botocore.UNSIGNED)
+    )
+
+    async with aiohttp.ClientSession() as session, r2, r2fs, s3:
+        yield Context(session=session, s3=s3, r2=r2, r2fs=r2fs)
+
+
 class TransientError(Exception):
     pass
 
@@ -95,31 +132,6 @@ l.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stdout,
 )
-
-
-def new_r2(sess):
-    return sess.create_client(
-        "s3",
-        aws_access_key_id=os.getenv("R2_ACCESS_KEY"),
-        aws_secret_access_key=os.getenv("R2_SECRET_KEY"),
-        endpoint_url=f"""https://{os.getenv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com""",
-        region_name="auto",
-    )
-
-
-def new_r2_fs():
-    return fs.S3FileSystem(
-        access_key=os.getenv("R2_ACCESS_KEY"),
-        secret_key=os.getenv("R2_SECRET_KEY"),
-        endpoint_override=f"""https://{os.getenv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com""",
-        region="auto",
-    )
-
-
-def new_s3(sess):
-    return sess.create_client(
-        "s3", config=botoconfig.Config(signature_version=botocore.UNSIGNED)
-    )
 
 
 def parse_binance_filename(filename: str) -> Tuple[str, date]:
@@ -226,8 +238,8 @@ async def main():
 
     args = parser.parse_args()
 
-    async with aiohttp.ClientSession() as httpsess:
-        pairs = await retrieve_spot_pairs(httpsess)
+    async with make_context() as ctx:
+        pairs = await retrieve_spot_pairs(ctx)
 
         num_all = len(pairs)
         pairs = {k: v for k, v in pairs.items() if args.symbol_pattern.match(k)}
@@ -570,8 +582,7 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
     )
 
 
-async def compact_prefix_to_parquet(r2, objs: List[Obj], pqurl: str):
-    wrfd = new_r2_fs()
+async def compact_prefix_to_parquet(ctx: Context, objs: List[Obj], pqurl: str):
     objs = sorted(objs, key=lambda o: (o.date, o.pair))
     writer = None
     num = (len(objs) + 19) // 20
@@ -583,7 +594,7 @@ async def compact_prefix_to_parquet(r2, objs: List[Obj], pqurl: str):
         position=1,
         leave=False,
     ):
-        fut = [read_csv_object(r2, obj) for obj in batch]
+        fut = [read_csv_object(ctx, obj) for obj in batch]
         df = pl.concat(await asyncio.gather(*fut))
         table = df.to_arrow()
 
@@ -592,15 +603,14 @@ async def compact_prefix_to_parquet(r2, objs: List[Obj], pqurl: str):
             writer = pq.ParquetWriter(
                 pqurl.replace("r2://", ""),
                 schema,
-                filesystem=wrfd,
+                filesystem=ctx.r2fs,
                 compression="zstd",
             )
 
         writer.write_table(table)
 
 
-async def resample_daily_klines(r2, files: List[str], pqurl: str):
-    wrfd = new_r2_fs()
+async def resample_daily_klines(ctx, files: List[str], pqurl: str):
     writer = None
 
     files = sorted(files)
@@ -609,7 +619,7 @@ async def resample_daily_klines(r2, files: List[str], pqurl: str):
     for batch in tqdm(
         it.batched(files, 20), total=num, desc="resampling daily klines", position=0
     ):
-        fut = [read_parquet_object(r2, file) for file in batch]
+        fut = [read_parquet_object(ctx, file) for file in batch]
         for df in await asyncio.gather(*fut):
             daily = (
                 df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
@@ -641,7 +651,7 @@ async def resample_daily_klines(r2, files: List[str], pqurl: str):
                 writer = pq.ParquetWriter(
                     pqurl.replace("r2://", ""),
                     schema,
-                    filesystem=wrfd,
+                    filesystem=ctx.r2fs,
                     compression="zstd",
                 )
             writer.write_table(table)
