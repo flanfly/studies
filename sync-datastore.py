@@ -10,9 +10,10 @@ import os
 import sys
 from posixpath import join, basename
 import more_itertools as it
+from itertools import product
 from urllib.parse import urlparse
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import io
 import zipfile
 from hashlib import sha256
@@ -28,7 +29,16 @@ from dotenv import load_dotenv
 import logging as l
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from typing import Dict, Iterable, Tuple, Set, NamedTuple, List
+from typing import (
+    Dict,
+    Iterable,
+    Tuple,
+    Set,
+    NamedTuple,
+    List,
+    AsyncGenerator,
+    Callable,
+)
 from collections import namedtuple
 from dataclasses import dataclass
 
@@ -39,6 +49,7 @@ Pair = namedtuple("Pair", ["base", "quote"])
 class Obj:
     key: str
     bucket: str
+    filename: str
     last_modified: datetime
     date: date
     pair: str
@@ -49,6 +60,7 @@ class Obj:
 
         object.__setattr__(self, "key", key)
         object.__setattr__(self, "bucket", bucket)
+        object.__setattr__(self, "filename", basename(key))
         object.__setattr__(self, "last_modified", last_modified)
         object.__setattr__(self, "date", day)
         object.__setattr__(self, "pair", pair)
@@ -66,8 +78,9 @@ class TransientError(Exception):
 load_dotenv()
 
 BINANCE_API_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
-BINANCE_VISION_DAILY_SPOT_ARCHIVE = (
-    "s3://data.binance.vision/data/spot/daily/klines/%s/1m"
+# ETHBTC-1m-2021-01-01.zip
+BINANCE_VISION_DAILY_SPOT_ARCHIVE_PAIR_MONTH_YEAR = (
+    "s3://data.binance.vision/data/spot/daily/klines/{0}/1m/{0}-1m-{1:04d}-{2:02d}"
 )
 
 MIRROR_BUCKET = f"r2://studies-binance-store/spot-1m-mirror/"
@@ -140,6 +153,41 @@ def parse_pattern(arg_value: str) -> re.Pattern:
         raise argparse.ArgumentTypeError(f"Invalid regular expression: {e}")
 
 
+def make_binance_prefix(
+    pair: str,
+    year: int | None,
+    month: int | None,
+    day: int | None,
+    public_url: bool = False,
+) -> str:
+    if public_url:
+        pfx = f"https://s3.ap-northeast-1.amazonaws.com/data.binance.vision/data/spot/daily/klines/{pair.upper()}/1m/{pair.upper()}-1m-"
+    else:
+        pfx = f"s3://data.binance.vision/data/spot/daily/klines/{pair.upper()}/1m/{pair.upper()}-1m-"
+    if year is not None:
+        pfx += f"{year:04d}-"
+        if month is not None:
+            pfx += f"{month:02d}-"
+            if day is not None:
+                pfx += f"{day:02d}"
+
+    return pfx
+
+
+def make_hive_prefix(
+    pair: str, year: int | None, month: int | None, day: int | None
+) -> str:
+    pfx = f"r2://studies-binance-store/spot-1m-mirror/year="
+    if year is not None:
+        pfx += f"{year:04d}/month="
+        if month is not None:
+            pfx += f"{month:02d}/day="
+            if day is not None:
+                pfx += f"{day:02d}/{pair.upper()}-1m-{year:04d}-{month:02d}-{day:02d}"
+
+    return pfx
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -150,11 +198,11 @@ async def main():
         default=".*",
     )
     parser.add_argument(
-        "-p",
-        "--archive-pattern",
-        type=parse_pattern,
-        help="PCRE pattern to filter archives.",
-        default=".*",
+        "-F",
+        "--from-date",
+        type=date.fromisoformat,
+        help="Date in YYYY-MM-DD format to start syncing from (inclusive). If not given, syncs from the first missing ETHBTC archive.",
+        default=None,
     )
     parser.add_argument(
         "-l",
@@ -180,34 +228,43 @@ async def main():
             for symbol, pair in pairs.items():
                 print(f"{symbol}: {pair.base}/{pair.quote}")
             return
-
         botosess = boto_session()
         async with new_s3(botosess) as s3, new_r2(botosess) as r2:
-            l.info("Catalog existing mirrored files")
-            have = set(
-                [
-                    basename(obj.key).replace(".csv", ".zip")
-                    for obj in await catalog_bucket(r2, MIRROR_BUCKET)
-                    if obj.key.endswith(".csv")
-                ]
-            )
+            if args.from_date is None:
+                args.from_date = await determine_start_date(r2, s3, "ETHBTC")
+                if args.from_date is None:
+                    l.error("No ETHBTC archives found in binance.")
+                    return
 
-            for pair in tqdm(list(pairs.keys()), desc="processing pairs", position=0):
-                l.info(f"Fetching changes for {pair}")
-                avail = await catalog_bucket(
-                    s3, BINANCE_VISION_DAILY_SPOT_ARCHIVE % pair
+            if args.from_date >= date.today() - timedelta(days=1):
+                l.info("Data is already up to date.")
+                return
+            l.info(f"Starting sync from {args.from_date.isoformat()}")
+
+            dates = [
+                args.from_date + timedelta(days=i)
+                for i in range(
+                    ((date.today() - timedelta(days=1)) - args.from_date).days
                 )
-
-                todo = [obj for obj in avail if basename(obj.key) not in have]
-
-                l.info(f"Verifying and extracting pair {pair}")
-                changed_days = await verify_and_extract_partitioned(
-                    httpsess,
-                    todo,
-                    r2,
-                    MIRROR_BUCKET,
+            ]
+            archives = [
+                make_binance_prefix(i[0], i[1].year, i[1].month, i[1].day, True)
+                for i in product(pairs.keys(), dates)
+            ]
+            fut = [
+                exponential_backoff(
+                    lambda: extract_object_partitioned(
+                        httpsess,
+                        r2,
+                        i + ".zip",
+                        i + ".zip.CHECKSUM",
+                    )
                 )
+                for i in archives
+            ]
 
+            await tqdm.gather(*fut, desc="synchronizing pairs", position=0)
+            return
             changed_months = set(
                 [
                     (day.year, day.month)
@@ -221,7 +278,10 @@ async def main():
             ):
                 l.info(f"Compacting year={year}, month={month} to parquet")
                 partition = f"year={year}/month={month:02d}"
-                objs = await catalog_bucket(r2, join(MIRROR_BUCKET, partition))
+                objs = [
+                    obj
+                    async for obj in catalog_bucket(r2, join(MIRROR_BUCKET, partition))
+                ]
 
                 await compact_prefix_to_parquet(
                     r2,
@@ -232,6 +292,102 @@ async def main():
             l.info("Derive daily klines")
             files = await catalog_hive(r2, ONE_MINUTE_BUCKET)
             await resample_daily_klines(r2, files, ONE_DAY_FILE)
+
+
+async def bisect_bucket(
+    c, pair: str, horizon: date, make_prefix: Callable[[str, date], str], find_end=True
+) -> date | None:
+    low = horizon
+    high = date.today() - timedelta(days=1)
+    ret = None
+
+    while low <= high:
+        mid = low + timedelta(days=(high - low).days // 2)
+        u = urlparse(make_prefix(pair, mid))
+        try:
+            resp = await c.head_object(Bucket=u.netloc, Key=u.path.lstrip("/"))
+            ret = mid
+            if find_end:
+                low = mid + timedelta(days=1)
+            else:
+                high = mid - timedelta(days=1)
+        except botocore.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                if find_end:
+                    high = mid - timedelta(days=1)
+                else:
+                    low = mid + timedelta(days=1)
+            else:
+                raise
+
+    return ret
+
+
+async def find_latest_archive(r2, pair: str, horizon: date) -> date | None:
+    """Finds the latest daily archive for ``pair`` between yesterday and ``horizon``."""
+
+    return await bisect_bucket(
+        r2,
+        pair,
+        horizon,
+        make_prefix=lambda p, d: f"{make_hive_prefix(p, d.year, d.month, d.day)}.csv",
+        find_end=True,
+    )
+
+
+async def find_earliest_archive(s3, pair: str, horizon: date) -> date | None:
+    """Finds the earliest daily archive for ``pair`` after ``horizon``."""
+
+    return await bisect_bucket(
+        s3,
+        pair,
+        horizon,
+        make_prefix=lambda p, d: f"{make_binance_prefix(p, d.year, d.month, d.day)}.zip",
+        find_end=False,
+    )
+
+
+async def determine_start_date(r2, s3, pair: str) -> date | None:
+    start = await find_latest_archive(r2, pair, date(2017, 1, 1))
+    if start is None:
+        return await find_earliest_archive(s3, pair, date(2016, 1, 1))
+    else:
+        return start + timedelta(days=1)
+
+
+async def sync_pair_date_range(
+    session: aiohttp.ClientSession,
+    s3,
+    r2,
+    pair: str,
+    start: date,
+    end: date | None = None,
+):
+    """Copies all zipped daily archives for given pair and date from binance to r2.
+
+    Catalogs data.binance.vision 1m spot daily archives for given pair and date, and copies missing archives to daily hive partitioned store in r2.
+
+    Args:
+        pair: Trading pair symbol retrieved from Binance API (e.g. ETHBTC), retrieved via `retrieve_spot_pairs`.
+        year, month, day: If given, only sync archives for given year/month/day.
+    """
+
+    if end is None:
+        end = date.today() - timedelta(days=1)
+    fut = [
+        exponential_backoff(
+            lambda: extract_object_partitioned(
+                session,
+                r2,
+                make_binance_prefix(pair, start.year, start.month, start.day, True)
+                + ".zip",
+                make_binance_prefix(pair, start.year, start.month, start.day, True)
+                + ".zip.CHECKSUM",
+            )
+        )
+        for i in range((end - start).days)
+    ]
+    await tqdm.gather(*fut, desc=f"synchronizing {pair}", position=0)
 
 
 async def retrieve_spot_pairs(session: aiohttp.ClientSession) -> Dict[str, Pair]:
@@ -266,25 +422,30 @@ async def catalog_hive(c, url: str) -> List[str]:
     return ret
 
 
-async def catalog_bucket(c, url: str) -> List[Obj]:
-    ret: List[Obj] = []
+async def catalog_bucket(c, url: str) -> AsyncGenerator[Obj, None]:
+    """List all objects under given prefix in bucket.
+
+    Args:
+        c: aiobotocore S3 client.
+        url: s3://bucket/prefix
+
+    Yields:
+        Obj instances for each object found.
+    """
 
     bucket, prefix = parse_object_store_url(url)
     pg = c.get_paginator("list_objects_v2")
-    bar = tqdm(desc=f"cataloging {bucket}/{prefix}", position=0, unit="page")
-    async for page in pg.paginate(Bucket=bucket, Prefix=prefix):
-        bar.update(1)
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith("/"):
-                continue
-            bn = basename(key)
-            if bn.startswith("."):
-                continue
-            ret.append(Obj(bucket=bucket, key=key, last_modified=obj["LastModified"]))
-    bar.close()
 
-    return ret
+    with tqdm(desc=f"cataloging {bucket}/{prefix}", position=0, unit="page") as bar:
+        async for page in pg.paginate(Bucket=bucket, Prefix=prefix):
+            bar.update(1)
+
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/") or basename(key).startswith("."):
+                    continue
+
+                yield Obj(bucket=bucket, key=key, last_modified=obj["LastModified"])
 
 
 def decompress_csv(zip_bytes):
@@ -464,51 +625,71 @@ async def resample_daily_klines(r2, files: List[str], pqurl: str):
             writer.write_table(table)
 
 
+async def exponential_backoff(
+    fn: Callable,
+    retries: int | None = None,
+    base_delay: float = 100.0,
+    growth: float = 2.0,
+    max_delay: float = 10.0,
+):
+    i = 0
+    while retries is None or retries > 0:
+        try:
+            return await fn()
+        except TransientError:
+            delay = base_delay * (growth**i)
+            delay = min(delay, max_delay)
+            l.info(f"Transient error, retrying in {delay:.1f} seconds...")
+            await asyncio.sleep(delay)
+            if retries is not None and i >= retries:
+                raise
+            i += 1
+
+
 extract_object_partitioned_sem = asyncio.Semaphore(20)
 
 
 async def extract_object_partitioned(
-    session: aiohttp.ClientSession, r2, prefix, zip, chksm, csv
-) -> Tuple[str, date] | None:
+    session: aiohttp.ClientSession, r2, zip_url: str, chksm_url: str | None
+):
     async with extract_object_partitioned_sem:
-        # see if csv exists and is up to date
-        if csv is not None:
-            if csv.last_modified >= zip.last_modified:
-                return None
-            else:
-                l.info(f"Archive {zip} outdated, re-extracting.")
-
         # fetch zip and verify checksum
-        async with session.get(zip.public_url) as resp:
+        async with session.get(zip_url) as resp:
+            if resp.status == 404:
+                l.info(f"Archive {zip_url} not found, skipping.")
+                return None
+            elif resp.status != 200:
+                l.error(f"Failed to fetch archive {zip_url}, status code {resp.status}")
+                raise TransientError("Failed to fetch archive, retrying.")
             compressed = await resp.read()
 
-        if chksm is not None:
-            if chksm.last_modified >= zip.last_modified:
-                got = sha256(compressed).hexdigest()
-                async with session.get(chksm.public_url) as resp:
+        if chksm_url is not None:
+            got = sha256(compressed).hexdigest()
+            async with session.get(chksm_url) as resp:
+                if resp.status != 200:
+                    l.warn(
+                        f"Archive {zip_url} missing checksum file, skipping verification."
+                    )
+                else:
                     want = (await resp.read()).decode("utf-8").split()[0]
-
-                if got != want:
-                    l.info(f"Archive {zip} checksum mismatch: got {got}, want {want}")
-                    raise TransientError("Checksum mismatch, re-download required.")
+                    if got != want:
+                        l.info(
+                            f"Archive {zip_url} checksum mismatch: got {got}, want {want}"
+                        )
+                        raise TransientError("Checksum mismatch, re-download required.")
         else:
-            l.warn(f"Archive {zip} missing checksum file, skipping verification.")
+            l.warn(f"Archive {zip_url} missing checksum file, skipping verification.")
 
         # decompress csv and upload
         try:
             csv_data = decompress_csv(compressed)
         except Exception as e:
-            l.error(f"Failed to decompress archive {zip}: {e}")
+            l.error(f"Failed to decompress archive {zip_url}: {e}")
             raise TransientError("Decompression failed, re-download required.") from e
 
-        pair, day = parse_binance_filename(zip.key)
-        dsturl = join(
-            prefix,
-            f"year={day.year}",
-            f"month={day.month:02d}",
-            f"day={day.day:02d}",
-            basename(zip.key).replace(".zip", ".csv"),
-        )
+        u = urlparse(zip_url)
+        pair, day = parse_binance_filename(u.path.lstrip("/"))
+        dsturl = f"{make_hive_prefix(pair, day.year, day.month, day.day)}.csv"
         dstbkt, dstkey = parse_object_store_url(dsturl)
         await r2.put_object(
             Bucket=dstbkt,
@@ -520,8 +701,22 @@ async def extract_object_partitioned(
 
 
 async def verify_and_extract_partitioned(
-    session, objs: List[Obj], r2, prefix: str
+    session, srcobjs: List[Obj], r2, dstprefix: str
 ) -> Dict[str, Set[date]]:
+    """Download, verify and extract zip'd CSV archives into hive partitioned store.
+
+    The zip files in ``srcobjs`` will be unzipped and into a ``dstprefix``/year=/month=/day=. The zip files are assumed to contain a single CSV file named <zipfile>.csv. If ``srcobjs`` contains a corresponding checksum file named <zipfile>.CHECKSUM, the zip file will be verified before extraction. Existing CSV files are overwritten.
+
+    The files in ``srcobjs`` are fetched using their public URLs.
+
+    Args:
+        srcobjs: Objects to copy, can be zip and checksums. Zip and checksum files will be paired by basename.
+        dstprefix: Destination prefix in bucket. Files are stored in ``dstprefix``/year=/month=/day=/.
+
+    Returns:
+        mapping of trading pair to set of changed dates.
+    """
+
     by_basename = {basename(obj.key): obj for obj in objs}
 
     # zip -> checksum
