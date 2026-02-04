@@ -246,6 +246,31 @@ def make_packed_prefix(year: int | None, month: int | None, day: int | None) -> 
     return pfx
 
 
+def date_range(value):
+    """Custom argparse type to handle YYYY-MM-DD or YYYY-MM-DD,YYYY-MM-DD."""
+    try:
+        if "," in value:
+            # Case: YYYY-MM-DD,YYYY-MM-DD
+            start_str, end_str = value.split(",")
+            start = datetime.strptime(start_str.strip(), "%Y-%m-%d").date()
+            end = datetime.strptime(end_str.strip(), "%Y-%m-%d").date()
+        else:
+            # Case: YYYY-MM-DD (to today)
+            start = datetime.strptime(value.strip(), "%Y-%m-%d").date()
+            end = date.today() - timedelta(days=1)
+
+        if start > end:
+            raise argparse.ArgumentTypeError(
+                f"Start date ({start}) must be before end date ({end})"
+            )
+
+        return start, end
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid date format: '{value}'. Use YYYY-MM-DD or YYYY-MM-DD,YYYY-MM-DD."
+        )
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -256,10 +281,10 @@ async def main():
         default=".*",
     )
     parser.add_argument(
-        "-F",
-        "--from-date",
-        type=date.fromisoformat,
-        help="Date in YYYY-MM-DD format to start syncing from (inclusive).",
+        "-D",
+        "--dates",
+        type=date_range,
+        help="Date range to synchronize, in the format YYYY-MM-DD or YYYY-MM-DD,YYYY-MM-DD. Defaults to all available dates.",
         default=None,
     )
     parser.add_argument(
@@ -314,27 +339,26 @@ async def main():
         if args.available:
             return await action_catalog_available_archives(ctx, pairs)
 
-        if args.from_date is None:
+        if args.dates is None:
             if args.sense_date is not None:
-                from_date = await determine_start_date(ctx, args.sense_date)
+                dates = await determine_start_date(ctx, args.sense_date)
             else:
-                from_date = await determine_start_date(ctx, "ETHBTC")
+                dates = await determine_start_date(ctx, "ETHBTC")
         else:
-            from_date = args.from_date
-        if from_date is None:
+            dates = args.dates
+        if dates is None:
             l.error("No start date could be determined, and --from-date not given.")
             return
 
-        await action_synchronize(ctx, pairs, args.from_date, date.today())
+        await action_synchronize(ctx, pairs, dates[0], dates[1])
 
 
 async def action_synchronize(ctx: Context, pairs: List[str], start: date, end: date):
-    dates = [
-        start + timedelta(days=i)
-        for i in range(((end - timedelta(days=1)) - start).days)
-    ]
+    dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     fut = [synchonize_day(ctx, pairs, d) for d in dates]
-    await tqdm.gather(*fut, desc="synchronizing days", position=0)
+    await tqdm.gather(
+        *fut, desc=f"synchronizing {start} to {end} ({len(dates)} days)", position=0
+    )
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
