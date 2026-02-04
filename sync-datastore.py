@@ -1,5 +1,6 @@
 import botocore
 import botocore.config as botoconfig
+from botocore.exceptions import ClientError
 from aiobotocore.session import get_session as boto_session
 
 import asyncio
@@ -20,6 +21,7 @@ import zipfile
 from hashlib import sha256
 import argparse
 import re
+from calendar import Calendar
 
 import polars as pl
 import pyarrow as pa
@@ -52,6 +54,15 @@ class MonthYear:
     month: int
     year: int
 
+    @classmethod
+    def all_since(cls, start: date) -> Iterable["MonthYear"]:
+        today = date.today()
+        for y in range(start.year, date.today().year + 1):
+            s = start.month if y == start.year else 1
+            e = today.month if y == today.year else 12
+            for m in range(s, e + 1):
+                yield cls(month=m, year=y)
+
 
 @dataclass(frozen=True, slots=True)
 class Obj:
@@ -77,6 +88,11 @@ class Obj:
             "public_url",
             f"https://s3.ap-northeast-1.amazonaws.com/{bucket}/{key}",
         )
+
+    @classmethod
+    def from_url(cls, url: str) -> "Obj":
+        bkt, key = parse_object_store_url(url)
+        return cls(bucket=bkt, key=key, last_modified=datetime.now())
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +148,9 @@ BINANCE_VISION_DAILY_SPOT_ARCHIVE_PAIR_MONTH_YEAR = (
     "s3://data.binance.vision/data/spot/daily/klines/{0}/1m/{0}-1m-{1:04d}-{2:02d}"
 )
 
-MIRROR_BUCKET = f"r2://studies-binance-store/spot-1m-mirror/"
-ONE_MINUTE_BUCKET = f"r2://studies-binance-store/spot-1m-store/"
-ONE_DAY_FILE = f"r2://studies-binance-store/spot-1d.parquet"
+MIRROR_BUCKET = "r2://studies-binance-store/spot-1m-mirror/"
+ONE_MINUTE_BUCKET = "r2://studies-binance-store/spot-1m-store/"
+ONE_DAY_FILE = "r2://studies-binance-store/spot-1d.parquet"
 
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
 CONCURRENCY = 20
@@ -215,12 +231,14 @@ def make_mirror_prefix(
     return pfx
 
 
-def make_packed_prefix(year: int | None, month: int | None) -> str:
-    pfx = f"r2://studies-binance-store/spot-1m-store/year="
+def make_packed_prefix(year: int | None, month: int | None, day: int | None) -> str:
+    pfx = f"r2://studies-binance-store/spot-1m-store/"
     if year is not None:
-        pfx += f"{year:04d}/month="
+        pfx += f"year={year:04d}/"
         if month is not None:
-            pfx += f"{month:02d}/"
+            pfx += f"month={month:02d}/"
+            if day is not None:
+                pfx += f"day={day:02d}/"
 
     return pfx
 
@@ -309,14 +327,12 @@ async def main():
 
         if args.compact_only:
             if from_date is None:
-                from_date = set(
-                    [
-                        MonthYear(month=m, year=y)
-                        for y in range(2017, date.today().year + 1)
-                        for m in range(1, 13)
-                    ]
-                )
-            return await action_compact_to_parquet(ctx, from_date)
+                from_date = date(2017, 1, 1)
+            days = {
+                from_date + timedelta(days=i)
+                for i in range((date.today() - from_date).days + 1)
+            }
+            return await action_compact_to_parquet(ctx, pairs, days, True)
 
         if from_date is None:
             l.error("No start date could be determined, and --from-date not given.")
@@ -368,15 +384,34 @@ async def action_catalog_available_archives(ctx: Context, pairs: Dict[str, Pair]
                 print(p.filename)
 
 
-async def action_compact_to_parquet(ctx: Context, months: Set[MonthYear] | None):
-    for my in tqdm(months, desc="compacting months", position=0):
-        l.info(f"Compacting year={my.year}, month={my.month} to parquet")
-        partition = make_mirror_prefix(my.year, my.month, None, None)
-        objs = [obj async for obj in catalog_bucket(ctx.r2, partition)]
+async def action_compact_to_parquet(
+    ctx: Context, pairs: Dict[str, Pair], days: Set[date], monthly: bool = False
+):
+    months = set(MonthYear(year=d.year, month=d.month) for d in days)
+    cal = Calendar()
 
-        await compact_prefix_to_parquet(
-            ctx, objs, join(make_packed_prefix(my.year, my.month), "data.parquet")
-        )
+    for t in tqdm(months if monthly else days, desc="compacting", position=0):
+        l.info(f"Compacting {t} to parquet")
+
+        if monthly:
+            batch = [
+                date(t.year, t.month, d)
+                for d in cal.itermonthdays(t.year, t.month)
+                if d != 0
+            ]
+            dst = join(make_packed_prefix(t.year, t.month, None), "data.parquet")
+        else:
+            batch = [t]
+            dst = join(make_packed_prefix(t.year, t.month, t.day), "data.parquet")
+
+        objs = [
+            Obj.from_url(
+                make_mirror_prefix(p[0].year, p[0].month, p[0].day, p[1]) + ".csv"
+            )
+            for p in product(batch, pairs.keys())
+        ]
+
+        await compact_prefix_to_parquet(ctx, objs, dst)
 
     l.info("Derive daily klines")
     files = await catalog_hive(ctx, ONE_MINUTE_BUCKET)
@@ -442,39 +477,6 @@ async def determine_start_date(ctx: Context, pair: str) -> date | None:
         return await find_earliest_archive(ctx.s3, pair, date(2016, 1, 1))
     else:
         return start + timedelta(days=1)
-
-
-async def sync_pair_date_range(
-    ctx: Context,
-    pair: str,
-    start: date,
-    end: date | None = None,
-):
-    """Copies all zipped daily archives for given pair and date from binance to r2.
-
-    Catalogs data.binance.vision 1m spot daily archives for given pair and date, and copies missing archives to daily hive partitioned store in r2.
-
-    Args:
-        pair: Trading pair symbol retrieved from Binance API (e.g. ETHBTC), retrieved via `retrieve_spot_pairs`.
-        year, month, day: If given, only sync archives for given year/month/day.
-    """
-
-    if end is None:
-        end = date.today() - timedelta(days=1)
-    fut = [
-        exponential_backoff(
-            extract_object_partitioned,
-            [
-                ctx,
-                make_binance_prefix(pair, start.year, start.month, start.day, True)
-                + ".zip",
-                make_binance_prefix(pair, start.year, start.month, start.day, True)
-                + ".zip.CHECKSUM",
-            ],
-        )
-        for i in range((end - start).days)
-    ]
-    await tqdm.gather(*fut, desc=f"synchronizing {pair}", position=0)
 
 
 async def retrieve_spot_pairs(ctx: Context) -> Dict[str, Pair]:
@@ -566,10 +568,23 @@ async def process_single_archive(ctx: Context, dsturl: str, obj: Obj) -> pl.Data
     await ctx.r2.put_object(Bucket=dstbkt, Key=dstkey, Body=body)
 
 
-async def read_csv_object(ctx: Context, obj: Obj) -> pl.DataFrame:
-    resp = await ctx.r2.get_object(Bucket=obj.bucket, Key=obj.key)
-    async with resp["Body"] as body:
-        return await asyncio.to_thread(transform_csv_data, await body.read(), obj.pair)
+read_csv_object_sem = asyncio.Semaphore(CONCURRENCY)
+
+
+async def read_csv_object(
+    ctx: Context, obj: Obj, required=False
+) -> pl.DataFrame | None:
+    async with read_csv_object_sem:
+        try:
+            resp = await ctx.r2.get_object(Bucket=obj.bucket, Key=obj.key)
+            async with resp["Body"] as body:
+                data = await body.read()
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey" and not required:
+                return None
+            else:
+                raise
+    return await asyncio.to_thread(transform_csv_data, data, obj.pair)
 
 
 async def read_parquet_object(ctx: Context, url: str) -> pl.DataFrame:
@@ -636,29 +651,25 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
 async def compact_prefix_to_parquet(ctx: Context, objs: List[Obj], pqurl: str):
     objs = sorted(objs, key=lambda o: (o.date, o.pair))
     writer = None
-    num = (len(objs) + CONCURRENCY - 1) // CONCURRENCY
 
-    for batch in tqdm(
-        it.batched(objs, CONCURRENCY),
-        total=num,
-        desc="compacting to parquet",
-        position=1,
-        leave=False,
-    ):
-        fut = [read_csv_object(ctx, obj) for obj in batch]
-        df = pl.concat(await asyncio.gather(*fut))
-        table = df.to_arrow()
+    fut = [read_csv_object(ctx, obj) for obj in objs]
+    res = [
+        d
+        for d in await tqdm.gather(*fut, desc=f"compacting {pqurl}", position=1)
+        if d is not None
+    ]
+    if len(res) == 0:
+        l.info(f"No data found for partition {pqurl}, skipping.")
+        return
+    df = pl.concat(res)
+    table = df.to_arrow()
 
-        if writer is None:
-            schema = table.schema
-            writer = pq.ParquetWriter(
-                pqurl.replace("r2://", ""),
-                schema,
-                filesystem=ctx.r2fs,
-                compression="zstd",
-            )
-
-        writer.write_table(table)
+    pq.ParquetWriter(
+        pqurl.replace("r2://", ""),
+        table.schema,
+        filesystem=ctx.r2fs,
+        compression="zstd",
+    ).write_table(table)
 
 
 async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
