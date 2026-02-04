@@ -148,8 +148,11 @@ BINANCE_VISION_DAILY_SPOT_ARCHIVE_PAIR_MONTH_YEAR = (
     "s3://data.binance.vision/data/spot/daily/klines/{0}/1m/{0}-1m-{1:04d}-{2:02d}"
 )
 
-MIRROR_BUCKET = "r2://studies-binance-store/spot-1m-mirror/"
-ONE_MINUTE_BUCKET = "r2://studies-binance-store/spot-1m-store/"
+# hive partitioned by year/month/day, one parquet file per day
+MINUTE_BUCKET = (
+    "r2://studies-binance-store/spot-1m/"  # year=YYYY/month=MM/day=DD/dataNN.parquet
+)
+DAILY_BUCKET = "r2://studies-binance-store/spot-1m-store/"
 ONE_DAY_FILE = "r2://studies-binance-store/spot-1d.parquet"
 
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
@@ -232,7 +235,7 @@ def make_mirror_prefix(
 
 
 def make_packed_prefix(year: int | None, month: int | None, day: int | None) -> str:
-    pfx = f"r2://studies-binance-store/spot-1m-store/"
+    pfx = f"r2://studies-binance-store/spot-1m/"
     if year is not None:
         pfx += f"year={year:04d}/"
         if month is not None:
@@ -279,12 +282,6 @@ async def main():
         help="List available archives for selected pairs and exit, -s is applied.",
     )
     parser.add_argument(
-        "-c",
-        "--compact-only",
-        action="store_true",
-        help="Only compact existing mirror data to parquet, do not sync new data, -s and -F are applied.",
-    )
-    parser.add_argument(
         "-j",
         "--concurrency",
         type=int,
@@ -324,51 +321,20 @@ async def main():
                 from_date = await determine_start_date(ctx, "ETHBTC")
         else:
             from_date = args.from_date
-
-        if args.compact_only:
-            if from_date is None:
-                from_date = date(2017, 1, 1)
-            days = {
-                from_date + timedelta(days=i)
-                for i in range((date.today() - from_date).days + 1)
-            }
-            return await action_compact_to_parquet(ctx, pairs, days, True)
-
         if from_date is None:
             l.error("No start date could be determined, and --from-date not given.")
             return
-        await action_compact_to_parquet(
-            ctx,
-            await action_synchronize(ctx, pairs, args.from_date, date.today()),
-        )
+
+        await action_synchronize(ctx, pairs, args.from_date, date.today())
 
 
-async def action_synchronize(
-    ctx: Context, pairs: Dict[str, Pair], start: date, end: date
-) -> Set[MonthYear]:
+async def action_synchronize(ctx: Context, pairs: List[str], start: date, end: date):
     dates = [
         start + timedelta(days=i)
         for i in range(((end - timedelta(days=1)) - start).days)
     ]
-    archives = [
-        make_binance_prefix(i[0], i[1].year, i[1].month, i[1].day, True)
-        for i in product(pairs.keys(), dates)
-    ]
-    fut = [
-        exponential_backoff(
-            extract_object_partitioned,
-            [ctx, i + ".zip", i + ".zip.CHECKSUM"],
-        )
-        for i in archives
-    ]
-
-    return set(
-        [
-            MonthYear(year=p[1].year, month=p[1].month)
-            for p in await tqdm.gather(*fut, desc="synchronizing pairs", position=0)
-            if p is not None
-        ]
-    )
+    fut = [synchonize_day(ctx, pairs, d) for d in dates]
+    await tqdm.gather(*fut, desc="synchronizing days", position=0)
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
@@ -384,38 +350,49 @@ async def action_catalog_available_archives(ctx: Context, pairs: Dict[str, Pair]
                 print(p.filename)
 
 
-async def action_compact_to_parquet(
-    ctx: Context, pairs: Dict[str, Pair], days: Set[date], monthly: bool = False
-):
-    months = set(MonthYear(year=d.year, month=d.month) for d in days)
-    cal = Calendar()
+synchronize_day_sem = asyncio.Semaphore(2)
 
-    for t in tqdm(months if monthly else days, desc="compacting", position=0):
-        l.info(f"Compacting {t} to parquet")
 
-        if monthly:
-            batch = [
-                date(t.year, t.month, d)
-                for d in cal.itermonthdays(t.year, t.month)
-                if d != 0
-            ]
-            dst = join(make_packed_prefix(t.year, t.month, None), "data.parquet")
-        else:
-            batch = [t]
-            dst = join(make_packed_prefix(t.year, t.month, t.day), "data.parquet")
+async def synchonize_day(ctx: Context, pairs: List[str], day: date):
+    dst = join(
+        make_packed_prefix(day.year, day.month, day.day).replace("r2://", ""),
+        "data00.parquet",
+    )
 
-        objs = [
-            Obj.from_url(
-                make_mirror_prefix(p[0].year, p[0].month, p[0].day, p[1]) + ".csv"
+    async with synchronize_day_sem:
+        fut = [process_single_archive(ctx, pair, day) for pair in pairs]
+        res = [
+            df
+            for df in await tqdm.gather(
+                *fut, desc=f"compacting {day} to {dst}", position=1
             )
-            for p in product(batch, pairs.keys())
+            if df is not None
         ]
+        if len(res) == 0:
+            l.info(f"No data found for partition {day}, skipping.")
+            return
 
-        await compact_prefix_to_parquet(ctx, objs, dst)
+        df = pl.concat(res)
+        table = df.to_arrow()
+        pq.ParquetWriter(
+            dst,
+            table.schema,
+            filesystem=ctx.r2fs,
+            compression="zstd",
+        ).write_table(table)
 
-    l.info("Derive daily klines")
-    files = await catalog_hive(ctx, ONE_MINUTE_BUCKET)
-    await resample_daily_klines(ctx, files, ONE_DAY_FILE)
+
+async def process_single_archive(
+    ctx: Context, pair: str, day: date
+) -> pl.DataFrame | None:
+    zip_url = make_binance_prefix(pair, day.year, day.month, day.day, True) + ".zip"
+    chksm_url = zip_url + ".CHECKSUM"
+
+    csv = await exponential_backoff(download_and_verify_csv, [ctx, zip_url, chksm_url])
+    if csv is None:
+        return None
+
+    return await asyncio.to_thread(transform_csv_data, csv, pair)
 
 
 async def bisect_bucket(
@@ -549,23 +526,6 @@ def decompress_csv(zip_bytes):
 
             with zf.open(csv_filename) as csv_file:
                 return csv_file.read()
-
-
-async def process_single_archive(ctx: Context, dsturl: str, obj: Obj) -> pl.DataFrame:
-    async with ctx.session.get(obj.public_url) as resp:
-        body = await asyncio.to_thread(decompress_csv, await resp.read())
-
-    dstbkt, dstkey = parse_object_store_url(
-        join(
-            dsturl,
-            f"year={obj.date.year}",
-            f"month={obj.date.month:02d}",
-            f"day={obj.date.day:02d}",
-            basename(obj.key),
-        )
-    )
-
-    await ctx.r2.put_object(Bucket=dstbkt, Key=dstkey, Body=body)
 
 
 read_csv_object_sem = asyncio.Semaphore(CONCURRENCY)
@@ -747,9 +707,9 @@ async def exponential_backoff(
 extract_object_partitioned_sem = asyncio.Semaphore(CONCURRENCY)
 
 
-async def extract_object_partitioned(
+async def download_and_verify_csv(
     ctx: Context, zip_url: str, chksm_url: str | None
-) -> Tuple[str, date] | None:
+) -> bytes | None:
     async with extract_object_partitioned_sem:
         # fetch zip and verify checksum
         async with ctx.session.get(zip_url) as resp:
@@ -777,24 +737,25 @@ async def extract_object_partitioned(
         else:
             l.warn(f"Archive {zip_url} missing checksum file, skipping verification.")
 
-        # decompress csv and upload
-        try:
-            csv_data = decompress_csv(compressed)
-        except Exception as e:
-            l.error(f"Failed to decompress archive {zip_url}: {e}")
-            raise TransientError("Decompression failed, re-download required.") from e
+    # decompress csv and upload
+    try:
+        return decompress_csv(compressed)
+    except Exception as e:
+        l.error(f"Failed to decompress archive {zip_url}: {e}")
+        raise TransientError("Decompression failed, re-download required.") from e
 
-        u = urlparse(zip_url)
-        pair, day = parse_binance_filename(u.path.lstrip("/"))
-        dsturl = f"{make_mirror_prefix( day.year, day.month, day.day, pair)}.csv"
-        dstbkt, dstkey = parse_object_store_url(dsturl)
-        await ctx.r2.put_object(
-            Bucket=dstbkt,
-            Key=dstkey,
-            Body=csv_data,
-        )
 
-        return pair, day
+#        u = urlparse(zip_url)
+#        pair, day = parse_binance_filename(u.path.lstrip("/"))
+#        dsturl = f"{make_mirror_prefix( day.year, day.month, day.day, pair)}.csv"
+#        dstbkt, dstkey = parse_object_store_url(dsturl)
+#        await ctx.r2.put_object(
+#            Bucket=dstbkt,
+#            Key=dstkey,
+#            Body=csv_data,
+#        )
+#
+#        return pair, day
 
 
 if __name__ == "__main__":
