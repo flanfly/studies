@@ -5,7 +5,7 @@ from aiobotocore.session import get_session as boto_session
 import asyncio
 import aiohttp
 from tqdm.asyncio import tqdm
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, AsyncExitStack
 
 import os
 import sys
@@ -48,6 +48,12 @@ Pair = namedtuple("Pair", ["base", "quote"])
 
 
 @dataclass(frozen=True, slots=True)
+class MonthYear:
+    month: int
+    year: int
+
+
+@dataclass(frozen=True, slots=True)
 class Obj:
     key: str
     bucket: str
@@ -87,24 +93,30 @@ async def make_context():
     r2key = os.getenv("R2_ACCESS_KEY")
     r2sec = os.getenv("R2_SECRET_KEY")
     r2id = os.getenv("R2_ACCOUNT_ID")
-    r2 = boto.create_client(
-        "s3",
-        aws_access_key_id=r2key,
-        aws_secret_access_key=r2sec,
-        endpoint_url=f"https://{r2id}.r2.cloudflarestorage.com",
-        region_name="auto",
-    )
-    r2fs = fs.S3FileSystem(
-        access_key=r2key,
-        secret_key=r2sec,
-        endpoint_override=f"https://{r2id}.r2.cloudflarestorage.com",
-        region="auto",
-    )
-    s3 = boto.create_client(
-        "s3", config=botoconfig.Config(signature_version=botocore.UNSIGNED)
-    )
 
-    async with aiohttp.ClientSession() as session, r2, r2fs, s3:
+    async with AsyncExitStack() as stack:
+        session = await stack.enter_async_context(aiohttp.ClientSession())
+        r2 = await stack.enter_async_context(
+            boto.create_client(
+                "s3",
+                aws_access_key_id=r2key,
+                aws_secret_access_key=r2sec,
+                endpoint_url=f"https://{r2id}.r2.cloudflarestorage.com",
+                region_name="auto",
+            )
+        )
+        s3 = await stack.enter_async_context(
+            boto.create_client(
+                "s3", config=botoconfig.Config(signature_version=botocore.UNSIGNED)
+            )
+        )
+        r2fs = fs.S3FileSystem(
+            access_key=r2key,
+            secret_key=r2sec,
+            endpoint_override=f"https://{r2id}.r2.cloudflarestorage.com",
+            region="auto",
+        )
+
         yield Context(session=session, s3=s3, r2=r2, r2fs=r2fs)
 
 
@@ -125,6 +137,7 @@ ONE_MINUTE_BUCKET = f"r2://studies-binance-store/spot-1m-store/"
 ONE_DAY_FILE = f"r2://studies-binance-store/spot-1d.parquet"
 
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
+CONCURRENCY = 20
 
 l.basicConfig(
     format="[%(asctime)s] %(levelname)s    %(message)s",
@@ -186,8 +199,8 @@ def make_binance_prefix(
     return pfx
 
 
-def make_hive_prefix(
-    pair: str, year: int | None, month: int | None, day: int | None
+def make_mirror_prefix(
+    year: int | None, month: int | None, day: int | None, pair: str | None
 ) -> str:
     pfx = f"r2://studies-binance-store/spot-1m-mirror/year="
     if year is not None:
@@ -195,7 +208,19 @@ def make_hive_prefix(
         if month is not None:
             pfx += f"{month:02d}/day="
             if day is not None:
-                pfx += f"{day:02d}/{pair.upper()}-1m-{year:04d}-{month:02d}-{day:02d}"
+                pfx += f"{day:02d}"
+                if pair is not None:
+                    pfx += f"/{pair.upper()}-1m-{year:04d}-{month:02d}-{day:02d}"
+
+    return pfx
+
+
+def make_packed_prefix(year: int | None, month: int | None) -> str:
+    pfx = f"r2://studies-binance-store/spot-1m-store/year="
+    if year is not None:
+        pfx += f"{year:04d}/month="
+        if month is not None:
+            pfx += f"{month:02d}/"
 
     return pfx
 
@@ -213,7 +238,14 @@ async def main():
         "-F",
         "--from-date",
         type=date.fromisoformat,
-        help="Date in YYYY-MM-DD format to start syncing from (inclusive). If not given, syncs from the first missing ETHBTC archive.",
+        help="Date in YYYY-MM-DD format to start syncing from (inclusive).",
+        default=None,
+    )
+    parser.add_argument(
+        "-S",
+        "--sense-date",
+        type=date.fromisoformat,
+        help="Pair to sense earliest available archive date from, used only if --from-date is not given. Defaults to ETHBTC.",
         default=None,
     )
     parser.add_argument(
@@ -226,17 +258,29 @@ async def main():
         "-a",
         "--available",
         action="store_true",
-        help=
-        "List available archives for selected pairs and exit, -s is applied.")
+        help="List available archives for selected pairs and exit, -s is applied.",
+    )
     parser.add_argument(
         "-c",
-        "--compact",
+        "--compact-only",
         action="store_true",
-        help=
-        "Only compact existing mirror data to parquet, do not sync new data, -s and -F are applied.",
+        help="Only compact existing mirror data to parquet, do not sync new data, -s and -F are applied.",
+    )
+    parser.add_argument(
+        "-j",
+        "--concurrency",
+        type=int,
+        help="Number of concurrent downloads/uploads.",
+        default=20,
     )
 
     args = parser.parse_args()
+
+    if args.concurrency < 1:
+        l.error("Concurrency must be at least 1.")
+        return
+    global CONCURRENCY
+    CONCURRENCY = args.concurrency
 
     async with make_context() as ctx:
         pairs = await retrieve_spot_pairs(ctx)
@@ -251,82 +295,93 @@ async def main():
             l.info(f"filtered {num_all - num_sel} pairs.")
 
         if args.list:
-            for symbol, pair in pairs.items():
-                print(f"{symbol}: {pair.base}/{pair.quote}")
+            return await action_list_symbols(ctx)
+        if args.available:
+            return await action_catalog_available_archives(ctx, pairs)
+
+        if args.from_date is None:
+            if args.sense_date is not None:
+                from_date = await determine_start_date(ctx, args.sense_date)
+            else:
+                from_date = await determine_start_date(ctx, "ETHBTC")
+        else:
+            from_date = args.from_date
+
+        if args.compact_only:
+            if from_date is None:
+                from_date = set(
+                    [
+                        MonthYear(month=m, year=y)
+                        for y in range(2017, date.today().year + 1)
+                        for m in range(1, 13)
+                    ]
+                )
+            return await action_compact_to_parquet(ctx, from_date)
+
+        if from_date is None:
+            l.error("No start date could be determined, and --from-date not given.")
             return
+        await action_compact_to_parquet(
+            ctx,
+            await action_synchronize(ctx, pairs, args.from_date, date.today()),
+        )
 
-        botosess = boto_session()
-        async with new_s3(botosess) as s3, new_r2(botosess) as r2:
-            if args.available:
-                for symbol in pairs.keys():
-                    async for p in catalog_bucket(
-                            s3, make_binance_prefix(symbol, None, None, None)):
-                        if p.filename.endswith(".zip"):
-                            print(p.filename)
-                return
 
-            if args.from_date is None:
-                args.from_date = await determine_start_date(r2, s3, "ETHBTC")
-                if args.from_date is None:
-                    l.error("No ETHBTC archives found in binance.")
-                    return
+async def action_synchronize(
+    ctx: Context, pairs: Dict[str, Pair], start: date, end: date
+) -> Set[MonthYear]:
+    dates = [
+        start + timedelta(days=i)
+        for i in range(((end - timedelta(days=1)) - start).days)
+    ]
+    archives = [
+        make_binance_prefix(i[0], i[1].year, i[1].month, i[1].day, True)
+        for i in product(pairs.keys(), dates)
+    ]
+    fut = [
+        exponential_backoff(
+            extract_object_partitioned,
+            [ctx, i + ".zip", i + ".zip.CHECKSUM"],
+        )
+        for i in archives
+    ]
 
-            if args.from_date >= date.today() - timedelta(days=1):
-                l.info("Data is already up to date.")
-                return
-            l.info(f"Starting sync from {args.from_date.isoformat()}")
+    return set(
+        [
+            MonthYear(year=p[1].year, month=p[1].month)
+            for p in await tqdm.gather(*fut, desc="synchronizing pairs", position=0)
+            if p is not None
+        ]
+    )
 
-            dates = [
-                args.from_date + timedelta(days=i)
-                for i in range(
-                    ((date.today() - timedelta(days=1)) - args.from_date).days
-                )
-            ]
-            archives = [
-                make_binance_prefix(i[0], i[1].year, i[1].month, i[1].day, True)
-                for i in product(pairs.keys(), dates)
-            ]
-            fut = [
-                exponential_backoff(
-                    extract_object_partitioned,
-                    [httpsess, r2, i + ".zip", i + ".zip.CHECKSUM"],
-                ) for i in archives
-            ]
-            months = set([[p[1].month, p[1].year] for p in await tqdm.gather(
-                *fut, desc="synchronizing pairs", position=0)
-                          if p is not None])
-            l.info("Compacting monthly partitions to parquet")
-            for year, month in tqdm(months,
-                                    desc="compacting months",
-                                    position=0):
-                l.info(f"Compacting year={year}, month={month} to parquet")
-                partition = f"year={year}/month={month:02d}"
-                objs = [
-                    obj
-                    async for obj in catalog_bucket(r2, join(MIRROR_BUCKET, partition))
-                ]
 
-                await compact_prefix_to_parquet(
-                    r2,
-                    objs,
-                    join(ONE_MINUTE_BUCKET, partition, "data.parquet"),
-                )
+async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
+    for symbol, pair in pairs.items():
+        print(f"{symbol}: {pair.base}/{pair.quote}")
 
-            l.info("Derive daily klines")
-            files = await catalog_hive(r2, ONE_MINUTE_BUCKET)
-            await resample_daily_klines(r2, files, ONE_DAY_FILE)
 
-async def action_synchronize(s3, r2, session: aiohttp.ClientSession,
-                             pairs: List[str], start: date, end: date):
-    pass
+async def action_catalog_available_archives(ctx: Context, pairs: Dict[str, Pair]):
+    for symbol in pairs.keys():
+        cat = catalog_bucket(ctx.s3, make_binance_prefix(symbol, None, None, None))
+        async for p in cat:
+            if p.filename.endswith(".zip"):
+                print(p.filename)
 
-async def action_list_symbols(session: aiohttp.ClientSession):
-    pass
 
-async def action_catalog_available_archives(s3, pairs: List[str]):
-    pass
+async def action_compact_to_parquet(ctx: Context, months: Set[MonthYear] | None):
+    for my in tqdm(months, desc="compacting months", position=0):
+        l.info(f"Compacting year={my.year}, month={my.month} to parquet")
+        partition = make_mirror_prefix(my.year, my.month, None, None)
+        objs = [obj async for obj in catalog_bucket(ctx.r2, partition)]
 
-async def action_compact_to_parquet(r2, pairs: List[str], start: date):
+        await compact_prefix_to_parquet(
+            ctx, objs, join(make_packed_prefix(my.year, my.month), "data.parquet")
+        )
+
+    l.info("Derive daily klines")
+    files = await catalog_hive(ctx, ONE_MINUTE_BUCKET)
+    await resample_daily_klines(ctx, files, ONE_DAY_FILE)
+
 
 async def bisect_bucket(
     c, pair: str, horizon: date, make_prefix: Callable[[str, date], str], find_end=True
@@ -364,7 +419,7 @@ async def find_latest_archive(r2, pair: str, horizon: date) -> date | None:
         r2,
         pair,
         horizon,
-        make_prefix=lambda p, d: f"{make_hive_prefix(p, d.year, d.month, d.day)}.csv",
+        make_prefix=lambda p, d: f"{make_mirror_prefix( d.year, d.month, d.day,p)}.csv",
         find_end=True,
     )
 
@@ -381,18 +436,16 @@ async def find_earliest_archive(s3, pair: str, horizon: date) -> date | None:
     )
 
 
-async def determine_start_date(r2, s3, pair: str) -> date | None:
-    start = await find_latest_archive(r2, pair, date(2017, 1, 1))
+async def determine_start_date(ctx: Context, pair: str) -> date | None:
+    start = await find_latest_archive(ctx.r2, pair, date(2017, 1, 1))
     if start is None:
-        return await find_earliest_archive(s3, pair, date(2016, 1, 1))
+        return await find_earliest_archive(ctx.s3, pair, date(2016, 1, 1))
     else:
         return start + timedelta(days=1)
 
 
 async def sync_pair_date_range(
-    session: aiohttp.ClientSession,
-    s3,
-    r2,
+    ctx: Context,
     pair: str,
     start: date,
     end: date | None = None,
@@ -410,22 +463,22 @@ async def sync_pair_date_range(
         end = date.today() - timedelta(days=1)
     fut = [
         exponential_backoff(
-            lambda: extract_object_partitioned(
-                session,
-                r2,
+            extract_object_partitioned,
+            [
+                ctx,
                 make_binance_prefix(pair, start.year, start.month, start.day, True)
                 + ".zip",
                 make_binance_prefix(pair, start.year, start.month, start.day, True)
                 + ".zip.CHECKSUM",
-            )
+            ],
         )
         for i in range((end - start).days)
     ]
     await tqdm.gather(*fut, desc=f"synchronizing {pair}", position=0)
 
 
-async def retrieve_spot_pairs(session: aiohttp.ClientSession) -> Dict[str, Pair]:
-    async with session.get(BINANCE_API_EXCHANGE_INFO) as resp:
+async def retrieve_spot_pairs(ctx: Context) -> Dict[str, Pair]:
+    async with ctx.session.get(BINANCE_API_EXCHANGE_INFO) as resp:
         return {
             symbol["symbol"]: Pair(base=symbol["baseAsset"], quote=symbol["quoteAsset"])
             for symbol in (await resp.json())["symbols"]
@@ -433,11 +486,11 @@ async def retrieve_spot_pairs(session: aiohttp.ClientSession) -> Dict[str, Pair]
         }
 
 
-async def catalog_hive(c, url: str) -> List[str]:
+async def catalog_hive(ctx: Context, url: str) -> List[str]:
     ret: List[str] = []
 
     bucket, prefix = parse_object_store_url(url)
-    pg = c.get_paginator("list_objects_v2")
+    pg = ctx.r2.get_paginator("list_objects_v2")
     async for page in pg.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
@@ -496,10 +549,8 @@ def decompress_csv(zip_bytes):
                 return csv_file.read()
 
 
-async def process_single_archive(
-    r2, session: aiohttp.ClientSession, dsturl: str, obj: Obj
-) -> pl.DataFrame:
-    async with session.get(obj.public_url) as resp:
+async def process_single_archive(ctx: Context, dsturl: str, obj: Obj) -> pl.DataFrame:
+    async with ctx.session.get(obj.public_url) as resp:
         body = await asyncio.to_thread(decompress_csv, await resp.read())
 
     dstbkt, dstkey = parse_object_store_url(
@@ -512,18 +563,18 @@ async def process_single_archive(
         )
     )
 
-    await r2.put_object(Bucket=dstbkt, Key=dstkey, Body=body)
+    await ctx.r2.put_object(Bucket=dstbkt, Key=dstkey, Body=body)
 
 
-async def read_csv_object(r2, obj: Obj) -> pl.DataFrame:
-    resp = await r2.get_object(Bucket=obj.bucket, Key=obj.key)
+async def read_csv_object(ctx: Context, obj: Obj) -> pl.DataFrame:
+    resp = await ctx.r2.get_object(Bucket=obj.bucket, Key=obj.key)
     async with resp["Body"] as body:
         return await asyncio.to_thread(transform_csv_data, await body.read(), obj.pair)
 
 
-async def read_parquet_object(r2, url: str) -> pl.DataFrame:
+async def read_parquet_object(ctx: Context, url: str) -> pl.DataFrame:
     bucket, key = parse_object_store_url(url)
-    resp = await r2.get_object(Bucket=bucket, Key=key)
+    resp = await ctx.r2.get_object(Bucket=bucket, Key=key)
     async with resp["Body"] as body:
         return pl.read_parquet(io.BytesIO(await body.read()))
 
@@ -585,10 +636,10 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
 async def compact_prefix_to_parquet(ctx: Context, objs: List[Obj], pqurl: str):
     objs = sorted(objs, key=lambda o: (o.date, o.pair))
     writer = None
-    num = (len(objs) + 19) // 20
+    num = (len(objs) + CONCURRENCY - 1) // CONCURRENCY
 
     for batch in tqdm(
-        it.batched(objs, 20),
+        it.batched(objs, CONCURRENCY),
         total=num,
         desc="compacting to parquet",
         position=1,
@@ -610,14 +661,17 @@ async def compact_prefix_to_parquet(ctx: Context, objs: List[Obj], pqurl: str):
         writer.write_table(table)
 
 
-async def resample_daily_klines(ctx, files: List[str], pqurl: str):
+async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
     writer = None
 
     files = sorted(files)
-    num = (len(files) + 19) // 20
+    num = (len(files) + CONCURRENCY - 1) // CONCURRENCY
 
     for batch in tqdm(
-        it.batched(files, 20), total=num, desc="resampling daily klines", position=0
+        it.batched(files, CONCURRENCY),
+        total=num,
+        desc="resampling daily klines",
+        position=0,
     ):
         fut = [read_parquet_object(ctx, file) for file in batch]
         for df in await asyncio.gather(*fut):
@@ -679,15 +733,15 @@ async def exponential_backoff(
             i += 1
 
 
-extract_object_partitioned_sem = asyncio.Semaphore(20)
+extract_object_partitioned_sem = asyncio.Semaphore(CONCURRENCY)
 
 
 async def extract_object_partitioned(
-    session: aiohttp.ClientSession, r2, zip_url: str, chksm_url: str | None
-):
+    ctx: Context, zip_url: str, chksm_url: str | None
+) -> Tuple[str, date] | None:
     async with extract_object_partitioned_sem:
         # fetch zip and verify checksum
-        async with session.get(zip_url) as resp:
+        async with ctx.session.get(zip_url) as resp:
             if resp.status == 404:
                 return None
             elif resp.status != 200:
@@ -697,7 +751,7 @@ async def extract_object_partitioned(
 
         if chksm_url is not None:
             got = sha256(compressed).hexdigest()
-            async with session.get(chksm_url) as resp:
+            async with ctx.session.get(chksm_url) as resp:
                 if resp.status != 200:
                     l.warn(
                         f"Archive {zip_url} missing checksum file, skipping verification."
@@ -721,9 +775,9 @@ async def extract_object_partitioned(
 
         u = urlparse(zip_url)
         pair, day = parse_binance_filename(u.path.lstrip("/"))
-        dsturl = f"{make_hive_prefix(pair, day.year, day.month, day.day)}.csv"
+        dsturl = f"{make_mirror_prefix( day.year, day.month, day.day, pair)}.csv"
         dstbkt, dstkey = parse_object_store_url(dsturl)
-        await r2.put_object(
+        await ctx.r2.put_object(
             Bucket=dstbkt,
             Key=dstkey,
             Body=csv_data,

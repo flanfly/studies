@@ -1,7 +1,7 @@
-job "docs" {
+job "sync-binance-spot" {
   type = "batch"
 
-  group "example" {
+  group "sync-datastore" {
     count = 19
 
     constraint {
@@ -9,32 +9,18 @@ job "docs" {
       value    = "true"
     }
 
-    task "uptime" {
+    task "init" {
       driver = "exec"
 
-      template {
-        data        = <<-EOT
-          alpha
-          beta
-          gamma
-          delta
-          epsilon
-          zeta
-          eta
-          theta
-          iota
-          kappa
-          lambda
-          mu
-          nu
-          xi
-          omicron
-          pi
-          rho
-          sigma
-          tau
-        EOT
+      lifecycle {
+        hook    = "prestart"
+        sidecar = false
+      }
+
+      artifact {
+        source      = "http://10.0.0.2/queue"
         destination = "local/queue"
+        mode        = "file"
       }
 
       config {
@@ -42,14 +28,35 @@ job "docs" {
         args = [
           "-c",
           <<-EOT
-            echo "Processing task ${NOMAD_ALLOC_INDEX}"
-            echo "$(cat local/queue | sed -n "$((NOMAD_ALLOC_INDEX + 1))p")"
-            uptime
-            echo "Done with task ${NOMAD_ALLOC_INDEX}"
+            echo "selecting ${NOMAD_ALLOC_INDEX}"
+            cat local/queue | sed -n "$((NOMAD_ALLOC_INDEX + 1))p" > alloc/item
           EOT
         ]
       }
     }
+
+    task "sync" {
+      driver = "docker"
+
+      env {
+        GIT_KEY_FILE = "/secrets/git.key"
+      }
+
+      resources {
+        memory = 3500
+        cpu    = 2000
+      }
+
+      artifact {
+        source      = "http://10.0.0.2/git.key"
+        destination = "secrets/git.key"
+        mode        = "file"
+      }
+
+      config {
+        image = "ghcr.io/flanfly/studies@sha256:1305fd081e9a8c33391e27c2e0619d1793664e21500990c8bbc9ed7838bb7d19"
+        args  = ["sh", "-c", "uv run sync-datastore.py -s $(cat /alloc/item)"]
+      }
+    }
   }
 }
-
