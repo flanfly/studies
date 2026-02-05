@@ -148,13 +148,6 @@ BINANCE_VISION_DAILY_SPOT_ARCHIVE_PAIR_MONTH_YEAR = (
     "s3://data.binance.vision/data/spot/daily/klines/{0}/1m/{0}-1m-{1:04d}-{2:02d}"
 )
 
-# hive partitioned by year/month/day, one parquet file per day
-MINUTE_BUCKET = (
-    "r2://studies-binance-store/spot-1m/"  # year=YYYY/month=MM/day=DD/dataNN.parquet
-)
-DAILY_BUCKET = "r2://studies-binance-store/spot-1m-store/"
-ONE_DAY_FILE = "r2://studies-binance-store/spot-1d.parquet"
-
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
 CONCURRENCY = 20
 
@@ -335,7 +328,7 @@ async def main():
             l.info(f"filtered {num_all - num_sel} pairs.")
 
         if args.list:
-            return await action_list_symbols(ctx)
+            return await action_list_symbols(ctx, pairs)
         if args.available:
             return await action_catalog_available_archives(ctx, pairs)
 
@@ -455,7 +448,7 @@ async def find_latest_archive(r2, pair: str, horizon: date) -> date | None:
         r2,
         pair,
         horizon,
-        make_prefix=lambda p, d: f"{make_mirror_prefix( d.year, d.month, d.day,p)}.csv",
+        make_prefix=lambda p, d: f"{make_mirror_prefix(d.year, d.month, d.day,p)}.csv",
         find_end=True,
     )
 
@@ -769,19 +762,6 @@ async def download_and_verify_csv(
         raise TransientError("Decompression failed, re-download required.") from e
 
 
-#        u = urlparse(zip_url)
-#        pair, day = parse_binance_filename(u.path.lstrip("/"))
-#        dsturl = f"{make_mirror_prefix( day.year, day.month, day.day, pair)}.csv"
-#        dstbkt, dstkey = parse_object_store_url(dsturl)
-#        await ctx.r2.put_object(
-#            Bucket=dstbkt,
-#            Key=dstkey,
-#            Body=csv_data,
-#        )
-#
-#        return pair, day
-
-
 if __name__ == "__main__":
     with logging_redirect_tqdm():
         try:
@@ -789,3 +769,4 @@ if __name__ == "__main__":
             l.info("Sync'd")
         except Exception as e:
             l.exception("Fatal error during sync", exc_info=e)
+            sys.exit(1)
