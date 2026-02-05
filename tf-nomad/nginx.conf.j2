@@ -1,0 +1,10 @@
+server {
+    listen {{ master_ip }}:80;
+    
+    location / {
+        root /var/www/artifacts;
+        autoindex on;
+        allow 10.0.0.0/8;
+        deny all;
+    }
+}

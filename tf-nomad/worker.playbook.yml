@@ -1,0 +1,85 @@
+- name: setup nomad worker
+  hosts: all
+  tasks:
+    - ansible.builtin.hostname:
+        name: "{{ hostname }}"
+    # install nomad, docker and nginx
+    - ansible.builtin.get_url:
+        url: https://apt.releases.hashicorp.com/gpg
+        dest: /tmp/hashicorp.gpg
+        mode: '0644'
+    - ansible.builtin.shell: |
+        cat /tmp/hashicorp.gpg | gpg --dearmor | tee /etc/apt/trusted.gpg.d/hashicorp-archive-keyring.gpg > /dev/null
+      args:
+        creates: /etc/apt/trusted.gpg.d/hashicorp-archive-keyring.gpg
+    - ansible.builtin.apt_repository:
+        repo: "deb [arch={{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }} signed-by=/etc/apt/trusted.gpg.d/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_facts['distribution_release'] }} main"
+        filename: hashicorp
+        state: present
+    - ansible.builtin.apt:
+        pkg: [nomad, docker.io]
+        update_cache: true
+    - service:
+        name: docker
+        state: started 
+      register: docker_service
+      until: docker_service.status.ActiveState == "active"
+      retries: 10
+      delay: 20
+    # setup nomad
+    - ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: nomad
+        group: nomad
+        mode: '0755'
+      notify: restart_nomad
+      loop: ["/opt/nomad/data", "/etc/nomad.d"]
+    - ansible.builtin.copy:
+        dest: /etc/systemd/system/nomad.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Nomad
+          After=network-online.target
+          [Service]
+          User=root
+          Group=root
+          ExecStart=/usr/bin/nomad agent -config /etc/nomad.d
+          Restart=on-failure
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload_systemd
+    - ansible.builtin.copy:
+        dest: /etc/nomad.d/nomad.hcl
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          data_dir = "/opt/nomad/data"
+          client {
+            enabled = true
+            servers = ["{{ master_ip }}:4647"]
+          }
+          plugin "docker" {
+            config {
+              allow_privileged = true
+              volumes {
+                enabled = true
+              }
+              image_pull_timeout = "1h"
+            }
+          }
+      notify: restart_nomad
+
+  handlers:
+    - name: reload_systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+    - name: restart_nomad
+      ansible.builtin.service:
+        name: nomad
+        state: restarted
+        enabled: true

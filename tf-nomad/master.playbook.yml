@@ -1,0 +1,130 @@
+- name: setup nomad master
+  hosts: all
+  tasks:
+    - ansible.builtin.hostname:
+        name: "{{ hostname }}"
+    # nomad user and group
+    - ansible.builtin.group:
+        name: nomad
+        state: present
+    - ansible.builtin.user:
+        name: nomad
+        group: nomad
+        system: true
+        shell: /bin/false
+    # install nomad, tailscale, docker and nginx
+    - ansible.builtin.get_url:
+        url: https://apt.releases.hashicorp.com/gpg
+        dest: /tmp/hashicorp.gpg
+        mode: '0644'
+    - ansible.builtin.shell:
+        cat /tmp/hashicorp.gpg | gpg --dearmor | tee /etc/apt/trusted.gpg.d/hashicorp-archive-keyring.gpg > /dev/null
+      args:
+        creates: /etc/apt/trusted.gpg.d/hashicorp-archive-keyring.gpg
+    - get_url:
+        url: "https://pkgs.tailscale.com/stable/{{ ansible_distribution | lower }}/{{ ansible_distribution_release }}.noarmor.gpg"
+        dest: /etc/apt/trusted.gpg.d/tailscale-archive-keyring.gpg
+        mode: '0644'
+    - ansible.builtin.apt_repository:
+        repo: "deb [arch={{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }} signed-by=/etc/apt/trusted.gpg.d/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_facts['distribution_release'] }} main"
+        filename: hashicorp
+        state: present
+        update_cache: true
+    - ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/trusted.gpg.d/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} main"
+        filename: tailscale
+        state: present
+        update_cache: yes
+    - ansible.builtin.apt:
+        pkg: [nomad, tailscale, apt-transport-https, ca-certificates, curl, software-properties-common, docker.io, nginx]
+        update_cache: true
+    # setup nginx
+    - template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/nomad-repo
+      notify: restart_nginx
+    - file:
+        path: "/etc/nginx/sites-enabled/{{ item.name }}"
+        src: "{{ item.src | default(omit) }}"
+        state: "{{ item.state }}"
+      notify: restart_nginx
+      loop:
+        - { name: 'default', state: 'absent' }
+        - { name: 'nomad-repo', src: '/etc/nginx/sites-available/nomad-repo', state: 'link' }
+    - file:
+        path: /var/www/artifacts
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+    - ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/var/www/artifacts/{{ item }}"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+      loop: ['git.key', 'queue']
+    # setup nomad
+    - ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: nomad
+        group: nomad
+        mode: '0755'
+      notify: restart_nomad
+      loop: ["/opt/nomad/data", "/etc/nomad.d"]
+    - ansible.builtin.copy:
+        dest: /etc/systemd/system/nomad.service
+        content: |
+          [Unit]
+          Description=Nomad
+          After=network-online.target
+          [Service]
+          User=nomad
+          Group=nomad
+          ExecStart=/usr/bin/nomad agent -config /etc/nomad.d
+          Restart=on-failure
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload_systemd
+    - ansible.builtin.copy:
+        dest: /etc/nomad.d/nomad.hcl
+        content: |
+          data_dir = "/opt/nomad/data"
+          bind_addr = "{{ master_ip }}"
+          server {
+            enabled = true
+            bootstrap_expect = 1
+          }
+          advertise {
+            http = "{{ master_ip }}"
+            rpc = "{{ master_ip }}"
+            serf = "{{ master_ip }}"
+          }
+      notify: restart_nomad
+    # setup tailscale
+    - service:
+        name: tailscaled
+        state: started
+        enabled: yes
+    - command: tailscale status
+      register: tailscale_status
+      changed_when: false
+      failed_when: false
+    - command: tailscale up --authkey={{ tailscale_key }}
+      when: tailscale_status.rc != 0
+
+  handlers:
+    - name: reload_systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+    - name: restart_nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+        enabled: true
+    - name: restart_nomad
+      ansible.builtin.service:
+        name: nomad
+        state: restarted
+        enabled: true

@@ -177,8 +177,9 @@ resource "null_resource" "worker_ctor" {
   }
 
   triggers = {
-    master_id = hcloud_server.master.id
-    worker_id = each.value.id
+    master_id       = hcloud_server.master.id
+    worker_id       = each.value.id
+    playbook_sha256 = filesha256("${path.module}/worker.playbook.yml"),
   }
 
   provisioner "remote-exec" {
