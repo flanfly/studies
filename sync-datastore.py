@@ -682,6 +682,11 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
                 df = results[next]
                 results[next] = None
 
+                if df is None:
+                    next += 1
+                    bar.update(1)
+                    continue
+
                 table = df.to_arrow()
                 if writer is None:
                     writer = pq.ParquetWriter(
@@ -700,6 +705,8 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
 
 async def download_and_resample_daily_klines(ctx, src: str) -> pl.DataFrame:
     df = await read_parquet_object(ctx, src)
+    if df is None:
+        return None
     return (
         df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
         .group_by(["ts", "symbol"])
