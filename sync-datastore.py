@@ -306,6 +306,13 @@ async def main():
         help="Number of concurrent downloads/uploads.",
         default=20,
     )
+    parser.add_argument(
+        "-d",
+        "--daily",
+        nargs="?",
+        const="r2://studies-binance-store/spot-1d/data00.parquet",
+        help="Resample data into daily klines after synchronization.",
+    )
 
     args = parser.parse_args()
 
@@ -343,15 +350,29 @@ async def main():
             l.error("No start date could be determined, and --from-date not given.")
             return
 
-        await action_synchronize(ctx, pairs, dates[0], dates[1])
+        if args.daily:
+            await action_synchronize_daily_klines(ctx, args.daily, dates[0], dates[1])
+        else:
+            await action_synchronize_minute_klines(ctx, pairs, dates[0], dates[1])
 
 
-async def action_synchronize(ctx: Context, pairs: List[str], start: date, end: date):
+async def action_synchronize_minute_klines(
+    ctx: Context, pairs: List[str], start: date, end: date
+):
     dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     fut = [synchonize_day(ctx, pairs, d) for d in dates]
     await tqdm.gather(
         *fut, desc=f"synchronizing {start} to {end} ({len(dates)} days)", position=0
     )
+
+
+async def action_synchronize_daily_klines(ctx: Context, dst, start: date, end: date):
+    dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    files = [
+        join(make_packed_prefix(d.year, d.month, d.day), "data00.parquet")
+        for d in dates
+    ]
+    await resample_daily_klines(ctx, files, dst)
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
@@ -564,11 +585,23 @@ async def read_csv_object(
     return await asyncio.to_thread(transform_csv_data, data, obj.pair)
 
 
-async def read_parquet_object(ctx: Context, url: str) -> pl.DataFrame:
-    bucket, key = parse_object_store_url(url)
-    resp = await ctx.r2.get_object(Bucket=bucket, Key=key)
-    async with resp["Body"] as body:
-        return pl.read_parquet(io.BytesIO(await body.read()))
+read_parquet_object_sem = asyncio.Semaphore(CONCURRENCY)
+
+
+async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.DataFrame:
+    async with read_parquet_object_sem:
+        try:
+            bucket, key = parse_object_store_url(url)
+            resp = await ctx.r2.get_object(Bucket=bucket, Key=key)
+            async with resp["Body"] as body:
+                data = await body.read()
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey" and not required:
+                return None
+            else:
+                raise
+
+    return await asyncio.to_thread(pl.read_parquet, io.BytesIO(data))
 
 
 def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
@@ -625,78 +658,67 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
     )
 
 
-async def compact_prefix_to_parquet(ctx: Context, objs: List[Obj], pqurl: str):
-    objs = sorted(objs, key=lambda o: (o.date, o.pair))
-    writer = None
-
-    fut = [read_csv_object(ctx, obj) for obj in objs]
-    res = [
-        d
-        for d in await tqdm.gather(*fut, desc=f"compacting {pqurl}", position=1)
-        if d is not None
-    ]
-    if len(res) == 0:
-        l.info(f"No data found for partition {pqurl}, skipping.")
-        return
-    df = pl.concat(res)
-    table = df.to_arrow()
-
-    pq.ParquetWriter(
-        pqurl.replace("r2://", ""),
-        table.schema,
-        filesystem=ctx.r2fs,
-        compression="zstd",
-    ).write_table(table)
-
-
 async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
     writer = None
-
     files = sorted(files)
-    num = (len(files) + CONCURRENCY - 1) // CONCURRENCY
 
-    for batch in tqdm(
-        it.batched(files, CONCURRENCY),
-        total=num,
-        desc="resampling daily klines",
-        position=0,
-    ):
-        fut = [read_parquet_object(ctx, file) for file in batch]
-        for df in await asyncio.gather(*fut):
-            daily = (
-                df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
-                .group_by(["ts", "symbol"])
-                .agg(
-                    [
-                        pl.col("open").first().alias("open"),
-                        pl.col("high").max().alias("high"),
-                        pl.col("low").min().alias("low"),
-                        pl.col("close").last().alias("close"),
-                        pl.col("base_volume").sum().alias("base_volume"),
-                        pl.col("quote_volume").sum().alias("quote_volume"),
-                        pl.col("close_time").max().alias("close_time"),
-                        pl.col("trades").sum().alias("trades"),
-                        pl.col("taker_buy_base_volume")
-                        .sum()
-                        .alias("taker_buy_base_volume"),
-                        pl.col("taker_buy_quote_volume")
-                        .sum()
-                        .alias("taker_buy_quote_volume"),
-                    ]
-                )
-                .sort(["ts", "symbol"])
-            )
+    async def w(idx, file):
+        return idx, await download_and_resample_daily_klines(ctx, file)
 
-            table = daily.to_arrow()
-            if writer is None:
-                schema = table.schema
-                writer = pq.ParquetWriter(
-                    pqurl.replace("r2://", ""),
-                    schema,
-                    filesystem=ctx.r2fs,
-                    compression="zstd",
-                )
-            writer.write_table(table)
+    fut = [w(idx, file) for idx, file in enumerate(files)]
+
+    next = 0
+    results = {}
+    with tqdm(
+        desc=f"resampling daily klines to {pqurl}",
+        unit="file",
+        total=len(files),
+    ) as bar:
+        for f in asyncio.as_completed(fut):
+            idx, df = await f
+            results[idx] = df
+
+            while next in results:
+                df = results[next]
+                results[next] = None
+
+                table = df.to_arrow()
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        pqurl.replace("r2://", ""),
+                        table.schema,
+                        filesystem=ctx.r2fs,
+                        compression="zstd",
+                    )
+                writer.write_table(table)
+                next += 1
+                bar.update(1)
+
+    if writer is not None:
+        writer.close()
+
+
+async def download_and_resample_daily_klines(ctx, src: str) -> pl.DataFrame:
+    df = await read_parquet_object(ctx, src)
+    return (
+        df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
+        .group_by(["ts", "symbol"])
+        .agg(
+            [
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.col("base_volume").sum().alias("base_volume"),
+                pl.col("quote_volume").sum().alias("quote_volume"),
+                pl.col("close_time").max().alias("close_time"),
+                pl.col("trades").sum().alias("trades"),
+                pl.col("taker_buy_base_volume").sum().alias("taker_buy_base_volume"),
+                pl.col("taker_buy_quote_volume").sum().alias("taker_buy_quote_volume"),
+            ]
+        )
+        .sort(["ts", "symbol"])
+    )
 
 
 async def exponential_backoff(
