@@ -596,6 +596,7 @@ read_parquet_object_sem = None
 
 async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.DataFrame:
     async with read_parquet_object_sem:
+        l.info(f"downloading parquet object {url}")
         try:
             bucket, key = parse_object_store_url(url)
             resp = await ctx.r2.get_object(Bucket=bucket, Key=key)
@@ -603,6 +604,7 @@ async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.Data
                 data = await body.read()
         except ClientError as e:
             if e.response["Error"]["Code"] == "NoSuchKey" and not required:
+                l.info(f"parquet object {url} not found, skipping.")
                 return None
             else:
                 raise
@@ -683,14 +685,16 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
         for f in asyncio.as_completed(fut):
             idx, df = await f
             results[idx] = df
+            bar.n = len(results)
+            bar.refresh()
 
             while next in results:
+                next += 1
                 df = results[next]
                 results[next] = None
 
                 if df is None:
-                    next += 1
-                    bar.update(1)
+                    l.warning(f"file {files[next-1]} is missing, skipping.")
                     continue
 
                 table = df.to_arrow()
@@ -702,8 +706,6 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
                         compression="zstd",
                     )
                 writer.write_table(table)
-                next += 1
-                bar.update(1)
 
     if writer is not None:
         writer.close()
