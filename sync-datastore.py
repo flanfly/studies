@@ -712,27 +712,34 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
 
 
 async def download_and_resample_daily_klines(ctx, src: str) -> pl.DataFrame:
-    df = await read_parquet_object(ctx, src)
+    df = await exponential_backoff(read_parquet_object, [ctx, src], retries=5)
     if df is None:
         return None
-    return (
-        df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
-        .group_by(["ts", "symbol"])
-        .agg(
-            [
-                pl.col("open").first().alias("open"),
-                pl.col("high").max().alias("high"),
-                pl.col("low").min().alias("low"),
-                pl.col("close").last().alias("close"),
-                pl.col("base_volume").sum().alias("base_volume"),
-                pl.col("quote_volume").sum().alias("quote_volume"),
-                pl.col("close_time").max().alias("close_time"),
-                pl.col("trades").sum().alias("trades"),
-                pl.col("taker_buy_base_volume").sum().alias("taker_buy_base_volume"),
-                pl.col("taker_buy_quote_volume").sum().alias("taker_buy_quote_volume"),
-            ]
-        )
-        .sort(["ts", "symbol"])
+    return await asyncio.to_thread(
+        lambda df: (
+            df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
+            .group_by(["ts", "symbol"])
+            .agg(
+                [
+                    pl.col("open").first().alias("open"),
+                    pl.col("high").max().alias("high"),
+                    pl.col("low").min().alias("low"),
+                    pl.col("close").last().alias("close"),
+                    pl.col("base_volume").sum().alias("base_volume"),
+                    pl.col("quote_volume").sum().alias("quote_volume"),
+                    pl.col("close_time").max().alias("close_time"),
+                    pl.col("trades").sum().alias("trades"),
+                    pl.col("taker_buy_base_volume")
+                    .sum()
+                    .alias("taker_buy_base_volume"),
+                    pl.col("taker_buy_quote_volume")
+                    .sum()
+                    .alias("taker_buy_quote_volume"),
+                ]
+            )
+            .sort(["ts", "symbol"])
+        ),
+        df,
     )
 
 
