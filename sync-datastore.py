@@ -322,6 +322,12 @@ async def main():
     global CONCURRENCY
     CONCURRENCY = args.concurrency
 
+    global synchronize_day_sem, read_csv_object_sem, read_parquet_object_sem, extract_object_partitioned_sem
+    synchronize_day_sem = asyncio.Semaphore(2)
+    read_csv_object_sem = asyncio.Semaphore(CONCURRENCY)
+    read_parquet_object_sem = asyncio.Semaphore(CONCURRENCY)
+    extract_object_partitioned_sem = asyncio.Semaphore(CONCURRENCY)
+
     async with make_context() as ctx:
         pairs = await retrieve_spot_pairs(ctx)
 
@@ -388,7 +394,7 @@ async def action_catalog_available_archives(ctx: Context, pairs: Dict[str, Pair]
                 print(p.filename)
 
 
-synchronize_day_sem = asyncio.Semaphore(2)
+synchronize_day_sem = None
 
 
 async def synchonize_day(ctx: Context, pairs: List[str], day: date):
@@ -566,7 +572,7 @@ def decompress_csv(zip_bytes):
                 return csv_file.read()
 
 
-read_csv_object_sem = asyncio.Semaphore(CONCURRENCY)
+read_csv_object_sem = None
 
 
 async def read_csv_object(
@@ -585,7 +591,7 @@ async def read_csv_object(
     return await asyncio.to_thread(transform_csv_data, data, obj.pair)
 
 
-read_parquet_object_sem = asyncio.Semaphore(CONCURRENCY)
+read_parquet_object_sem = None
 
 
 async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.DataFrame:
@@ -750,7 +756,7 @@ async def exponential_backoff(
             i += 1
 
 
-extract_object_partitioned_sem = asyncio.Semaphore(CONCURRENCY)
+extract_object_partitioned_sem = None
 
 
 async def download_and_verify_csv(
