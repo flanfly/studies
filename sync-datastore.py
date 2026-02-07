@@ -9,6 +9,7 @@ from tqdm.asyncio import tqdm
 from contextlib import asynccontextmanager, AsyncExitStack
 
 import os
+import tempfile
 import sys
 from posixpath import join, basename
 import more_itertools as it
@@ -670,53 +671,58 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
     writer = None
     files = sorted(files)
 
-    async def w(idx, file):
-        return idx, await download_and_resample_daily_klines(ctx, file)
+    async def w(idx, file, dir):
+        return idx, await download_and_resample_daily_klines(ctx, file, dir)
 
-    fut = [w(idx, file) for idx, file in enumerate(files)]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fut = [w(idx, file, tmpdir) for idx, file in enumerate(files)]
 
-    next = 0
-    results = {}
-    with tqdm(
-        desc=f"resampling daily klines to {pqurl}",
-        unit="file",
-        total=len(files),
-    ) as bar:
-        for f in asyncio.as_completed(fut):
-            idx, df = await f
-            results[idx] = df
-            bar.n = len(results)
-            bar.refresh()
+        next_idx = 0
+        results = {}
+        with tqdm(
+            desc=f"resampling daily klines to {pqurl}",
+            unit="file",
+            total=len(files),
+        ) as bar:
+            for f in asyncio.as_completed(fut):
+                idx, df = await f
+                results[idx] = df
+                bar.n = len(results)
+                bar.refresh()
 
-            while next in results:
-                next += 1
-                df = results[next]
-                results[next] = None
+                while next_idx in results:
+                    df = results[next_idx]
+                    results[next_idx] = None
+                    next_idx += 1
 
-                if df is None:
-                    l.warning(f"file {files[next-1]} is missing, skipping.")
-                    continue
+                    if df is None:
+                        l.warning(f"file {files[next_idx-1]} is missing, skipping.")
+                        continue
 
-                table = df.to_arrow()
-                if writer is None:
-                    writer = pq.ParquetWriter(
-                        pqurl.replace("r2://", ""),
-                        table.schema,
-                        filesystem=ctx.r2fs,
-                        compression="zstd",
-                    )
-                writer.write_table(table)
+                    table = df.to_arrow()
+                    if writer is None:
+                        writer = pq.ParquetWriter(
+                            pqurl.replace("r2://", ""),
+                            table.schema,
+                            filesystem=ctx.r2fs,
+                            compression="zstd",
+                        )
+                    writer.write_table(table)
 
-    if writer is not None:
-        writer.close()
+        if writer is not None:
+            writer.close()
 
 
-async def download_and_resample_daily_klines(ctx, src: str) -> pl.DataFrame:
+async def download_and_resample_daily_klines(
+    ctx, src: str, tmpdir: str
+) -> pl.DataFrame:
     df = await exponential_backoff(read_parquet_object, [ctx, src], retries=5)
     if df is None:
         return None
-    return await asyncio.to_thread(
-        lambda df: (
+
+    _, file = tempfile.mkstemp(dir=tmpdir, suffix=".parquet")
+    await asyncio.to_thread(
+        lambda df, file: (
             df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
             .group_by(["ts", "symbol"])
             .agg(
@@ -738,9 +744,12 @@ async def download_and_resample_daily_klines(ctx, src: str) -> pl.DataFrame:
                 ]
             )
             .sort(["ts", "symbol"])
-        ),
+        ).write_ipc(file),
         df,
+        file,
     )
+
+    return pl.scan_ipc(file, memory_map=True)
 
 
 async def exponential_backoff(
