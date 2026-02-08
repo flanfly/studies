@@ -229,7 +229,7 @@ def make_mirror_prefix(
 
 
 def make_packed_prefix(year: int | None, month: int | None, day: int | None) -> str:
-    pfx = f"r2://studies-binance-store/spot-1m/"
+    pfx = f"s3://studies-binance-store/spot-1m/"
     if year is not None:
         pfx += f"year={year:04d}/"
         if month is not None:
@@ -377,13 +377,43 @@ async def action_synchronize_daily_klines(ctx: Context, dst, start: date, end: d
         join(make_packed_prefix(d.year, d.month, d.day), "data00.parquet")
         for d in dates
     ]
+    so = {
+        "aws_access_key_id": os.getenv("R2_ACCESS_KEY"),
+        "aws_secret_access_key": os.getenv("R2_SECRET_KEY"),
+        "aws_endpoint_url": f"""https://{os.getenv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com""",
+        "aws_region": "auto",
+    }
 
-    writer = None
-
-    for batch in tqdm(it.batched(sorted(files), CONCURRENCY), unit="batch", position=0):
-        writer = await resample_daily_klines(ctx, writer, batch, dst)
-    if writer is not None:
-        writer.close()
+    (
+        pl.scan_parquet(
+            files,
+            storage_options=so,
+            hive_partitioning=True,
+            low_memory=True,
+        )
+        .sort(["year", "month", "day", "ts", "symbol"])
+        .with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
+        .group_by(["ts", "symbol"])
+        .agg(
+            [
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.col("base_volume").sum().alias("base_volume"),
+                pl.col("quote_volume").sum().alias("quote_volume"),
+                pl.col("close_time").max().alias("close_time"),
+                pl.col("trades").sum().alias("trades"),
+                pl.col("taker_buy_base_volume").sum().alias("taker_buy_base_volume"),
+                pl.col("taker_buy_quote_volume").sum().alias("taker_buy_quote_volume"),
+            ]
+        )
+        .sort(["ts", "symbol"])
+    ).sink_parquet(
+        dst.replace("r2://", ""),
+        storage_options=so,
+        compression="zstd",
+    )
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
