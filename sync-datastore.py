@@ -617,7 +617,6 @@ async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.Data
                 data = await body.read()
         except ClientError as e:
             if e.response["Error"]["Code"] == "NoSuchKey" and not required:
-                l.info(f"parquet object {url} not found, skipping.")
                 return None
             else:
                 raise
