@@ -368,9 +368,7 @@ async def action_synchronize_minute_klines(
 ):
     dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     fut = [synchonize_day(ctx, pairs, d) for d in dates]
-    await tqdm.gather(
-        *fut, desc=f"synchronizing {start} to {end} ({len(dates)} days)", position=0
-    )
+    await tqdm.gather(*fut, desc=f"synchronizing {start} to {end} ({len(dates)} days)")
 
 
 async def action_synchronize_daily_klines(ctx: Context, dst, start: date, end: date):
@@ -379,7 +377,13 @@ async def action_synchronize_daily_klines(ctx: Context, dst, start: date, end: d
         join(make_packed_prefix(d.year, d.month, d.day), "data00.parquet")
         for d in dates
     ]
-    await resample_daily_klines(ctx, files, dst)
+
+    writer = None
+
+    for batch in tqdm(it.batched(sorted(files), CONCURRENCY), unit="batch"):
+        writer = await resample_daily_klines(ctx, writer, batch, dst)
+    if writer is not None:
+        writer.close()
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
@@ -597,7 +601,6 @@ read_parquet_object_sem = None
 
 async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.DataFrame:
     async with read_parquet_object_sem:
-        l.info(f"downloading parquet object {url}")
         try:
             bucket, key = parse_object_store_url(url)
             resp = await ctx.r2.get_object(Bucket=bucket, Key=key)
@@ -667,8 +670,7 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
     )
 
 
-async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
-    writer = None
+async def resample_daily_klines(ctx: Context, writer, files: List[str], pqurl: str):
     files = sorted(files)
 
     async def w(idx, file, dir):
@@ -682,6 +684,7 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
         with tqdm(
             desc=f"resampling daily klines to {pqurl}",
             unit="file",
+            position=1,
             total=len(files),
         ) as bar:
             for f in asyncio.as_completed(fut):
@@ -699,8 +702,9 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
                         l.warning(f"file {files[next_idx-1]} is missing, skipping.")
                         continue
 
-                    table = df.to_arrow()
+                    table = df.collect().to_arrow()
                     if writer is None:
+                        l.info(f"creating parquet writer for {pqurl}")
                         writer = pq.ParquetWriter(
                             pqurl.replace("r2://", ""),
                             table.schema,
@@ -708,9 +712,7 @@ async def resample_daily_klines(ctx: Context, files: List[str], pqurl: str):
                             compression="zstd",
                         )
                     writer.write_table(table)
-
-        if writer is not None:
-            writer.close()
+    return writer
 
 
 async def download_and_resample_daily_klines(
