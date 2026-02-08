@@ -380,7 +380,7 @@ async def action_synchronize_daily_klines(ctx: Context, dst, start: date, end: d
 
     writer = None
 
-    for batch in tqdm(it.batched(sorted(files), CONCURRENCY), unit="batch"):
+    for batch in tqdm(it.batched(sorted(files), CONCURRENCY), unit="batch", position=0):
         writer = await resample_daily_klines(ctx, writer, batch, dst)
     if writer is not None:
         writer.close()
@@ -694,6 +694,7 @@ async def resample_daily_klines(ctx: Context, writer, files: List[str], pqurl: s
         unit="file",
         position=1,
         total=len(files),
+        leave=False,
     ) as bar:
         for f in asyncio.as_completed(fut):
             idx, df = await f
