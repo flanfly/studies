@@ -399,7 +399,7 @@ async def action_catalog_available_archives(ctx: Context, pairs: Dict[str, Pair]
                 print(p.filename)
 
 
-synchronize_day_sem = None
+synchronize_day_sem: asyncio.Semaphore | None = None
 
 
 async def synchonize_day(ctx: Context, pairs: List[str], day: date):
@@ -407,6 +407,9 @@ async def synchonize_day(ctx: Context, pairs: List[str], day: date):
         make_packed_prefix(day.year, day.month, day.day).replace("r2://", ""),
         "data00.parquet",
     )
+
+    if synchronize_day_sem is None:
+        raise RuntimeError("synchronize_day_sem is not initialized")
 
     async with synchronize_day_sem:
         fut = [process_single_archive(ctx, pair, day) for pair in pairs]
@@ -577,12 +580,15 @@ def decompress_csv(zip_bytes):
                 return csv_file.read()
 
 
-read_csv_object_sem = None
+read_csv_object_sem: asyncio.Semaphore | None = None
 
 
 async def read_csv_object(
     ctx: Context, obj: Obj, required=False
 ) -> pl.DataFrame | None:
+    if read_csv_object_sem is None:
+        raise RuntimeError("read_csv_object_sem is not initialized")
+
     async with read_csv_object_sem:
         try:
             resp = await ctx.r2.get_object(Bucket=obj.bucket, Key=obj.key)
@@ -600,6 +606,9 @@ read_parquet_object_sem = None
 
 
 async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.DataFrame:
+    if read_parquet_object_sem is None:
+        raise RuntimeError("read_parquet_object_sem is not initialized")
+
     async with read_parquet_object_sem:
         try:
             bucket, key = parse_object_store_url(url)
@@ -776,12 +785,15 @@ async def exponential_backoff(
             i += 1
 
 
-extract_object_partitioned_sem = None
+extract_object_partitioned_sem: asyncio.Semaphore | None = None
 
 
 async def download_and_verify_csv(
     ctx: Context, zip_url: str, chksm_url: str | None
 ) -> bytes | None:
+    if extract_object_partitioned_sem is None:
+        raise RuntimeError("extract_object_partitioned_sem is not initialized")
+
     async with extract_object_partitioned_sem:
         # fetch zip and verify checksum
         async with ctx.session.get(zip_url) as resp:
