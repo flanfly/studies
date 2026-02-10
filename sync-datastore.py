@@ -350,7 +350,8 @@ async def main():
             if args.sense_date is not None:
                 dates = await determine_start_date(ctx, args.sense_date)
             else:
-                dates = await determine_start_date(ctx, "ETHBTC")
+                start_date = await determine_start_date(ctx, "ETHBTC")
+                dates = [start_date, date.today() - timedelta(days=1)]
         else:
             dates = args.dates
         if dates is None:
@@ -404,7 +405,7 @@ synchronize_day_sem: asyncio.Semaphore | None = None
 
 async def synchonize_day(ctx: Context, pairs: List[str], day: date):
     dst = join(
-        make_packed_prefix(day.year, day.month, day.day).replace("r2://", ""),
+        make_packed_prefix(day.year, day.month, day.day).replace("s3://", ""),
         "data00.parquet",
     )
 
@@ -723,9 +724,7 @@ async def resample_daily_klines(ctx: Context, writer, files: List[str], pqurl: s
     return writer
 
 
-async def download_and_resample_daily_klines(
-    ctx, src: str
-) -> pl.DataFrame:
+async def download_and_resample_daily_klines(ctx, src: str) -> pl.DataFrame:
     df = await exponential_backoff(read_parquet_object, [ctx, src], retries=5)
     if df is None:
         return None
