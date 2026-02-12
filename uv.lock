@@ -29,6 +29,18 @@ wheels = [
 ]
 
 [[package]]
+name = "aioboto3"
+version = "7.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiobotocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/5f/cf6de345760520907ab91573be61853552e6402d94fa781b09fa84ce3f42/aioboto3-7.0.0.tar.gz", hash = "sha256:84fc1ed0d456f2f0ff5626e5045bb9871461155aa9d91f44be0e3b1554e30552", size = 47935, upload-time = "2020-03-17T12:34:43.898Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/02/d2b8ec2172577329daec50b0e547ac68955e04983ae42367fe3ae8388229/aioboto3-7.0.0-py2.py3-none-any.whl", hash = "sha256:db3db4058115fe610e631d98fe90a6d98de55cc93da7d9f6ddab4a5f74b2ff0c", size = 28941, upload-time = "2020-03-17T12:34:42.138Z" },
+]
+
+[[package]]
 name = "aiobotocore"
 version = "3.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4732,7 +4744,7 @@ name = "studies"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "aiobotocore" },
+    { name = "aioboto3" },
     { name = "aiohttp" },
     { name = "arch" },
     { name = "binance-sdk-spot" },
@@ -4757,7 +4769,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiobotocore", specifier = ">=3.1.0" },
+    { name = "aioboto3", specifier = ">=7.0.0" },
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "arch", specifier = ">=8.0.0" },
     { name = "binance-sdk-spot", specifier = ">=6.0.0" },

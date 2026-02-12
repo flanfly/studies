@@ -1,13 +1,14 @@
 import botocore
 import botocore.config as botoconfig
 from botocore.exceptions import ClientError
-from aiobotocore.session import get_session as boto_session
+import aioboto3
 
 import asyncio
 import aiohttp
 from tqdm.asyncio import tqdm
 from contextlib import asynccontextmanager, AsyncExitStack
 
+from tempfile import NamedTemporaryFile
 import os
 import sys
 from posixpath import join, basename
@@ -52,39 +53,47 @@ class Context:
     s3: Any
     r2: Any
     r2fs: fs.S3FileSystem
+    storage_options: Dict[str, str]
 
 
 @asynccontextmanager
 async def make_context():
-    boto = boto_session()
+    boto = aioboto3.Session()
     r2key = os.getenv("R2_ACCESS_KEY")
     r2sec = os.getenv("R2_SECRET_KEY")
     r2id = os.getenv("R2_ACCOUNT_ID")
+    r2ep = f"https://{r2id}.r2.cloudflarestorage.com"
+    so = {
+        "aws_access_key_id": r2key,
+        "aws_secret_access_key": r2sec,
+        "aws_endpoint_url": r2ep,
+        "aws_region": "auto",
+    }
 
     async with AsyncExitStack() as stack:
         session = await stack.enter_async_context(aiohttp.ClientSession())
         r2 = await stack.enter_async_context(
-            boto.create_client(
+            boto.client(
                 "s3",
                 aws_access_key_id=r2key,
                 aws_secret_access_key=r2sec,
-                endpoint_url=f"https://{r2id}.r2.cloudflarestorage.com",
+                endpoint_url=r2ep,
                 region_name="auto",
             )
         )
         s3 = await stack.enter_async_context(
-            boto.create_client(
+            boto.client(
                 "s3", config=botoconfig.Config(signature_version=botocore.UNSIGNED)
             )
         )
         r2fs = fs.S3FileSystem(
             access_key=r2key,
             secret_key=r2sec,
-            endpoint_override=f"https://{r2id}.r2.cloudflarestorage.com",
+            endpoint_override=r2ep,
             region="auto",
         )
 
-        yield Context(session=session, s3=s3, r2=r2, r2fs=r2fs)
+        yield Context(session=session, s3=s3, r2=r2, r2fs=r2fs, storage_options=so)
 
 
 class TransientError(Exception):
@@ -102,6 +111,8 @@ BINANCE_VISION_DAILY_SPOT_ARCHIVE_PAIR_MONTH_YEAR = (
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
 CONCURRENCY = 20
 PACKED_DEFAULT_FILENAME = "data00.parquet"
+RESAMPLED_ALL_FILENAME = "all.parquet"
+RESAMPLED_USDT_FILENAME = "usdt.parquet"
 
 l.basicConfig(
     format="[%(asctime)s] %(levelname)s    %(message)s",
@@ -220,7 +231,7 @@ async def main():
         "-d",
         "--daily",
         nargs="?",
-        const="r2://studies-binance-store/spot-1d/data00.parquet",
+        const="r2://studies-binance-store/spot-1d/",
         help="Resample data into daily klines after synchronization.",
     )
     parser.add_argument(
@@ -294,9 +305,12 @@ async def action_synchronize_minute_klines(
     await tqdm.gather(*fut, desc=f"synchronizing {start} to {end} ({len(dates)} days)")
 
 
-async def action_synchronize_daily_klines(ctx: Context, dst, start: date, end: date):
-    l.info(f"resampling daily klines from {start} to {end} into {dst}...")
+async def action_synchronize_daily_klines(
+    ctx: Context, dst_prefix: str, start: date, end: date
+):
+    l.info(f"resampling daily klines from {start} to {end}")
 
+    prefix = urlparse(dst_prefix)
     dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     files = [
         join(make_packed_prefix(d.year, d.month, d.day), PACKED_DEFAULT_FILENAME)
@@ -305,10 +319,41 @@ async def action_synchronize_daily_klines(ctx: Context, dst, start: date, end: d
     writer = None
     t = len(files) // CONCURRENCY + (1 if len(files) % CONCURRENCY != 0 else 0)
     b = it.batched(sorted(files), CONCURRENCY)
-    for batch in tqdm(b, unit="batch", position=0, total=t):
-        writer = await resample_daily_klines(ctx, writer, batch, dst)
-    if writer is not None:
-        writer.close()
+
+    with NamedTemporaryFile(delete=True) as fd:
+        # resample and buffer locally
+        for batch in tqdm(b, unit="batch", position=0, total=t):
+            writer = await resample_daily_klines(ctx, writer, batch, fd)
+        if writer is not None:
+            writer.close()
+            fd.flush()
+
+        allurl = join(prefix.netloc, prefix.path.lstrip("/"), RESAMPLED_ALL_FILENAME)
+        l.info(f"uploading resampled daily klines to {allurl}...")
+        with open(fd.name, "rb") as f:
+            mb = os.path.getsize(fd.name) / (1024 * 1024)
+            with tqdm(unit="bytes", total=mb, desc=allurl) as pb:
+                await ctx.r2.upload_fileobj(
+                    Fileobj=f,
+                    Bucket=prefix.netloc,
+                    Key=join(prefix.path.lstrip("/"), RESAMPLED_ALL_FILENAME),
+                    Callback=lambda tx: pb.update(tx / (1024 * 1024)),
+                )
+
+        usdturl = join(
+            f"s3://{prefix.netloc}",
+            prefix.path.lstrip("/"),
+            RESAMPLED_USDT_FILENAME,
+        )
+        l.info(f"uploading USDT-only resampled daily klines to {usdturl}...")
+        with open(fd.name, "rb") as f:
+            pl.scan_parquet(f).filter(
+                pl.col("symbol").str.ends_with("USDT")
+            ).sink_parquet(
+                usdturl,
+                compression="zstd",
+                storage_options=ctx.storage_options,
+            )
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
@@ -466,6 +511,8 @@ async def read_parquet_object(ctx: Context, url: str, required=False) -> pl.Data
             if e.response["Error"]["Code"] == "NoSuchKey" and not required:
                 return None
             raise TransientError(f"Failed to read object {url}: {e}")
+        except Exception as e:
+            raise TransientError(f"Failed to read object {url}: {e}")
 
     return await asyncio.to_thread(pl.read_parquet, io.BytesIO(data))
 
@@ -524,7 +571,7 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
     )
 
 
-async def resample_daily_klines(ctx: Context, writer, files: List[str], pqurl: str):
+async def resample_daily_klines(ctx: Context, writer, files: List[str], fd):
     files = sorted(files)
 
     async def w(idx, file):
@@ -535,7 +582,7 @@ async def resample_daily_klines(ctx: Context, writer, files: List[str], pqurl: s
     next_idx = 0
     results = {}
     with tqdm(
-        desc=f"resampling daily klines to {pqurl}",
+        desc=f"resampling daily klines",
         unit="file",
         position=1,
         total=len(files),
@@ -558,11 +605,9 @@ async def resample_daily_klines(ctx: Context, writer, files: List[str], pqurl: s
 
                 table = df.to_arrow()
                 if writer is None:
-                    l.info(f"creating parquet writer for {pqurl}")
                     writer = pq.ParquetWriter(
-                        pqurl.replace("r2://", ""),
+                        fd,
                         table.schema,
-                        filesystem=ctx.r2fs,
                         compression="zstd",
                     )
                 writer.write_table(table)
