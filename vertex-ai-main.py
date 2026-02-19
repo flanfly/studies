@@ -49,6 +49,12 @@ parameters: Dict[str, str] = {}
 # input, output
 notebooks: List[Notebook] = []
 
+if len(sys.argv) < 2:
+    l.error(
+        "Usage: vertex-ai-main.py NOTEBOOK [NOTEBOOK ...] [--PARAMETER VALUE ...] [--PARAMETER=VALUE ...]"
+    )
+    sys.exit(1)
+
 args = sys.argv[1:]
 while len(args) > 0:
     arg = args.pop(0)
