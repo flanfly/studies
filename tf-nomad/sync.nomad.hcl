@@ -2,7 +2,7 @@ job "sync-binance-spot" {
   type = "batch"
 
   group "sync-datastore" {
-    count = 19
+    count = 10
 
     constraint {
       operator = "distinct_hosts"
@@ -54,8 +54,8 @@ job "sync-binance-spot" {
       }
 
       config {
-        image = "ghcr.io/flanfly/studies@sha256:1305fd081e9a8c33391e27c2e0619d1793664e21500990c8bbc9ed7838bb7d19"
-        args  = ["sh", "-c", "uv run sync-datastore.py -s $(cat /alloc/item)"]
+        image = "ghcr.io/flanfly/studies:master@sha256:d268e03f2ec5201d9cd7b41868096669ffc0a02358b383ad9350752c7d7c4824"
+        args  = ["sh", "-c", "uv run sync-datastore.py $(cat /alloc/item)"]
       }
     }
   }

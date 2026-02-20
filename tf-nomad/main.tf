@@ -1,15 +1,15 @@
 locals {
   prefix       = "${random_password.car.result}${random_password.cdr.result}"
-  location     = "hel1"
+  location     = "sin"
   ssh_key_name = "kai@Kais-MacBook-Pro.local"
 
   group_name = "${local.prefix}-cluster"
 
-  master_type = "cax11"
+  master_type = "cpx22"
   master_ip   = "10.0.0.2"
 
-  worker_type = "cax11"
-  workers     = 6
+  worker_type = "cpx22"
+  workers     = 8
 }
 
 terraform {
