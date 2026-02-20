@@ -109,6 +109,7 @@ BINANCE_VISION_DAILY_SPOT_ARCHIVE_PAIR_MONTH_YEAR = (
 )
 
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
+EPOCH_MS_US_THRESHOLD = 20_000_000_000_000
 CONCURRENCY = 20
 PACKED_DEFAULT_FILENAME = "data00.parquet"
 RESAMPLED_ALL_FILENAME = "all.parquet"
@@ -553,12 +554,16 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
         )
         .with_columns(
             [
-                pl.when(pl.col("open_time") > EPOCH_S_MS_THRESHOLD)
+                pl.when(pl.col("open_time") > EPOCH_MS_US_THRESHOLD)
+                .then(pl.from_epoch("open_time", time_unit="us"))
+                .when(pl.col("open_time") > EPOCH_S_MS_THRESHOLD)
                 .then(pl.from_epoch("open_time", time_unit="ms"))
                 .otherwise(pl.from_epoch("open_time", time_unit="s"))
                 .dt.replace_time_zone("UTC")
                 .alias("open_time"),
-                pl.when(pl.col("close_time") > EPOCH_S_MS_THRESHOLD)
+                pl.when(pl.col("close_time") > EPOCH_MS_US_THRESHOLD)
+                .then(pl.from_epoch("close_time", time_unit="us"))
+                .when(pl.col("close_time") > EPOCH_S_MS_THRESHOLD)
                 .then(pl.from_epoch("close_time", time_unit="ms"))
                 .otherwise(pl.from_epoch("close_time", time_unit="s"))
                 .dt.replace_time_zone("UTC")
