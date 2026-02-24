@@ -18,6 +18,7 @@ locals {
   roles = [
     "roles/batch.agentReporter",
     "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
     "roles/artifactregistry.reader",
     "roles/storage.objectAdmin",
   ]
