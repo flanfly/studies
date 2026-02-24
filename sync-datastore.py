@@ -236,6 +236,12 @@ async def main():
         help="Resample data into daily klines after synchronization.",
     )
     parser.add_argument(
+        "--kline-offset",
+        type=int,
+        default=0,
+        help="Hour offset for daily kline boundaries, used with --daily. Default is 0 (UTC midnight).",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging.",
@@ -295,7 +301,9 @@ async def main():
             else:
                 dates = args.dates
 
-            await action_synchronize_daily_klines(ctx, args.daily, dates[0], dates[1])
+            await action_synchronize_daily_klines(
+                ctx, args.daily, args.kline_offset, dates[0], dates[1]
+            )
 
 
 async def action_synchronize_minute_klines(
@@ -307,7 +315,7 @@ async def action_synchronize_minute_klines(
 
 
 async def action_synchronize_daily_klines(
-    ctx: Context, dst_prefix: str, start: date, end: date
+    ctx: Context, dst_prefix: str, kline_offset: int, start: date, end: date
 ):
     l.info(f"resampling daily klines from {start} to {end}")
 
@@ -324,7 +332,7 @@ async def action_synchronize_daily_klines(
     with NamedTemporaryFile(delete=True) as fd:
         # resample and buffer locally
         for batch in tqdm(b, unit="batch", position=0, total=t):
-            writer = await resample_daily_klines(ctx, writer, batch, fd)
+            writer = await resample_daily_klines(ctx, writer, batch, kline_offset, fd)
         if writer is not None:
             writer.close()
             fd.flush()
@@ -576,11 +584,13 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
     )
 
 
-async def resample_daily_klines(ctx: Context, writer, files: List[str], fd):
+async def resample_daily_klines(
+    ctx: Context, writer, files: List[str], start_hour: int, fd
+):
     files = sorted(files)
 
     async def w(idx, file):
-        return idx, await download_and_resample_daily_klines(ctx, file)
+        return idx, await download_and_resample_daily_klines(ctx, file, start_hour)
 
     fut = [w(idx, file) for idx, file in enumerate(files)]
 
@@ -619,15 +629,19 @@ async def resample_daily_klines(ctx: Context, writer, files: List[str], fd):
     return writer
 
 
-async def download_and_resample_daily_klines(ctx, src: str) -> pl.DataFrame:
+async def download_and_resample_daily_klines(
+    ctx, src: str, start_hour: int
+) -> pl.DataFrame:
     df = await exponential_backoff(read_parquet_object, [ctx, src], retries=5)
     if df is None:
         return None
 
     return await asyncio.to_thread(
         lambda df: (
-            df.with_columns([(pl.col("ts").dt.truncate("1d")).alias("ts")])
-            .group_by(["ts", "symbol"])
+            df.sort("ts")
+            .group_by_dynamic(
+                "ts", every="1d", offset=f"{start_hour}h", group_by="symbol"
+            )
             .agg(
                 [
                     pl.col("open").first().alias("open"),
