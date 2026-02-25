@@ -56,15 +56,33 @@ jobs:
           password: ${{ steps.auth.outputs.access_token }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:master
-            ${{ env.GAR_IMAGE }}:latest
             ${{ env.GAR_IMAGE }}:master
           cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:build-cache
           cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:build-cache,mode=max
+
+      - name: Image Digest Summary
+        run: |
+          echo "### 🐳 Container Image Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Digest: ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          
+          echo "#### 📦 Pushed Tags" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | Image | Tags |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| GHCR | \`${{ env.IMAGE_NAME }}\` | \`master\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| GAR | \`${{ env.GAR_IMAGE }}\` | \`master\` |" >> $GITHUB_STEP_SUMMARY
+          
+          echo "#### 🔎 Manifest Inspection" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>GHCR Inspection</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`console" >> $GITHUB_STEP_SUMMARY
+          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:master >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
