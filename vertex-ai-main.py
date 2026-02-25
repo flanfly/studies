@@ -4,6 +4,7 @@ import sys
 import argparse
 import os
 import tempfile
+import fsspec
 import shutil as sh
 
 from typing import List, Dict, NamedTuple, Tuple
@@ -100,7 +101,6 @@ for nb in notebooks:
     )
 
     if nb.output_arg:
-        sh.copy(
-            os.path.join(nb.directory, "output.ipynb"),
-            nb.output_arg,
-        )
+        with fsspec.open(nb.output_arg, "wb") as f:
+            with open(os.path.join(nb.directory, "output.ipynb"), "rb") as src:
+                f.write(src.read())
