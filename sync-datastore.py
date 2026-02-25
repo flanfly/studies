@@ -3,12 +3,15 @@ import botocore.config as botoconfig
 from botocore.exceptions import ClientError
 import aioboto3
 
+import obstore
+from obstore.store import S3Store, GCSStore, LocalStore
+
 import asyncio
 import aiohttp
 from tqdm.asyncio import tqdm
 from contextlib import asynccontextmanager, AsyncExitStack
 
-from tempfile import NamedTemporaryFile
+from tempfile import TemporaryDirectory
 import os
 import sys
 from posixpath import join, basename
@@ -199,6 +202,38 @@ def date_range(value):
         )
 
 
+def _make_obstore_from_url(url: str):
+    u = urlparse(url)
+    if u.scheme == "gs":
+        return GCSStore.from_url(f"gs://{u.netloc}")
+
+    elif u.scheme == "r2":
+        r2id = os.getenv("R2_ACCOUNT_ID")
+        r2ep = f"https://{r2id}.r2.cloudflarestorage.com"
+        return S3Store(
+            u.netloc,
+            access_key_id=os.getenv("R2_ACCESS_KEY"),
+            secret_access_key=os.getenv("R2_SECRET_KEY"),
+            endpoint=r2ep,
+            region="auto",
+        )
+
+    elif u.scheme == "s3":
+        return S3Store.from_url(f"s3://{u.netloc}")
+
+    elif u.scheme == "file" or u.scheme == "":
+        return LocalStore(u.netloc)
+
+    else:
+        raise ValueError(f"Unsupported URL scheme: {u.scheme}")
+
+
+async def put_object(dst: str, src: Any):
+    u = urlparse(dst)
+    store = _make_obstore_from_url(dst)
+    await obstore.put_async(store, u.path.lstrip("/"), src)
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -325,44 +360,35 @@ async def action_synchronize_daily_klines(
         join(make_packed_prefix(d.year, d.month, d.day), PACKED_DEFAULT_FILENAME)
         for d in dates
     ]
-    writer = None
     t = len(files) // CONCURRENCY + (1 if len(files) % CONCURRENCY != 0 else 0)
     b = it.batched(sorted(files), CONCURRENCY)
 
-    with NamedTemporaryFile(delete=True) as fd:
+    with TemporaryDirectory() as tmp:
+        allsrc = join(tmp, "all.parquet")
+        alldst = join(dst_prefix, RESAMPLED_ALL_FILENAME)
+
         # resample and buffer locally
-        for batch in tqdm(b, unit="batch", position=0, total=t):
-            writer = await resample_daily_klines(ctx, writer, batch, kline_offset, fd)
-        if writer is not None:
-            writer.close()
-            fd.flush()
-
-        allurl = join(prefix.netloc, prefix.path.lstrip("/"), RESAMPLED_ALL_FILENAME)
-        l.info(f"uploading resampled daily klines to {allurl}...")
-        with open(fd.name, "rb") as f:
-            mb = os.path.getsize(fd.name) / (1024 * 1024)
-            with tqdm(unit="bytes", total=mb, desc=allurl) as pb:
-                await ctx.r2.upload_fileobj(
-                    Fileobj=f,
-                    Bucket=prefix.netloc,
-                    Key=join(prefix.path.lstrip("/"), RESAMPLED_ALL_FILENAME),
-                    Callback=lambda tx: pb.update(tx / (1024 * 1024)),
+        with open(allsrc, "wb") as fd:
+            writer = None
+            for batch in tqdm(b, unit="batch", position=0, total=t):
+                writer = await resample_daily_klines(
+                    ctx, writer, batch, kline_offset, fd
                 )
+            if writer is not None:
+                writer.close()
 
-        usdturl = join(
-            f"s3://{prefix.netloc}",
-            prefix.path.lstrip("/"),
-            RESAMPLED_USDT_FILENAME,
-        )
-        l.info(f"uploading USDT-only resampled daily klines to {usdturl}...")
-        with open(fd.name, "rb") as f:
-            pl.scan_parquet(f).filter(
+        l.info(f"uploading resampled daily klines to {alldst}...")
+        await put_object(alldst, allsrc)
+
+        usdtsrc = join(tmp, "usdt.parquet")
+        usdtdst = join(dst_prefix, RESAMPLED_USDT_FILENAME)
+        l.info(f"uploading USDT-only resampled daily klines to {usdtdst}...")
+        with open(allsrc, "rb") as fd:
+            pl.scan_parquet(fd).filter(
                 pl.col("symbol").str.ends_with("USDT")
-            ).sink_parquet(
-                usdturl,
-                compression="zstd",
-                storage_options=ctx.storage_options,
-            )
+            ).sink_parquet(usdtsrc, compression="zstd")
+
+        await put_object(usdtdst, usdtsrc)
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
