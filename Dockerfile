@@ -1,4 +1,5 @@
-from nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
+#from nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
+from us-docker.pkg.dev/deeplearning-platform-release/gcr.io/base-cu124.py310
 
 label org.opencontainers.image.source=https://github.com/flanfly/studies
 
