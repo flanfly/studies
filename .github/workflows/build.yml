@@ -13,14 +13,8 @@ env:
   WIF_SERVICE_ACCOUNT: github-actions-deployer@prj-vertexai-test.iam.gserviceaccount.com
 
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        #platform: [linux/amd64, linux/arm64]
-        platform: [linux/amd64]
-    
     permissions:
       contents: read
       packages: write
@@ -44,9 +38,6 @@ jobs:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -64,107 +55,16 @@ jobs:
           username: oauth2accesstoken
           password: ${{ steps.auth.outputs.access_token }}
 
-      - name: Set platform slug
-        run: |
-          PLATFORM_SLUG=$(echo "${{ matrix.platform }}" | sed 's/\//-/g')
-          echo "PLATFORM_SLUG=$PLATFORM_SLUG" >> $GITHUB_ENV
-
-      - name: Build and push by digest
-        id: build
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=build-${{ github.ref_name }}-${{ env.PLATFORM_SLUG }}
-          cache-to: type=gha,mode=max,scope=build-${{ github.ref_name }}-${{ env.PLATFORM_SLUG }}
-
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ strategy.job-index }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge:
-    runs-on: ubuntu-latest
-    needs: build
-
-    permissions:
-      packages: write
-      id-token: write
-
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digests-*
-          merge-multiple: true
-
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          token_format: access_token
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to GAR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.GAR_REGISTRY }}
-          username: oauth2accesstoken
-          password: ${{ steps.auth.outputs.access_token }}
-
-      - name: Create manifest list and push
-        run: |
-          cd /tmp/digests
-          docker buildx imagetools create \
-            -t ${{ env.IMAGE_NAME }}:latest \
-            -t ${{ env.IMAGE_NAME }}:master \
-            -t ${{ env.GAR_IMAGE }}:latest \
-            -t ${{ env.GAR_IMAGE }}:master \
-            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
-
-      - name: Image Digest Summary
-        run: |
-          echo "### 🐳 Container Image Summary" >> $GITHUB_STEP_SUMMARY
-          
-          echo "#### 📦 Pushed Tags" >> $GITHUB_STEP_SUMMARY
-          echo "| Registry | Image | Tags |" >> $GITHUB_STEP_SUMMARY
-          echo "| --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
-          echo "| GHCR | \`${{ env.IMAGE_NAME }}\` | \`latest\`, \`master\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| GAR | \`${{ env.GAR_IMAGE }}\` | \`latest\`, \`master\` |" >> $GITHUB_STEP_SUMMARY
-          
-          echo "#### 🔎 Manifest Inspection" >> $GITHUB_STEP_SUMMARY
-          echo "<details><summary>GHCR Inspection</summary>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`console" >> $GITHUB_STEP_SUMMARY
-          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:latest >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "</details>" >> $GITHUB_STEP_SUMMARY
-
-          echo "<details><summary>GAR Inspection</summary>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`console" >> $GITHUB_STEP_SUMMARY
-          docker buildx imagetools inspect ${{ env.GAR_IMAGE }}:latest >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:master
+            ${{ env.GAR_IMAGE }}:latest
+            ${{ env.GAR_IMAGE }}:master
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:build-cache
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:build-cache,mode=max
