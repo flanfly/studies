@@ -122,7 +122,7 @@ l.basicConfig(
     format="[%(asctime)s] %(levelname)s    %(message)s",
     level=l.INFO,
     datefmt="%H:%M:%S",
-    stream=sys.stdout,
+    stream=sys.stderr,
 )
 
 
@@ -326,9 +326,16 @@ async def main():
 
             if dates[0] > dates[1]:
                 l.info("No new data to synchronize.")
+                print(dates[0])
                 return
 
-            await action_synchronize_minute_klines(ctx, pairs, dates[0], dates[1])
+            horizon = await action_synchronize_minute_klines(
+                ctx, pairs, dates[0], dates[1]
+            )
+            if horizon is not None:
+                print(horizon)
+            else:
+                print(dates[0])
 
         else:
             if args.dates is None:
@@ -343,10 +350,16 @@ async def main():
 
 async def action_synchronize_minute_klines(
     ctx: Context, pairs: List[str], start: date, end: date
-):
+) -> date | None:
     dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     fut = [synchronize_day(ctx, pairs, d) for d in dates]
-    await tqdm.gather(*fut, desc=f"synchronizing {start} to {end} ({len(dates)} days)")
+    res = await tqdm.gather(
+        *fut, desc=f"synchronizing {start} to {end} ({len(dates)} days)"
+    )
+    procd = [p[1] for p in zip(res, dates) if p[0] is not None and p[0] > 0]
+    if len(procd) > 0:
+        return max(procd)
+    return None
 
 
 async def action_synchronize_daily_klines(
@@ -419,7 +432,7 @@ async def synchronize_day(ctx: Context, pairs: List[str], day: date):
         ]
         if len(res) == 0:
             l.info(f"No data found for partition {day}, skipping.")
-            return
+            return None
 
         df = pl.concat(res)
         table = df.to_arrow()
@@ -429,6 +442,8 @@ async def synchronize_day(ctx: Context, pairs: List[str], day: date):
             filesystem=ctx.r2fs,
             compression="zstd",
         ).write_table(table)
+
+        return len(df)
 
 
 async def process_single_archive(
