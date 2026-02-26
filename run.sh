@@ -6,6 +6,7 @@
 # GIT_KEY: binary key content
 # GIT_KEY_FILE: path to a file containing the binary key
 # GIT_KEY_BASE64: base64-encoded key content
+# GIT_KEY_SECRET: name of a Google Cloud Secret Manager secret containing the key
 
 set -eo pipefail
 
@@ -17,6 +18,12 @@ elif [ -f "$GIT_KEY_FILE" ]; then
     cp "$GIT_KEY_FILE" "$KEY_PATH"
 elif [ -n "$GIT_KEY_BASE64" ]; then
     echo "$GIT_KEY_BASE64" | base64 -d > "$KEY_PATH"
+elif [ -n "$GIT_KEY_SECRET" ]; then
+    if ! command -v gcloud &> /dev/null; then
+        echo "gcloud command not found. Please install the Google Cloud SDK to use GIT_KEY_SECRET."
+        exit 1
+    fi
+    gcloud secrets versions access latest --secret="$GIT_KEY_SECRET" | base64 -d > "$KEY_PATH"
 else
     echo "No GIT_KEY, GIT_KEY_BASE64 GIT_KEY_FILE found. Skipping unlock."
     rm -f "$KEY_PATH"
