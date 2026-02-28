@@ -1,4 +1,7 @@
 import papermill as pm
+import scrapbook as sb
+import nbformat
+from nbconvert import HTMLExporter
 import logging as l
 import sys
 import argparse
@@ -88,6 +91,9 @@ l.info(
     f"""Parameters: {", ".join(map(lambda k: f'{k}={parameters[k]}', parameters))}"""
 )
 
+html_exporter = HTMLExporter()
+html_exporter.exclude_input = True
+
 for nb in notebooks:
     l.info(
         f"""Executing notebook {nb.input_arg}{f" and saving to {nb.output_arg}" if nb.output_arg else ""}"""
@@ -100,7 +106,31 @@ for nb in notebooks:
         log_output=True,
     )
 
+    # read scraps
+    scraps = sb.read_notebook(os.path.join(nb.directory, "output.ipynb"))
+    l.info("Notebook Scraps:\n" + str(scraps.scrap_dataframe))
+
+    # convert to html
+    with open(
+        os.path.join(nb.directory, "output.ipynb"), "r", encoding="utf-8"
+    ) as f:
+        notebook_node = nbformat.read(f, as_version=4)
+
+    body, _ = html_exporter.from_notebook_node(notebook_node)
+    with open(
+        os.path.join(nb.directory, "output.html"), "w", encoding="utf-8"
+    ) as f:
+        f.write(body)
+
     if nb.output_arg:
         with fsspec.open(nb.output_arg, "wb") as f:
             with open(os.path.join(nb.directory, "output.ipynb"), "rb") as src:
                 f.write(src.read())
+
+        htmlout = (
+            nb.output_arg + ".html"
+            if not nb.output_arg.endswith(".ipynb")
+            else nb.output_arg[:-6] + ".html"
+        )
+        with fsspec.open(htmlout, "w", encoding="utf-8") as f:
+            f.write(body)
