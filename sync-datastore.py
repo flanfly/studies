@@ -374,7 +374,7 @@ async def action_synchronize_daily_klines(
     dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     files = [mkurl_1m(d.year, d.month, d.day) for d in dates]
     t = len(files) // CONCURRENCY + (1 if len(files) % CONCURRENCY != 0 else 0)
-    b = it.batched(sorted(files)[:20], CONCURRENCY)
+    b = it.batched(sorted(files), CONCURRENCY)
 
     with TemporaryDirectory() as tmp:
         pass1 = join(tmp, "pass1.parquet")
