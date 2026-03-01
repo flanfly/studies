@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager, AsyncExitStack
 
 from tempfile import TemporaryDirectory
 import os
+from os import path
 import sys
 from posixpath import join, basename
 import more_itertools as it
@@ -144,37 +145,22 @@ def parse_pattern(arg_value: str) -> re.Pattern:
         raise argparse.ArgumentTypeError(f"Invalid regular expression: {e}")
 
 
-def make_binance_prefix(
+def mkurl_src(
     pair: str,
-    year: int | None,
-    month: int | None,
-    day: int | None,
+    year: int,
+    month: int,
+    day: int,
     public_url: bool = False,
 ) -> str:
     if public_url:
         pfx = f"https://s3.ap-northeast-1.amazonaws.com/data.binance.vision/data/spot/daily/klines/{pair.upper()}/1m/{pair.upper()}-1m-"
     else:
         pfx = f"s3://data.binance.vision/data/spot/daily/klines/{pair.upper()}/1m/{pair.upper()}-1m-"
-    if year is not None:
-        pfx += f"{year:04d}-"
-        if month is not None:
-            pfx += f"{month:02d}-"
-            if day is not None:
-                pfx += f"{day:02d}"
-
-    return pfx
+    return pfx + f"{year:04d}-{month:02d}-{day:02d}"
 
 
-def make_packed_prefix(year: int | None, month: int | None, day: int | None) -> str:
-    pfx = f"r2://studies-binance-store/spot-1m/"
-    if year is not None:
-        pfx += f"year={year:04d}/"
-        if month is not None:
-            pfx += f"month={month:02d}/"
-            if day is not None:
-                pfx += f"day={day:02d}/"
-
-    return pfx
+def mkurl_1m(year: int, month: int, day: int, scheme: str = "r2://") -> str:
+    return f"{scheme}studies-binance-store/spot-1m/year={year:04d}/month={month:02d}/day={day:02d}/{PACKED_DEFAULT_FILENAME}"
 
 
 def date_range(value):
@@ -222,7 +208,9 @@ def _make_obstore_from_url(url: str):
         return S3Store.from_url(f"s3://{u.netloc}")
 
     elif u.scheme == "file" or u.scheme == "":
-        return LocalStore(u.netloc)
+        if u.netloc:
+            return LocalStore(u.netloc)
+        return LocalStore("/") if path.isabs(u.path) else LocalStore(".")
 
     else:
         raise ValueError(f"Unsupported URL scheme: {u.scheme}")
@@ -231,7 +219,7 @@ def _make_obstore_from_url(url: str):
 async def put_object(dst: str, src: Any):
     u = urlparse(dst)
     store = _make_obstore_from_url(dst)
-    await obstore.put_async(store, u.path.lstrip("/"), src)
+    await obstore.put_async(store, path.normpath(u.path.lstrip("/")), src)
 
 
 async def main():
@@ -266,9 +254,20 @@ async def main():
     parser.add_argument(
         "-d",
         "--daily",
-        nargs="?",
-        const="r2://studies-binance-store/spot-1d/",
+        action="store_true",
         help="Resample data into daily klines after synchronization.",
+    )
+    parser.add_argument(
+        "--output-daily",
+        type=str,
+        default="r2://studies-binance-store/spot-1d/all.parquet",
+        help="Destination for resampled daily klines, used with --daily.",
+    )
+    parser.add_argument(
+        "--output-usdt",
+        type=str,
+        default="r2://studies-binance-store/spot-1d/usdt.parquet",
+        help="Destination for USDT-only resampled daily klines, used with --daily.",
     )
     parser.add_argument(
         "--kline-offset",
@@ -313,7 +312,7 @@ async def main():
         if args.list:
             return await action_list_symbols(ctx, pairs)
 
-        if args.daily is None:
+        if not args.daily:
             if args.dates is None:
                 start_date = await determine_start_date(ctx, "ETHBTC")
                 dates = [start_date, date.today() - timedelta(days=1)]
@@ -344,7 +343,12 @@ async def main():
                 dates = args.dates
 
             await action_synchronize_daily_klines(
-                ctx, args.daily, args.kline_offset, dates[0], dates[1]
+                ctx,
+                args.output_daily,
+                args.output_usdt,
+                args.kline_offset,
+                dates[0],
+                dates[1],
             )
 
 
@@ -363,25 +367,20 @@ async def action_synchronize_minute_klines(
 
 
 async def action_synchronize_daily_klines(
-    ctx: Context, dst_prefix: str, kline_offset: int, start: date, end: date
+    ctx: Context, alldst: str, usdtdst: str, kline_offset: int, start: date, end: date
 ):
     l.info(f"resampling daily klines from {start} to {end}")
 
-    prefix = urlparse(dst_prefix)
     dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
-    files = [
-        join(make_packed_prefix(d.year, d.month, d.day), PACKED_DEFAULT_FILENAME)
-        for d in dates
-    ]
+    files = [mkurl_1m(d.year, d.month, d.day) for d in dates]
     t = len(files) // CONCURRENCY + (1 if len(files) % CONCURRENCY != 0 else 0)
-    b = it.batched(sorted(files), CONCURRENCY)
+    b = it.batched(sorted(files)[:20], CONCURRENCY)
 
     with TemporaryDirectory() as tmp:
-        allsrc = join(tmp, "all.parquet")
-        alldst = join(dst_prefix, RESAMPLED_ALL_FILENAME)
+        pass1 = join(tmp, "pass1.parquet")
 
-        # resample and buffer locally
-        with open(allsrc, "wb") as fd:
+        # resample, possibly unaligned and buffer locally
+        with open(pass1, "wb") as fd:
             writer = None
             for batch in tqdm(b, unit="batch", position=0, total=t):
                 writer = await resample_daily_klines(
@@ -390,18 +389,22 @@ async def action_synchronize_daily_klines(
             if writer is not None:
                 writer.close()
 
+        pass2 = join(tmp, "all.parquet")
+        resample_sorted_dataframe(
+            pl.scan_parquet(pass1).set_sorted("ts"), kline_offset
+        ).sink_parquet(pass2, compression="zstd")
+
         l.info(f"uploading resampled daily klines to {alldst}...")
-        await put_object(alldst, allsrc)
+        await put_object(alldst, pass2)
 
-        usdtsrc = join(tmp, "usdt.parquet")
-        usdtdst = join(dst_prefix, RESAMPLED_USDT_FILENAME)
+        pass3 = join(tmp, "usdt.parquet")
         l.info(f"uploading USDT-only resampled daily klines to {usdtdst}...")
-        with open(allsrc, "rb") as fd:
-            pl.scan_parquet(fd).filter(
-                pl.col("symbol").str.ends_with("USDT")
-            ).sink_parquet(usdtsrc, compression="zstd")
 
-        await put_object(usdtdst, usdtsrc)
+        pl.scan_parquet(pass2).filter(
+            pl.col("symbol").str.ends_with("USDT")
+        ).sink_parquet(pass3, compression="zstd")
+
+        await put_object(usdtdst, pass3)
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
@@ -414,7 +417,7 @@ synchronize_day_sem: asyncio.Semaphore | None = None
 
 async def synchronize_day(ctx: Context, pairs: List[str], day: date):
     dst = join(
-        make_packed_prefix(day.year, day.month, day.day).replace("r2://", ""),
+        mkurl_1m(day.year, day.month, day.day, ""),
         PACKED_DEFAULT_FILENAME,
     )
 
@@ -449,7 +452,7 @@ async def synchronize_day(ctx: Context, pairs: List[str], day: date):
 async def process_single_archive(
     ctx: Context, pair: str, day: date
 ) -> pl.DataFrame | None:
-    zip_url = make_binance_prefix(pair, day.year, day.month, day.day, True) + ".zip"
+    zip_url = mkurl_src(pair, day.year, day.month, day.day, True) + ".zip"
     chksm_url = zip_url + ".CHECKSUM"
 
     csv = await exponential_backoff(download_and_verify_csv, [ctx, zip_url, chksm_url])
@@ -495,9 +498,7 @@ async def find_latest_archive(r2, horizon: date) -> date | None:
     return await bisect_bucket(
         r2,
         horizon,
-        make_prefix=lambda d: join(
-            make_packed_prefix(d.year, d.month, d.day), PACKED_DEFAULT_FILENAME
-        ),
+        make_prefix=lambda d: mkurl_1m(d.year, d.month, d.day),
         find_end=True,
     )
 
@@ -508,7 +509,7 @@ async def find_earliest_archive(s3, pair: str, horizon: date) -> date | None:
     return await bisect_bucket(
         s3,
         horizon,
-        make_prefix=lambda d: f"{make_binance_prefix(pair, d.year, d.month, d.day)}.zip",
+        make_prefix=lambda d: f"{mkurl_src(pair, d.year, d.month, d.day)}.zip",
         find_end=False,
     )
 
@@ -670,6 +671,25 @@ async def resample_daily_klines(
     return writer
 
 
+def resample_sorted_dataframe(df: pl.DataFrame, start_hour: int) -> pl.DataFrame:
+    return df.group_by_dynamic(
+        "ts", every="1d", offset=f"{start_hour}h", group_by="symbol"
+    ).agg(
+        [
+            pl.col("open").first().alias("open"),
+            pl.col("high").max().alias("high"),
+            pl.col("low").min().alias("low"),
+            pl.col("close").last().alias("close"),
+            pl.col("base_volume").sum().alias("base_volume"),
+            pl.col("quote_volume").sum().alias("quote_volume"),
+            pl.col("close_time").max().alias("close_time"),
+            pl.col("trades").sum().alias("trades"),
+            pl.col("taker_buy_base_volume").sum().alias("taker_buy_base_volume"),
+            pl.col("taker_buy_quote_volume").sum().alias("taker_buy_quote_volume"),
+        ]
+    )
+
+
 async def download_and_resample_daily_klines(
     ctx, src: str, start_hour: int
 ) -> pl.DataFrame:
@@ -678,31 +698,7 @@ async def download_and_resample_daily_klines(
         return None
 
     return await asyncio.to_thread(
-        lambda df: (
-            df.sort("ts")
-            .group_by_dynamic(
-                "ts", every="1d", offset=f"{start_hour}h", group_by="symbol"
-            )
-            .agg(
-                [
-                    pl.col("open").first().alias("open"),
-                    pl.col("high").max().alias("high"),
-                    pl.col("low").min().alias("low"),
-                    pl.col("close").last().alias("close"),
-                    pl.col("base_volume").sum().alias("base_volume"),
-                    pl.col("quote_volume").sum().alias("quote_volume"),
-                    pl.col("close_time").max().alias("close_time"),
-                    pl.col("trades").sum().alias("trades"),
-                    pl.col("taker_buy_base_volume")
-                    .sum()
-                    .alias("taker_buy_base_volume"),
-                    pl.col("taker_buy_quote_volume")
-                    .sum()
-                    .alias("taker_buy_quote_volume"),
-                ]
-            )
-            .sort(["ts", "symbol"])
-        ),
+        lambda df: resample_sorted_dataframe(df.sort("ts"), start_hour),
         df,
     )
 
