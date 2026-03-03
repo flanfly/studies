@@ -3,6 +3,10 @@ import botocore.config as botoconfig
 from botocore.exceptions import ClientError
 import aioboto3
 
+from binance_common.configuration import ConfigurationRestAPI
+from binance_common.constants import SPOT_REST_API_PROD_URL
+from binance_sdk_spot.spot import Spot
+
 import obstore
 from obstore.store import S3Store, GCSStore, LocalStore
 
@@ -19,7 +23,7 @@ from posixpath import join, basename
 import more_itertools as it
 from urllib.parse import urlparse
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import io
 import zipfile
 from hashlib import sha256
@@ -58,6 +62,7 @@ class Context:
     r2: Any
     r2fs: fs.S3FileSystem
     storage_options: Dict[str, str]
+    binance: Any
 
 
 @asynccontextmanager
@@ -73,6 +78,8 @@ async def make_context():
         "aws_endpoint_url": r2ep,
         "aws_region": "auto",
     }
+    bid = os.getenv("BINANCE_API_KEY")
+    bkey = os.getenv("BINANCE_API_SECRET")
 
     async with AsyncExitStack() as stack:
         session = await stack.enter_async_context(aiohttp.ClientSession())
@@ -97,7 +104,20 @@ async def make_context():
             region="auto",
         )
 
-        yield Context(session=session, s3=s3, r2=r2, r2fs=r2fs, storage_options=so)
+        binance = Spot(
+            config_rest_api=ConfigurationRestAPI(
+                api_key=bid, api_secret=bkey, base_path=SPOT_REST_API_PROD_URL
+            )
+        )
+
+        yield Context(
+            session=session,
+            s3=s3,
+            r2=r2,
+            r2fs=r2fs,
+            storage_options=so,
+            binance=binance.rest_api,
+        )
 
 
 class TransientError(Exception):
@@ -111,13 +131,40 @@ BINANCE_API_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 BINANCE_VISION_DAILY_SPOT_ARCHIVE_PAIR_MONTH_YEAR = (
     "s3://data.binance.vision/data/spot/daily/klines/{0}/1m/{0}-1m-{1:04d}-{2:02d}"
 )
-
+BINANCE_KLINE_SCHEMA = {
+    "open_time": pl.Int64,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "base_volume": pl.Float64,
+    "close_time": pl.Int64,
+    "quote_volume": pl.Float64,
+    "trades": pl.Int64,
+    "taker_buy_base_volume": pl.Float64,
+    "taker_buy_quote_volume": pl.Float64,
+    "ignore": pl.Int64,
+}
+KLINE_COLUMNS = [
+    "ts",
+    "symbol",
+    "open",
+    "high",
+    "low",
+    "close",
+    "base_volume",
+    "close_time",
+    "quote_volume",
+    "trades",
+    "taker_buy_base_volume",
+    "taker_buy_quote_volume",
+]
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
 EPOCH_MS_US_THRESHOLD = 20_000_000_000_000
 CONCURRENCY = 20
 PACKED_DEFAULT_FILENAME = "data00.parquet"
 RESAMPLED_ALL_FILENAME = "all.parquet"
-RESAMPLED_USDT_FILENAME = "usdt.parquet"
+RESAMPLED_STABLE_FILENAME = "stables.parquet"
 
 l.basicConfig(
     format="[%(asctime)s] %(levelname)s    %(message)s",
@@ -232,13 +279,6 @@ async def main():
         default=".*",
     )
     parser.add_argument(
-        "-D",
-        "--dates",
-        type=date_range,
-        help="Date range to synchronize, in the format YYYY-MM-DD or YYYY-MM-DD,YYYY-MM-DD. Defaults to all available dates.",
-        default=None,
-    )
-    parser.add_argument(
         "-l",
         "--list",
         action="store_true",
@@ -258,16 +298,32 @@ async def main():
         help="Resample data into daily klines after synchronization.",
     )
     parser.add_argument(
-        "--output-daily",
+        "--window",
+        type=int,
+        help="Number of days to synchronize, counting backwards from yesterday.",
+    )
+    parser.add_argument(
+        "--fill-missing",
+        action="store_true",
+        help="Fill missing daily klines until yesterday with live data from Binance API, used with --daily.",
+    )
+    parser.add_argument(
+        "--output-daily-file",
         type=str,
         default="r2://studies-binance-store/spot-1d/all.parquet",
         help="Destination for resampled daily klines, used with --daily.",
     )
     parser.add_argument(
-        "--output-usdt",
+        "--output-stables-file",
         type=str,
-        default="r2://studies-binance-store/spot-1d/usdt.parquet",
-        help="Destination for USDT-only resampled daily klines, used with --daily.",
+        default="r2://studies-binance-store/spot-1d/stables.parquet",
+        help="Destination for resampled daily klines with stablecoin quote assets, used with --daily.",
+    )
+    parser.add_argument(
+        "--stable-coin",
+        type=str,
+        default="USDT",
+        help="Quote asset symbol to identify stablecoin pairs for separate output, used with --daily. Default is USDT.",
     )
     parser.add_argument(
         "--kline-offset",
@@ -292,10 +348,11 @@ async def main():
     global CONCURRENCY
     CONCURRENCY = args.concurrency
 
-    global synchronize_day_sem, read_parquet_object_sem, extract_object_partitioned_sem
+    global synchronize_day_sem, read_parquet_object_sem, extract_object_partitioned_sem, retrieve_klines_sem
     synchronize_day_sem = asyncio.Semaphore(2)
     read_parquet_object_sem = asyncio.Semaphore(CONCURRENCY)
     extract_object_partitioned_sem = asyncio.Semaphore(CONCURRENCY)
+    retrieve_klines_sem = asyncio.Semaphore(CONCURRENCY)
 
     async with make_context() as ctx:
         pairs = await retrieve_spot_pairs(ctx)
@@ -313,11 +370,8 @@ async def main():
             return await action_list_symbols(ctx, pairs)
 
         if not args.daily:
-            if args.dates is None:
-                start_date = await determine_start_date(ctx, "ETHBTC")
-                dates = [start_date, date.today() - timedelta(days=1)]
-            else:
-                dates = args.dates
+            start_date = await determine_start_date(ctx, "ETHBTC")
+            dates = [start_date, date.today() - timedelta(days=1)]
 
             if dates is None:
                 l.error("No start date could be determined, and --from-date not given.")
@@ -337,16 +391,19 @@ async def main():
                 print(dates[0])
 
         else:
-            if args.dates is None:
-                dates = [date(2017, 7, 14), date.today() - timedelta(days=1)]
+            yd = date.today() - timedelta(days=1)
+            if args.window is None:
+                dates = [date(2017, 7, 14), yd]
             else:
-                dates = args.dates
+                dates = [yd - timedelta(days=args.window - 1), yd]
 
             await action_synchronize_daily_klines(
                 ctx,
-                args.output_daily,
-                args.output_usdt,
+                args.output_daily_file,
+                args.output_stables_file,
+                args.stable_coin,
                 args.kline_offset,
+                args.fill_missing,
                 dates[0],
                 dates[1],
             )
@@ -367,7 +424,14 @@ async def action_synchronize_minute_klines(
 
 
 async def action_synchronize_daily_klines(
-    ctx: Context, alldst: str, usdtdst: str, kline_offset: int, start: date, end: date
+    ctx: Context,
+    alldst: str,
+    stabledst: str,
+    stable: str,
+    kline_offset: int,
+    fill_missing: bool,
+    start: date,
+    end: date,
 ):
     l.info(f"resampling daily klines from {start} to {end}")
 
@@ -394,17 +458,50 @@ async def action_synchronize_daily_klines(
             pl.scan_parquet(pass1).set_sorted("ts"), kline_offset
         ).sink_parquet(pass2, compression="zstd")
 
+        if fill_missing:
+            pass2a = join(tmp, "pass2a.parquet")
+            yd = datetime.now(timezone.utc).replace(
+                hour=kline_offset, minute=0, second=0, microsecond=0
+            ) - timedelta(days=1)
+            active = (await retrieve_spot_pairs(ctx)).keys()
+            tsmax = (
+                pl.scan_parquet(pass2)
+                .filter(pl.col("symbol").is_in(active))
+                .group_by("symbol")
+                .agg(pl.col("ts").max())
+                .filter(pl.col("ts") < yd)
+                .collect()
+            )
+            fut = [
+                retrieve_klines(ctx, r["symbol"], r["ts"], yd + timedelta(hours=23))
+                for r in tsmax.iter_rows(named=True)
+                if r["ts"] < yd
+            ]
+            live = [
+                df.lazy()
+                for df in await tqdm.gather(
+                    *fut, desc="retrieving live klines", position=1
+                )
+                if df is not None
+            ]
+            frames = [pl.scan_parquet(pass2).set_sorted("ts"), *live]
+            resample_sorted_dataframe(
+                pl.concat([df.select(KLINE_COLUMNS) for df in frames]).sort("ts"),
+                kline_offset,
+            ).sink_parquet(pass2a, compression="zstd")
+            pass2 = pass2a
+
         l.info(f"uploading resampled daily klines to {alldst}...")
         await put_object(alldst, pass2)
 
-        pass3 = join(tmp, "usdt.parquet")
-        l.info(f"uploading USDT-only resampled daily klines to {usdtdst}...")
+        pass3 = join(tmp, "stable.parquet")
+        l.info(f"uploading stable coin quoted daily klines to {stabledst}...")
 
         pl.scan_parquet(pass2).filter(
-            pl.col("symbol").str.ends_with("USDT")
+            pl.col("symbol").str.to_lowercase().str.ends_with(stable.lower())
         ).sink_parquet(pass3, compression="zstd")
 
-        await put_object(usdtdst, pass3)
+        await put_object(stabledst, pass3)
 
 
 async def action_list_symbols(ctx, pairs: Dict[str, Pair]):
@@ -522,6 +619,57 @@ async def determine_start_date(ctx: Context, pair: str) -> date | None:
         return start + timedelta(days=1)
 
 
+retrieve_klines_sem: asyncio.Semaphore | None = None
+
+
+async def retrieve_klines(
+    ctx: Context, pair: str, start: datetime, end: datetime
+) -> pl.DataFrame | None:
+    if (end - start).total_seconds() / 3600 > 1000:
+        raise ValueError("Time range for retrieve_klines cannot exceed 1000 hours.")
+    if start >= end:
+        raise ValueError("Start time must be before end time.")
+    if retrieve_klines_sem is None:
+        raise RuntimeError("retrieve_klines_sem is not initialized")
+    async with retrieve_klines_sem:
+        resp = await asyncio.to_thread(
+            ctx.binance.klines,
+            symbol=pair,
+            interval="1h",
+            start_time=int(start.timestamp()) * 1000,
+            end_time=int(end.timestamp()) * 1000,
+            limit=1000,
+        )
+        if resp.status != 200:
+            raise TransientError(
+                f"Failed to retrieve klines for {pair} from {start} to {end}: {resp.text}"
+            )
+
+        rows = resp.data()
+        if len(rows) == 0:
+            return None
+
+        ret = (
+            pl.DataFrame(rows, orient="row", schema=BINANCE_KLINE_SCHEMA)
+            .with_columns(
+                [
+                    pl.when(pl.col("open_time") > EPOCH_MS_US_THRESHOLD)
+                    .then(pl.from_epoch("open_time", time_unit="us"))
+                    .when(pl.col("open_time") > EPOCH_S_MS_THRESHOLD)
+                    .then(pl.from_epoch("open_time", time_unit="ms"))
+                    .otherwise(pl.from_epoch("open_time", time_unit="s"))
+                    .dt.replace_time_zone("UTC")
+                    .alias("ts"),
+                    pl.lit(pair).alias("symbol"),
+                ]
+            )
+            .select(KLINE_COLUMNS)
+            .sort("ts")
+        )
+
+        return ret
+
+
 async def retrieve_spot_pairs(ctx: Context) -> Dict[str, Pair]:
     async with ctx.session.get(BINANCE_API_EXCHANGE_INFO) as resp:
         return {
@@ -587,20 +735,7 @@ def transform_csv_data(data: bytes, pair: str) -> pl.DataFrame:
                 "taker_buy_quote_volume",
                 "ignore",
             ],
-            schema_overrides={
-                "open_time": pl.Int64,
-                "open": pl.Float64,
-                "high": pl.Float64,
-                "low": pl.Float64,
-                "close": pl.Float64,
-                "base_volume": pl.Float64,
-                "close_time": pl.Int64,
-                "quote_volume": pl.Float64,
-                "trades": pl.Int64,
-                "taker_buy_base_volume": pl.Float64,
-                "taker_buy_quote_volume": pl.Float64,
-                "ignore": pl.Int64,
-            },
+            schema_overrides=BINANCE_KLINE_SCHEMA,
         )
         .with_columns(
             [
@@ -773,7 +908,6 @@ if __name__ == "__main__":
     with logging_redirect_tqdm():
         try:
             asyncio.run(main())
-            l.info("Sync'd")
         except Exception as e:
             l.exception("Fatal error during sync", exc_info=e)
             sys.exit(1)
