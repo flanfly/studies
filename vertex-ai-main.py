@@ -123,14 +123,5 @@ for nb in notebooks:
         f.write(body)
 
     if nb.output_arg:
-        with fsspec.open(nb.output_arg, "wb") as f:
-            with open(os.path.join(nb.directory, "output.ipynb"), "rb") as src:
-                f.write(src.read())
-
-        htmlout = (
-            nb.output_arg + ".html"
-            if not nb.output_arg.endswith(".ipynb")
-            else nb.output_arg[:-6] + ".html"
-        )
-        with fsspec.open(htmlout, "w", encoding="utf-8") as f:
+        with fsspec.open(nb.output_arg, "w", encoding="utf-8") as f:
             f.write(body)
