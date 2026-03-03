@@ -513,10 +513,7 @@ synchronize_day_sem: asyncio.Semaphore | None = None
 
 
 async def synchronize_day(ctx: Context, pairs: List[str], day: date):
-    dst = join(
-        mkurl_1m(day.year, day.month, day.day, ""),
-        PACKED_DEFAULT_FILENAME,
-    )
+    dst = mkurl_1m(day.year, day.month, day.day, "")
 
     if synchronize_day_sem is None:
         raise RuntimeError("synchronize_day_sem is not initialized")
