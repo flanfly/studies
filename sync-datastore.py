@@ -623,7 +623,7 @@ async def retrieve_klines(
     ctx: Context, pair: str, start: datetime, end: datetime
 ) -> pl.DataFrame | None:
     if (end - start).total_seconds() / 3600 > 1000:
-        raise ValueError(f"more than 1000 klines: {start}-{end} ({pair})")
+        l.warn(f"more than 1000 klines: {start}-{end} ({pair})")
     if start >= end:
         raise ValueError("Start time must be before end time.")
     if retrieve_klines_sem is None:
