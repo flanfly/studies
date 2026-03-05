@@ -2,6 +2,7 @@ import papermill as pm
 import scrapbook as sb
 import nbformat
 from nbconvert import HTMLExporter
+from nbconvert.preprocessors import TagRemovePreprocessor
 import logging as l
 import sys
 import argparse
@@ -93,6 +94,17 @@ l.info(
 
 html_exporter = HTMLExporter()
 html_exporter.exclude_input = True
+html_exporter.register_preprocessor(
+    TagRemovePreprocessor(
+        config={
+            "TagRemovePreprocessor": {
+                "enabled": True,
+                "remove_all_outputs_tags": {"dev_only"},
+            }
+        }
+    ),
+    enabled=True,
+)
 
 for nb in notebooks:
     l.info(
@@ -111,15 +123,11 @@ for nb in notebooks:
     l.info("Notebook Scraps:\n" + str(scraps.scrap_dataframe))
 
     # convert to html
-    with open(
-        os.path.join(nb.directory, "output.ipynb"), "r", encoding="utf-8"
-    ) as f:
+    with open(os.path.join(nb.directory, "output.ipynb"), "r", encoding="utf-8") as f:
         notebook_node = nbformat.read(f, as_version=4)
 
     body, _ = html_exporter.from_notebook_node(notebook_node)
-    with open(
-        os.path.join(nb.directory, "output.html"), "w", encoding="utf-8"
-    ) as f:
+    with open(os.path.join(nb.directory, "output.html"), "w", encoding="utf-8") as f:
         f.write(body)
 
     if nb.output_arg:
