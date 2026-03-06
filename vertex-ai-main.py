@@ -1,8 +1,11 @@
 import papermill as pm
 import scrapbook as sb
 import nbformat
+
 from nbconvert import HTMLExporter
 from nbconvert.preprocessors import TagRemovePreprocessor
+from traitlets.config import Config
+
 import logging as l
 import sys
 import argparse
@@ -92,19 +95,12 @@ l.info(
     f"""Parameters: {", ".join(map(lambda k: f'{k}={parameters[k]}', parameters))}"""
 )
 
-html_exporter = HTMLExporter()
+c = Config()
+c.HTMLExporter.preprocessors = [TagRemovePreprocessor]
+c.TagRemovePreprocessor.remove_all_outputs_tags = ("dev_only",)
+c.TagRemovePreprocessor.enabled = True
+html_exporter = HTMLExporter(config=c)
 html_exporter.exclude_input = True
-html_exporter.register_preprocessor(
-    TagRemovePreprocessor(
-        config={
-            "TagRemovePreprocessor": {
-                "enabled": True,
-                "remove_all_outputs_tags": {"dev_only"},
-            }
-        }
-    ),
-    enabled=True,
-)
 
 for nb in notebooks:
     l.info(
