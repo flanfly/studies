@@ -21,6 +21,8 @@ locals {
     "roles/monitoring.metricWriter",
     "roles/artifactregistry.reader",
     "roles/storage.objectAdmin",
+    "roles/storage.admin",
+    "roles/aiplatform.user",
   ]
 }
 
@@ -48,6 +50,12 @@ resource "google_project_service" "enabled_apis" {
   service = each.key
 
   disable_on_destroy = false
+}
+
+resource "google_artifact_registry_repository" "pipelines" {
+  location      = local.region
+  repository_id = "pipelines"
+  format        = "KFP"
 }
 
 resource "google_artifact_registry_repository" "default" {
