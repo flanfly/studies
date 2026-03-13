@@ -9,6 +9,7 @@ dependencies = [
     "aiohttp>=3.13.3",
     "arch>=8.0.0",
     "binance-sdk-spot>=6.0.0",
+    "catboost>=1.2.10",
     "chronos-forecasting>=2.2.2",
     "duckdb>=1.4.3",
     "fsspec>=2026.1.0",
@@ -17,6 +18,7 @@ dependencies = [
     "google-cloud-aiplatform>=1.139.0",
     "google-cloud-storage>=3.7.0",
     "jupyter>=1.1.1",
+    "jupytext>=1.19.1",
     "kfp>=2.16.0",
     "matplotlib>=3.10.8",
     "more-itertools>=10.8.0",
@@ -36,3 +38,12 @@ dependencies = [
 
 [tool.mypy]
 disable_error_code = ["import-not-found", "import-untyped"]
+
+[tool.black]
+line-length = 88
+indent-size = 2
+
+[tool.uv.workspace]
+members = [
+    "ts2vec",
+]
