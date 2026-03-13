@@ -232,6 +232,10 @@ def build_portfolio(df: pd.DataFrame):
         )
     )
 
+    if len(df) == 0:
+        l.error("No data after preprocessing")
+        return
+
     res, df = run_strategy(df)
 
     resyd = res.loc[yesterday]
@@ -256,65 +260,57 @@ def build_portfolio(df: pd.DataFrame):
 # expects ts, symbol, mom1d, mom30d, ret, vol, vol15d, ref
 def run_strategy(df: pl.DataFrame):
     df = (
-        df.with_columns(
-            [
-                pl.col("vol15d")
-                .qcut(
-                    10,
-                    allow_duplicates=True,
-                    labels=list(map(lambda n: f"{n}", range(1, 11))),
-                )
-                .over("ts")
-                .alias("volrank"),
-                pl.col("mom30d")
-                .abs()
-                .qcut(
-                    10,
-                    allow_duplicates=True,
-                    labels=list(map(lambda n: f"{n}", range(1, 11))),
-                )
-                .over("ts")
-                .alias("longrank"),
-                pl.col("mom1d")
-                .qcut(
-                    10,
-                    allow_duplicates=True,
-                    labels=list(map(lambda n: f"{n}", range(1, 11))),
-                )
-                .over("ts")
-                .alias("rank"),
-            ]
+        df
+        # Filter out nulls and timestamps with too few observations to avoid qcut panic
+        .drop_nulls(["vol15d", "mom30d", "mom1d"])
+        .filter(pl.len().over("ts") >= 10)
+        .with_columns(
+            pl.col("vol15d")
+            .qcut(
+                10,
+                allow_duplicates=True,
+                labels=list(map(lambda n: f"{n}", range(1, 11))),
+            )
+            .over("ts")
+            .alias("volrank"),
+            pl.col("mom30d")
+            .abs()
+            .qcut(
+                10,
+                allow_duplicates=True,
+                labels=list(map(lambda n: f"{n}", range(1, 11))),
+            )
+            .over("ts")
+            .alias("longrank"),
+            pl.col("mom1d")
+            .qcut(
+                10,
+                allow_duplicates=True,
+                labels=list(map(lambda n: f"{n}", range(1, 11))),
+            )
+            .over("ts")
+            .alias("rank"),
         )
         .filter(
-            [
-                (pl.col("volrank").is_in(["10"]).not_())
-                & (pl.col("longrank").is_in(["8", "9", "10"]).not_())
-            ]
+            (pl.col("volrank").is_in(["10"]).not_())
+            & (pl.col("longrank").is_in(["8", "9", "10"]).not_())
         )
         .filter(
-            [
-                pl.col("rank") == "1",
-            ]
+            pl.col("rank") == "1",
         )
         .with_columns(
-            [(pl.col("vol") / pl.col("vol").sum().over(["ts"])).alias("weight")]
+            (pl.col("vol") / pl.col("vol").sum().over(["ts"])).alias("weight")
         )
         .sort(["ts", "symbol"])
         .with_columns(
-            [
-                pl.col("weight").alias("initial"),
-                (pl.col("weight") * pl.col("ret").exp()).alias("eod"),
-            ]
+            pl.col("weight").alias("initial"),
+            (pl.col("weight") * pl.col("ret").exp()).alias("eod"),
         )
         .with_columns(
-            [
-                ((pl.col("eod").abs() + pl.col("initial").abs()) * 0.002).alias("fee"),
-            ]
+            ((pl.col("eod").abs() + pl.col("initial").abs()) * 0.002).alias("fee"),
         )
         .with_columns(
-            [
-                (pl.col("eod") - pl.col("initial") - pl.col("fee")).alias("pnl"),
-            ]
+            (pl.col("eod") - pl.col("initial") - pl.col("fee")).alias("pnl"),
         )
     )
 
@@ -330,23 +326,17 @@ def run_strategy(df: pl.DataFrame):
         )
         .sort(["ts"])
         .with_columns(
-           [
-               (pl.col("strategy") - pl.col("ref")).alias("perf"),
-               (pl.col("strategy") - pl.col("ref")).rolling_mean(20).alias("perf20d"),
-           ]
+            (pl.col("strategy") - pl.col("ref")).alias("perf"),
+            (pl.col("strategy") - pl.col("ref")).rolling_mean(20).alias("perf20d"),
         )
         .with_columns(
-           [
-               pl.when(pl.col("perf20d").shift(1) > 0)
-               .then(pl.col("perf"))
-               .otherwise(0)
-               .alias("cond")
-           ]
+            pl.when(pl.col("perf20d").shift(1) > 0)
+            .then(pl.col("perf"))
+            .otherwise(0)
+            .alias("cond")
         )
         .with_columns(
-           [
-               pl.col("cond").cum_sum().alias("equity"),
-           ]
+            pl.col("cond").cum_sum().alias("equity"),
         )
         .to_pandas()
         .set_index("ts")
