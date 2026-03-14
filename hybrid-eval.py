@@ -49,9 +49,12 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 torch.use_deterministic_algorithms(True)
 
-df = (
+eps = 1e-8
+
+market_df = (
     pl.read_parquet(input_ohlcv_file)
-    .sort(["ts", "symbol"])
+    .filter(pl.col("symbol") == market_symbol)
+    .sort("ts")
     .filter(
         (pl.col("open") > 0)
         & (pl.col("high") > 0)
@@ -61,31 +64,275 @@ df = (
         & (pl.col("quote_volume") > 0)
     )
     .with_columns(
-        # todays log return (target)
-        ret=(pl.col("close") / pl.col("open"))
-        .log()
-        .over("symbol")
+        ref=(pl.col("close") / pl.col("open")).log(),
+        ref_cc=(pl.col("close") / pl.col("close").shift(1)).log(),
+        ref_range=(pl.col("high") / pl.col("low")).log(),
     )
-    # self coin to reference coin return
-    .join(
-        pl.read_parquet(input_ohlcv_file)
-        .filter(pl.col("symbol") == market_symbol)
-        .with_columns(ref=(pl.col("close") / pl.col("open")).log().over("symbol"))
-        .select(["ts", "ref"]),
-        on=["ts"],
-        how="inner",
+    .with_columns(
+        ref_mom_3=pl.col("ref").rolling_sum(window_size=3),
+        ref_mom_7=pl.col("ref").rolling_sum(window_size=7),
+        ref_mom_30=pl.col("ref").rolling_sum(window_size=30),
+        ref_vol_7=pl.col("ref").rolling_std(window_size=7),
+        ref_vol_30=pl.col("ref").rolling_std(window_size=30),
     )
+    .select(
+        [
+            "ts",
+            "ref",
+            "ref_cc",
+            "ref_range",
+            "ref_mom_3",
+            "ref_mom_7",
+            "ref_mom_30",
+            "ref_vol_7",
+            "ref_vol_30",
+        ]
+    )
+)
+
+df = (
+    pl.read_parquet(input_ohlcv_file)
     .sort(["symbol", "ts"])
-    .with_columns(target=(pl.col("ret")).shift(-1).over("symbol"))
+    .filter(
+        (pl.col("open") > 0)
+        & (pl.col("high") > 0)
+        & (pl.col("low") > 0)
+        & (pl.col("close") > 0)
+        & (pl.col("base_volume") > 0)
+        & (pl.col("quote_volume") > 0)
+    )
+    .join(market_df, on="ts", how="inner")
+    .sort(["symbol", "ts"])
+    .with_columns(
+        # base returns
+        ret=(pl.col("close") / pl.col("open")).log(),
+        cc_ret=(pl.col("close") / pl.col("close").shift(1)).log().over("symbol"),
+        gap=(pl.col("open") / pl.col("close").shift(1)).log().over("symbol"),
+        target=(pl.col("close").shift(-1) / pl.col("open").shift(-1))
+        .log()
+        .over("symbol"),
+        # bar structure
+        hl_range=(pl.col("high") / pl.col("low")).log(),
+        close_loc=(
+            2.0
+            * (
+                (pl.col("close") - pl.col("low"))
+                / (pl.col("high") - pl.col("low") + pl.lit(eps))
+            )
+            - 1.0
+        ),
+        body_frac=(
+            (pl.col("close") - pl.col("open"))
+            / (pl.col("high") - pl.col("low") + pl.lit(eps))
+        ),
+        upper_wick_frac=(
+            (pl.col("high") - pl.max_horizontal("open", "close"))
+            / (pl.col("high") - pl.col("low") + pl.lit(eps))
+        ),
+        lower_wick_frac=(
+            (pl.min_horizontal("open", "close") - pl.col("low"))
+            / (pl.col("high") - pl.col("low") + pl.lit(eps))
+        ),
+        wick_asym=(
+            (pl.col("high") - pl.max_horizontal("open", "close") + pl.lit(eps))
+            / (pl.min_horizontal("open", "close") - pl.col("low") + pl.lit(eps))
+        ).log(),
+        # range-based vol
+        sigma_rs=(
+            (
+                (pl.col("high") / pl.col("close")).log()
+                * (pl.col("high") / pl.col("open")).log()
+            )
+            + (
+                (pl.col("low") / pl.col("close")).log()
+                * (pl.col("low") / pl.col("open")).log()
+            )
+        ).sqrt(),
+        # volume / participation
+        vwap=pl.col("quote_volume") / (pl.col("base_volume") + pl.lit(eps)),
+        vwap_close=(
+            pl.col("close")
+            / (pl.col("quote_volume") / (pl.col("base_volume") + pl.lit(eps)))
+        ).log(),
+        vwap_open=(
+            (pl.col("quote_volume") / (pl.col("base_volume") + pl.lit(eps)))
+            / pl.col("open")
+        ).log(),
+        log_quote_vol=(pl.col("quote_volume") + pl.lit(eps)).log(),
+        log_base_vol=(pl.col("base_volume") + pl.lit(eps)).log(),
+        # order-flow proxy in quote units
+        flow_imb=(2.0 * pl.col("taker_buy_quote_volume") - pl.col("quote_volume"))
+        / (pl.col("quote_volume") + pl.lit(eps)),
+    )
+    .with_columns(
+        # market-relative features
+        ret_rel=pl.col("ret") - pl.col("ref"),
+        cc_ret_rel=pl.col("cc_ret") - pl.col("ref_cc"),
+        range_rel=pl.col("hl_range") - pl.col("ref_range"),
+    )
+    .with_columns(
+        # momentum
+        mom_3=pl.col("ret").rolling_sum(window_size=3).over("symbol"),
+        mom_7=pl.col("ret").rolling_sum(window_size=7).over("symbol"),
+        mom_14=pl.col("ret").rolling_sum(window_size=14).over("symbol"),
+        mom_30=pl.col("ret").rolling_sum(window_size=30).over("symbol"),
+        mom_90=pl.col("ret").rolling_sum(window_size=90).over("symbol"),
+        # residual / relative momentum
+        rel_mom_3=pl.col("ret_rel").rolling_sum(window_size=3).over("symbol"),
+        rel_mom_7=pl.col("ret_rel").rolling_sum(window_size=7).over("symbol"),
+        rel_mom_30=pl.col("ret_rel").rolling_sum(window_size=30).over("symbol"),
+        # realized vol
+        rv_7=pl.col("ret").rolling_std(window_size=7).over("symbol"),
+        rv_30=pl.col("ret").rolling_std(window_size=30).over("symbol"),
+        rv_90=pl.col("ret").rolling_std(window_size=90).over("symbol"),
+        # volume baselines
+        log_quote_vol_mean_7=pl.col("log_quote_vol")
+        .rolling_mean(window_size=7)
+        .over("symbol"),
+        log_quote_vol_std_7=pl.col("log_quote_vol")
+        .rolling_std(window_size=7)
+        .over("symbol"),
+        log_quote_vol_mean_30=pl.col("log_quote_vol")
+        .rolling_mean(window_size=30)
+        .over("symbol"),
+        log_quote_vol_std_30=pl.col("log_quote_vol")
+        .rolling_std(window_size=30)
+        .over("symbol"),
+        # flow baselines
+        flow_imb_mean_7=pl.col("flow_imb").rolling_mean(window_size=7).over("symbol"),
+        flow_imb_mean_30=pl.col("flow_imb").rolling_mean(window_size=30).over("symbol"),
+    )
+    .with_columns(
+        # vol-adjusted momentum
+        mom_7_voladj=pl.col("mom_7") / (pl.col("rv_7") + pl.lit(eps)),
+        mom_30_voladj=pl.col("mom_30") / (pl.col("rv_30") + pl.lit(eps)),
+        rel_mom_7_voladj=pl.col("rel_mom_7") / (pl.col("rv_7") + pl.lit(eps)),
+        rel_mom_30_voladj=pl.col("rel_mom_30") / (pl.col("rv_30") + pl.lit(eps)),
+        # vol regime
+        vol_ratio_7_30=pl.col("rv_7") / (pl.col("rv_30") + pl.lit(eps)),
+        vol_ratio_30_90=pl.col("rv_30") / (pl.col("rv_90") + pl.lit(eps)),
+        # volume surprise
+        vol_z_7=(
+            (pl.col("log_quote_vol") - pl.col("log_quote_vol_mean_7"))
+            / (pl.col("log_quote_vol_std_7") + pl.lit(eps))
+        ),
+        vol_z_30=(
+            (pl.col("log_quote_vol") - pl.col("log_quote_vol_mean_30"))
+            / (pl.col("log_quote_vol_std_30") + pl.lit(eps))
+        ),
+        rel_volume_7=pl.col("quote_volume")
+        / (
+            pl.col("quote_volume").rolling_mean(window_size=7).over("symbol")
+            + pl.lit(eps)
+        ),
+        rel_volume_30=pl.col("quote_volume")
+        / (
+            pl.col("quote_volume").rolling_mean(window_size=30).over("symbol")
+            + pl.lit(eps)
+        ),
+        # flow surprise / persistence
+        flow_dev_7=pl.col("flow_imb") - pl.col("flow_imb_mean_7"),
+        flow_dev_30=pl.col("flow_imb") - pl.col("flow_imb_mean_30"),
+        # trend quality
+        trend_intensity=pl.col("ret") / (pl.col("hl_range") + pl.lit(eps)),
+        rel_trend_intensity=pl.col("ret_rel") / (pl.col("hl_range") + pl.lit(eps)),
+    )
+    .with_columns(
+        # cross-sectional ranks, centered around 0
+        ret_cs=((pl.col("ret").rank().over("ts") / pl.len().over("ts")) - 0.5),
+        ret_rel_cs=((pl.col("ret_rel").rank().over("ts") / pl.len().over("ts")) - 0.5),
+        mom_7_cs=((pl.col("mom_7").rank().over("ts") / pl.len().over("ts")) - 0.5),
+        mom_30_cs=((pl.col("mom_30").rank().over("ts") / pl.len().over("ts")) - 0.5),
+        rel_mom_7_cs=(
+            (pl.col("rel_mom_7").rank().over("ts") / pl.len().over("ts")) - 0.5
+        ),
+        rel_mom_30_cs=(
+            (pl.col("rel_mom_30").rank().over("ts") / pl.len().over("ts")) - 0.5
+        ),
+        rv_30_cs=((pl.col("rv_30").rank().over("ts") / pl.len().over("ts")) - 0.5),
+        vol_z_30_cs=(
+            (pl.col("vol_z_30").rank().over("ts") / pl.len().over("ts")) - 0.5
+        ),
+        flow_imb_cs=(
+            (pl.col("flow_imb").rank().over("ts") / pl.len().over("ts")) - 0.5
+        ),
+        close_loc_cs=(
+            (pl.col("close_loc").rank().over("ts") / pl.len().over("ts")) - 0.5
+        ),
+    )
     .select(
         [
             # base columns
-            pl.col("ts"),
-            pl.col("symbol"),
-            pl.col("ref"),
-            pl.col("target"),
-            # feature columns
-            pl.col("ret"),
+            "ts",
+            "symbol",
+            "target",
+            # market state
+            "ref",
+            "ref_cc",
+            "ref_range",
+            "ref_mom_3",
+            "ref_mom_7",
+            "ref_mom_30",
+            "ref_vol_7",
+            "ref_vol_30",
+            # own returns / relative returns
+            "ret",
+            "cc_ret",
+            "gap",
+            "ret_rel",
+            "cc_ret_rel",
+            "range_rel",
+            # bar structure
+            "hl_range",
+            "close_loc",
+            "body_frac",
+            "upper_wick_frac",
+            "lower_wick_frac",
+            "wick_asym",
+            "sigma_rs",
+            "trend_intensity",
+            "rel_trend_intensity",
+            # volume / execution / flow
+            "vwap_close",
+            "vwap_open",
+            "log_quote_vol",
+            "log_base_vol",
+            "flow_imb",
+            "flow_dev_7",
+            "flow_dev_30",
+            "vol_z_7",
+            "vol_z_30",
+            "rel_volume_7",
+            "rel_volume_30",
+            # momentum / vol
+            "mom_3",
+            "mom_7",
+            "mom_14",
+            "mom_30",
+            "mom_90",
+            "rel_mom_3",
+            "rel_mom_7",
+            "rel_mom_30",
+            "rv_7",
+            "rv_30",
+            "rv_90",
+            "mom_7_voladj",
+            "mom_30_voladj",
+            "rel_mom_7_voladj",
+            "rel_mom_30_voladj",
+            "vol_ratio_7_30",
+            "vol_ratio_30_90",
+            # cross-sectional context
+            "ret_cs",
+            "ret_rel_cs",
+            "mom_7_cs",
+            "mom_30_cs",
+            "rel_mom_7_cs",
+            "rel_mom_30_cs",
+            "rv_30_cs",
+            "vol_z_30_cs",
+            "flow_imb_cs",
+            "close_loc_cs",
         ]
     )
 )
