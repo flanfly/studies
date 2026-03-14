@@ -82,7 +82,6 @@ import numpy as np
 import polars as pl
 from typing import List, Tuple
 
-# we optimize the information ratio
 df = (
     pl.read_parquet(output_features_file)
     .sort(["symbol", "ts"])
@@ -94,18 +93,10 @@ df = (
         on=["ts"],
         how="inner",
     )
-    # .with_columns(target=(pl.col("ret") - pl.col("ref")).shift(-1).over("symbol"))
+    .sort(["symbol", "ts"])
     .with_columns(target=(pl.col("ret")).shift(-1).over("symbol"))
     .drop("ref")
     .drop_nulls()
-    # .filter(
-    #    pl.col("symbol").is_in(
-    #        [
-    #            'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'XRPUSDT'
-    #        ]
-    #    )
-    # )
-    # .filter(pl.col("ts").dt.year() >= 2020)
 )
 
 featcols = sorted([col for col in df.columns if col not in ["ts", "symbol", "target"]])
@@ -234,7 +225,6 @@ for i in range(5):  # max 5 attempts
         break
 
 
-# %%
 def extract_gbt_matrix(
     emb: np.ndarray, tgt: np.ndarray, ts: np.ndarray, syms: np.ndarray, mask: np.ndarray
 ) -> Tuple[np.ndarray, pl.DataFrame]:
@@ -299,7 +289,6 @@ gbt_model = CatBoostRegressor(
 )
 gbt_model.fit(X_train, y_train, eval_set=(X_val, y_val))
 
-# %%
 warm_test_ts = pl.concat([val_ts, test_ts])
 res_ary = []
 
@@ -334,7 +323,6 @@ fee_rate = 0.002  # 0.2% entry and exit fee
 
 eval = (
     pl.read_parquet(output_forecast_file)
-    .sort(["symbol", "ts"])
     .join(
         pl.read_parquet(input_ohlcv_file)
         .with_columns(ret=(pl.col("close") / pl.col("open")).log())
@@ -342,6 +330,7 @@ eval = (
         on=["ts", "symbol"],
         how="inner",
     )
+    .sort(["symbol", "ts"])
     # Long (+1) if pred > 0, Short (-1) if pred < 0
     .with_columns([pl.when(pl.col("pred") > 0).then(1).otherwise(-1).alias("position")])
     # 2. Calculate Position Changes
@@ -420,3 +409,5 @@ plt.ylabel("Cumulative Growth")
 plt.legend()
 plt.grid(alpha=0.3)
 plt.show()
+
+# %%
