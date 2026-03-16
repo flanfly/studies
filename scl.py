@@ -24,20 +24,56 @@ market_pair = "BTCUSDT"
 # Dev Mode: must be exactly "yes" to enable; all other values are treated as "no"
 dev_mode = "yes"
 
-# Training Parameters (used if dev_mode=False)
+# Training Parameters (all parameters are strings and converted in the next cell)
 device_type = "auto"  # "cuda", "cpu", or "auto"
-seq_len = 30
-batch_size = 1024
-epochs = 10
+seq_len = "30"
+batch_size = "1024"
+epochs = "10"
 
 # Data Split Percentages
-train_pct = 0.7
-val_pct = 0.1
-test_pct = 0.2
+train_pct = "0.7"
+val_pct = "0.1"
+test_pct = "0.2"
 
 # Learning Rates
-lr_nn = 1e-3
-lr_linear = 1e-2
+lr_nn = "1e-3"
+lr_linear = "1e-2"
+
+# %%
+# convert string parameters and print them
+seq_len = int(seq_len)
+batch_size = int(batch_size)
+epochs = int(epochs)
+
+train_pct = float(train_pct)
+val_pct = float(val_pct)
+test_pct = float(test_pct)
+
+lr_nn = float(lr_nn)
+lr_linear = float(lr_linear)
+
+device_type = str(device_type).strip().lower()
+if device_type not in {"auto", "cpu", "cuda"}:
+    raise ValueError(f"device_type must be one of auto/cpu/cuda, got: {device_type}")
+
+is_dev_mode = str(dev_mode).strip().lower() == "yes"
+
+print("Parameters:")
+print(f"  input_ohlcv_file: {input_ohlcv_file}")
+print(f"  output_features_file: {output_features_file}")
+print(f"  output_nn_file: {output_nn_file}")
+print(f"  output_clf_file: {output_clf_file}")
+print(f"  market_pair: {market_pair}")
+print(f"  dev_mode: {dev_mode} -> is_dev_mode={is_dev_mode}")
+print(f"  device_type: {device_type}")
+print(f"  seq_len: {seq_len}")
+print(f"  batch_size: {batch_size}")
+print(f"  epochs: {epochs}")
+print(f"  train_pct: {train_pct}")
+print(f"  val_pct: {val_pct}")
+print(f"  test_pct: {test_pct}")
+print(f"  lr_nn: {lr_nn}")
+print(f"  lr_linear: {lr_linear}")
 
 # %%
 # derive features
@@ -171,7 +207,6 @@ from sklearn.metrics import classification_report, accuracy_score
 import joblib
 
 # Resolve Dev Mode Overrides
-is_dev_mode = isinstance(dev_mode, str) and dev_mode.strip().lower() == "yes"
 if is_dev_mode:
     print("!!! DEV MODE ACTIVE - Overriding parameters !!!")
     active_epochs = 1
