@@ -425,7 +425,10 @@ train_dataloader = DataLoader(
 
 # NN Training Loop
 model.train()
+expected_random_loss = np.log(active_batch_size)
 print(f"Starting NN training for {active_epochs} epochs...")
+print(f"Expected Random Loss (log(batch_size)): {expected_random_loss:.4f}")
+
 for epoch in range(active_epochs):
     epoch_losses = []
     for i, (x_batch, y_batch, _) in enumerate(train_dataloader):
@@ -463,7 +466,7 @@ X_train_emb, y_train_emb, _ = extract_embeddings(
 )
 
 print(f"Fitting Logistic Regression on {len(X_train_emb)} samples...")
-lr_clf = LogisticRegression(max_iter=1000)
+lr_clf = LogisticRegression(max_iter=1000, class_weight="balanced")
 lr_clf.fit(X_train_emb, y_train_emb.ravel())
 print("Linear classifier training complete.")
 

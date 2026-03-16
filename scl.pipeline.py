@@ -148,7 +148,7 @@ def forecast_returns(
 
 
 @dsl.pipeline(
-    name="hybrid-pipeline",
+    name="scl-pipeline",
     description="Long only portfolio forecast",
 )
 def pipeline():
