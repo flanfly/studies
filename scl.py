@@ -22,7 +22,7 @@ output_clf_file = "scl_lr_classifier.joblib"
 market_pair = "BTCUSDT"
 
 # Dev Mode: If True, overrides parameters for a quick test run
-dev_mode = True
+dev_mode = 0
 
 # Training Parameters (used if dev_mode=False)
 device_type = "auto"  # "cuda", "cpu", or "auto"
@@ -113,9 +113,8 @@ raw = (
 )
 
 # Use the configured market_pair as reference market series
-market_ref = (
-    raw.filter(pl.col("symbol") == market_pair)
-    .select(["ts", pl.col("ret").alias("ref")])
+market_ref = raw.filter(pl.col("symbol") == market_pair).select(
+    ["ts", pl.col("ret").alias("ref")]
 )
 
 (
@@ -172,7 +171,7 @@ from sklearn.metrics import classification_report, accuracy_score
 import joblib
 
 # Resolve Dev Mode Overrides
-if dev_mode:
+if dev_mode > 0:
     print("!!! DEV MODE ACTIVE - Overriding parameters !!!")
     active_epochs = 1
     active_batch_size = 256
