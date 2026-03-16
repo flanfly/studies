@@ -24,6 +24,9 @@ market_pair = "BTCUSDT"
 # Dev Mode: must be exactly "yes" to enable; all other values are treated as "no"
 dev_mode = "yes"
 
+# Use SCL embeddings: "yes" to train/use encoder embeddings, anything else trains on last-step raw features
+use_scl_embeddings = "yes"
+
 # Training Parameters (all parameters are strings and converted in the next cell)
 device_type = "auto"  # "cuda", "cpu", or "auto"
 seq_len = "30"
@@ -57,6 +60,7 @@ if device_type not in {"auto", "cpu", "cuda"}:
     raise ValueError(f"device_type must be one of auto/cpu/cuda, got: {device_type}")
 
 is_dev_mode = str(dev_mode).strip().lower() == "yes"
+is_use_scl = str(use_scl_embeddings).strip().lower() == "yes"
 
 print("Parameters:")
 print(f"  input_ohlcv_file: {input_ohlcv_file}")
@@ -65,6 +69,7 @@ print(f"  output_nn_file: {output_nn_file}")
 print(f"  output_clf_file: {output_clf_file}")
 print(f"  market_pair: {market_pair}")
 print(f"  dev_mode: {dev_mode} -> is_dev_mode={is_dev_mode}")
+print(f"  use_scl_embeddings: {use_scl_embeddings} -> is_use_scl={is_use_scl}")
 print(f"  device_type: {device_type}")
 print(f"  seq_len: {seq_len}")
 print(f"  batch_size: {batch_size}")
@@ -277,17 +282,40 @@ class SupConLoss(nn.Module):
         batch_size = projections.shape[0]
         sim_matrix = torch.matmul(projections, projections.T) / self.temperature
         labels = labels.contiguous().view(-1, 1)
+
+        # 1. Base mask (1 if same label, 0 if different)
         mask = torch.eq(labels, labels.T).float().to(device)
+
+        # 2. NEW: Force Flats (label=1) to only be negative examples.
+        # They cannot form positive pairs with anything (not even other flats).
+        is_not_flat = (labels != 1).float().to(device)
+        mask = mask * is_not_flat * is_not_flat.T
+
+        # 3. Mask out self-contrast (a vector shouldn't contrast with itself)
         logits_mask = torch.scatter(
             torch.ones_like(mask), 1, torch.arange(batch_size).view(-1, 1).to(device), 0
         )
         mask = mask * logits_mask
+
+        # 4. Numerical stability (subtract max from logits)
         sim_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
         logits = sim_matrix - sim_max.detach()
+
+        # 5. Compute log probability
         exp_logits = torch.exp(logits) * logits_mask
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-9)
+
+        # 6. Compute mean of log-likelihood over positive pairs
         mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-9)
-        loss = -mean_log_prob_pos.mean()
+
+        # 7. Final Contrastive Loss (Average ONLY over Pump and Dump anchors)
+        # Flat anchors have 0 positive pairs, so they are excluded from the anchor mean.
+        non_flat_mask = (labels.view(-1) != 1)
+        if non_flat_mask.sum() > 0:
+            loss = -mean_log_prob_pos[non_flat_mask].mean()
+        else:
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
+
         return loss
 
 
@@ -301,6 +329,7 @@ class CryptoPanelDataset(Dataset):
         pump_thresh: float,
         dump_thresh: float,
         ret_col: str = "ret",
+        drop_flats: bool = False,
     ):
         self.seq_len = seq_len
         df = df.sort(["symbol", "ts"])
@@ -319,6 +348,8 @@ class CryptoPanelDataset(Dataset):
         )
         df = df.with_row_index("global_idx")
         valid_rows = df.filter(pl.col("row_num_in_group") >= (seq_len - 1))
+        if drop_flats:
+            valid_rows = valid_rows.filter(pl.col("label") != 1)
         self.valid_indices = valid_rows["global_idx"].to_list()
         feature_data = df.select(feature_cols).to_numpy()
         feature_data = np.nan_to_num(feature_data, nan=0.0, posinf=0.0, neginf=0.0)
@@ -361,10 +392,35 @@ def extract_embeddings(dataloader, model, device, max_samples=None):
     )
 
 
-# Initialize Model and Optimizer
-model = SCL_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(device)
-criterion = SupConLoss(temperature=0.07).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=lr_nn)
+def extract_last_step_features(dataloader, max_samples=None):
+    all_features, all_labels, all_fwd_rets = [], [], []
+    samples_collected = 0
+    for x_batch, y_batch, fwd_ret_batch in dataloader:
+        # x_batch shape: [B, T, F], use last-step features x[:, -1, :]
+        last_step = x_batch[:, -1, :]
+        all_features.append(last_step.numpy())
+        all_labels.append(y_batch.numpy())
+        all_fwd_rets.append(fwd_ret_batch.numpy())
+        samples_collected += x_batch.size(0)
+        if max_samples and samples_collected >= max_samples:
+            break
+    return (
+        np.vstack(all_features),
+        np.concatenate(all_labels),
+        np.concatenate(all_fwd_rets),
+    )
+
+
+# Initialize Model and Optimizer (optional when using SCL embeddings)
+model = None
+criterion = None
+optimizer = None
+if is_use_scl:
+    model = SCL_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(
+        device
+    )
+    criterion = SupConLoss(temperature=0.07).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr_nn)
 
 # Load and Split Data
 print("Loading data...")
@@ -413,7 +469,9 @@ val_df = normalize_df(val_df, means, stds, features_list)
 test_df = normalize_df(test_df, means, stds, features_list)
 
 # Create Training Dataset and Loader
-train_dataset = CryptoPanelDataset(train_df, features_list, seq_len, 0.05, -0.05, ret_col="raw_ret")
+train_dataset = CryptoPanelDataset(
+    train_df, features_list, seq_len, 0.05, -0.05, ret_col="raw_ret"
+)
 valid_labels = train_dataset.labels[train_dataset.valid_indices].numpy().flatten()
 class_counts = np.bincount(valid_labels)
 class_weights = 1.0 / (class_counts + 1e-8)
@@ -424,46 +482,61 @@ train_dataloader = DataLoader(
 )
 
 # NN Training Loop
-model.train()
-expected_random_loss = np.log(active_batch_size)
-print(f"Starting NN training for {active_epochs} epochs...")
-print(f"Expected Random Loss (log(batch_size)): {expected_random_loss:.4f}")
+if is_use_scl:
+    model.train()
+    expected_random_loss = np.log(active_batch_size)
+    print(f"Starting NN training for {active_epochs} epochs...")
+    print(f"Expected Random Loss (log(batch_size)): {expected_random_loss:.4f}")
 
-for epoch in range(active_epochs):
-    epoch_losses = []
-    for i, (x_batch, y_batch, _) in enumerate(train_dataloader):
-        if max_train_batches and i >= max_train_batches:
-            break
-        x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-        optimizer.zero_grad()
-        _, projected_vector = model(x_batch)
-        loss = criterion(projected_vector, y_batch)
-        loss.backward()
-        optimizer.step()
-        epoch_losses.append(loss.item())
-        if (i + 1) % 10 == 0:
-            print(f"Batch {i+1} | Loss: {loss.item():.4f}")
-    if epoch_losses:
-        print(f"Epoch {epoch+1} | Avg Loss: {np.mean(epoch_losses):.4f}")
+    for epoch in range(active_epochs):
+        epoch_losses = []
+        for i, (x_batch, y_batch, _) in enumerate(train_dataloader):
+            if max_train_batches and i >= max_train_batches:
+                break
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+            optimizer.zero_grad()
+            _, projected_vector = model(x_batch)
+            loss = criterion(projected_vector, y_batch)
+            loss.backward()
+            optimizer.step()
+            epoch_losses.append(loss.item())
+            if (i + 1) % 10 == 0:
+                print(f"Batch {i+1} | Loss: {loss.item():.4f}")
+        if epoch_losses:
+            print(f"Epoch {epoch+1} | Avg Loss: {np.mean(epoch_losses):.4f}")
 
-# Save the trained model
-torch.save(model.state_dict(), output_nn_file)
-print(f"Model saved to {output_nn_file}")
+    # Save the trained model
+    torch.save(model.state_dict(), output_nn_file)
+    print(f"Model saved to {output_nn_file}")
+else:
+    print("Skipping SCL embedding training (use_scl_embeddings != 'yes').")
+    print("Linear classifier will be trained on last-step features only.")
 
 # %%
 # training the linear classifier
-# Load the model
-model = SCL_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(device)
-model.load_state_dict(torch.load(output_nn_file, map_location=device))
-model.eval()
+if is_use_scl:
+    # Load the model
+    model = SCL_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(
+        device
+    )
+    model.load_state_dict(torch.load(output_nn_file, map_location=device))
+    model.eval()
+    print("\nExtracting embeddings for linear classifier training...")
+else:
+    print("\nExtracting last-step features for linear classifier training...")
 
-print("\nExtracting embeddings for linear classifier training...")
 train_extract_loader = DataLoader(
     train_dataset, batch_size=active_batch_size, shuffle=False
 )
-X_train_emb, y_train_emb, _ = extract_embeddings(
-    train_extract_loader, model, device, max_samples=50000 if is_dev_mode else None
-)
+
+if is_use_scl:
+    X_train_emb, y_train_emb, _ = extract_embeddings(
+        train_extract_loader, model, device, max_samples=50000 if is_dev_mode else None
+    )
+else:
+    X_train_emb, y_train_emb, _ = extract_last_step_features(
+        train_extract_loader, max_samples=50000 if is_dev_mode else None
+    )
 
 print(f"Fitting Logistic Regression on {len(X_train_emb)} samples...")
 lr_clf = LogisticRegression(max_iter=1000, class_weight="balanced")
@@ -476,23 +549,33 @@ print(f"Linear classifier saved to {output_clf_file}")
 
 # %%
 # computing metrics on the test and val set using the models
-# Load the model
-model = SCL_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(device)
-model.load_state_dict(torch.load(output_nn_file, map_location=device))
-model.eval()
+if is_use_scl:
+    # Load the model
+    model = SCL_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(
+        device
+    )
+    model.load_state_dict(torch.load(output_nn_file, map_location=device))
+    model.eval()
 
 # Load the linear classifier
 lr_clf = joblib.load(output_clf_file)
 
 print("\nEvaluating models on evaluation set (Val + Test)...")
 val_df_all = pl.concat([val_df, test_df])
-eval_dataset = CryptoPanelDataset(val_df_all, features_list, seq_len, 0.05, -0.05, ret_col="raw_ret")
+eval_dataset = CryptoPanelDataset(
+    val_df_all, features_list, seq_len, 0.05, -0.05, ret_col="raw_ret"
+)
 eval_extract_loader = DataLoader(
     eval_dataset, batch_size=active_batch_size, shuffle=False
 )
-X_eval_emb, y_eval_emb, fwd_rets_eval = extract_embeddings(
-    eval_extract_loader, model, device, max_samples=20000 if is_dev_mode else None
-)
+if is_use_scl:
+    X_eval_emb, y_eval_emb, fwd_rets_eval = extract_embeddings(
+        eval_extract_loader, model, device, max_samples=20000 if is_dev_mode else None
+    )
+else:
+    X_eval_emb, y_eval_emb, fwd_rets_eval = extract_last_step_features(
+        eval_extract_loader, max_samples=20000 if is_dev_mode else None
+    )
 
 y_pred = lr_clf.predict(X_eval_emb)
 acc = accuracy_score(y_eval_emb, y_pred)
