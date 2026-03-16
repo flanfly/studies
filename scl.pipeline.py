@@ -135,7 +135,7 @@ def forecast_returns(
                     --output_nn_file="$3" \
                     --output_clf_file="$4" \
                     --device=cuda \
-                    --dev_mode=0 \
+                    --dev_mode=no \
                     --market_pair=BTCUSDT
             """,
             report.uri,  # 0

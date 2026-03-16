@@ -21,8 +21,8 @@ output_clf_file = "scl_lr_classifier.joblib"
 
 market_pair = "BTCUSDT"
 
-# Dev Mode: If True, overrides parameters for a quick test run
-dev_mode = 0
+# Dev Mode: must be exactly "yes" to enable; all other values are treated as "no"
+dev_mode = "yes"
 
 # Training Parameters (used if dev_mode=False)
 device_type = "auto"  # "cuda", "cpu", or "auto"
@@ -171,7 +171,8 @@ from sklearn.metrics import classification_report, accuracy_score
 import joblib
 
 # Resolve Dev Mode Overrides
-if dev_mode > 0:
+is_dev_mode = isinstance(dev_mode, str) and dev_mode.strip().lower() == "yes"
+if is_dev_mode:
     print("!!! DEV MODE ACTIVE - Overriding parameters !!!")
     active_epochs = 1
     active_batch_size = 256
@@ -264,10 +265,11 @@ class CryptoPanelDataset(Dataset):
         seq_len: int,
         pump_thresh: float,
         dump_thresh: float,
+        ret_col: str = "ret",
     ):
         self.seq_len = seq_len
         df = df.sort(["symbol", "ts"])
-        df = df.with_columns(pl.col("ret").shift(-1).over("symbol").alias("fwd_ret"))
+        df = df.with_columns(pl.col(ret_col).shift(-1).over("symbol").alias("fwd_ret"))
         df = df.drop_nulls(subset=["fwd_ret"])
         df = df.with_columns(
             pl.when(pl.col("fwd_ret") >= pump_thresh)
@@ -344,8 +346,39 @@ val_df = full_df.filter(
 test_df = full_df.filter(pl.col("ts") >= val_cutoff_ts)
 print(f"Split rows - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
+# Normalize features based on Training Set statistics
+print("Normalizing features...")
+train_stats = train_df.select(
+    [pl.col(c).mean().alias(f"{c}_mean") for c in features_list]
+    + [pl.col(c).std().alias(f"{c}_std") for c in features_list]
+)
+
+means = {c: train_stats[f"{c}_mean"][0] for c in features_list}
+stds = {c: train_stats[f"{c}_std"][0] for c in features_list}
+
+
+def normalize_df(df, means, stds, features):
+    exprs = []
+    for c in features:
+        mean = means.get(c, 0.0)
+        std = stds.get(c, 1.0)
+        if std == 0 or std is None or np.isnan(std):
+            std = 1.0
+        exprs.append(((pl.col(c) - mean) / std).alias(c))
+    return df.with_columns(exprs)
+
+
+# Create raw_ret column for labeling before normalization overwrites ret
+train_df = train_df.with_columns(pl.col("ret").alias("raw_ret"))
+val_df = val_df.with_columns(pl.col("ret").alias("raw_ret"))
+test_df = test_df.with_columns(pl.col("ret").alias("raw_ret"))
+
+train_df = normalize_df(train_df, means, stds, features_list)
+val_df = normalize_df(val_df, means, stds, features_list)
+test_df = normalize_df(test_df, means, stds, features_list)
+
 # Create Training Dataset and Loader
-train_dataset = CryptoPanelDataset(train_df, features_list, seq_len, 0.05, -0.05)
+train_dataset = CryptoPanelDataset(train_df, features_list, seq_len, 0.05, -0.05, ret_col="raw_ret")
 valid_labels = train_dataset.labels[train_dataset.valid_indices].numpy().flatten()
 class_counts = np.bincount(valid_labels)
 class_weights = 1.0 / (class_counts + 1e-8)
@@ -391,7 +424,7 @@ train_extract_loader = DataLoader(
     train_dataset, batch_size=active_batch_size, shuffle=False
 )
 X_train_emb, y_train_emb, _ = extract_embeddings(
-    train_extract_loader, model, device, max_samples=50000 if dev_mode else None
+    train_extract_loader, model, device, max_samples=50000 if is_dev_mode else None
 )
 
 print(f"Fitting Logistic Regression on {len(X_train_emb)} samples...")
@@ -415,12 +448,12 @@ lr_clf = joblib.load(output_clf_file)
 
 print("\nEvaluating models on evaluation set (Val + Test)...")
 val_df_all = pl.concat([val_df, test_df])
-eval_dataset = CryptoPanelDataset(val_df_all, features_list, seq_len, 0.05, -0.05)
+eval_dataset = CryptoPanelDataset(val_df_all, features_list, seq_len, 0.05, -0.05, ret_col="raw_ret")
 eval_extract_loader = DataLoader(
     eval_dataset, batch_size=active_batch_size, shuffle=False
 )
 X_eval_emb, y_eval_emb, fwd_rets_eval = extract_embeddings(
-    eval_extract_loader, model, device, max_samples=20000 if dev_mode else None
+    eval_extract_loader, model, device, max_samples=20000 if is_dev_mode else None
 )
 
 y_pred = lr_clf.predict(X_eval_emb)
