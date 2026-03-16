@@ -118,24 +118,31 @@ uv run sync-datastore.py -d \
 def forecast_returns(
     klines: dsl.Input[dsl.Dataset],
     report: dsl.Output[dsl.HTML],
-    predictions: dsl.Output[dsl.Dataset],
+    features: dsl.Output[dsl.Dataset],
+    embeddings: dsl.Output[dsl.Dataset],
+    classifier: dsl.Output[dsl.Dataset],
 ):
-    """Fit a CatBoost model to TS2Vec embedddings"""
+    """Fit a Supervised Contrastive Learning model to forecast returns."""
 
     return dsl.ContainerSpec(
         image=IMAGE,
         command=["sh", "-c"],
         args=[
             """
-            uv run vertex-ai-main.py "hybrid-eval.ipynb=$0" \
+            uv run vertex-ai-main.py "scl.ipynb=$0" \
                     --input_ohlcv_file="$1" \
-                    --output_forecast_file="$2" \
+                    --output_features_file="$2" \
+                    --output_nn_file="$3" \
+                    --output_clf_file="$4" \
                     --device=cuda \
-                    --reference_pair=BTCUSDT
+                    --dev_mode=0 \
+                    --market_pair=BTCUSDT
             """,
             report.uri,  # 0
             klines.uri,  # 1
-            predictions.uri,  # 3
+            features.uri,  # 2
+            embeddings.uri,  # 3
+            classifier.uri,  # 4
         ],
     )
 
