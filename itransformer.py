@@ -29,6 +29,12 @@ seq_len = "30"
 batch_size = "1024"
 epochs = "10"
 
+# Labeling Parameters
+horizon = "3"
+rolling_vol_window = "60"
+pump_threshold_sigma = "1.0"
+dump_threshold_sigma = "1.0"
+
 # Data Split Percentages
 train_pct = "0.7"
 val_pct = "0.1"
@@ -46,6 +52,11 @@ import torch
 seq_len = int(seq_len)
 batch_size = int(batch_size)
 epochs = int(epochs)
+
+horizon = int(horizon)
+rolling_vol_window = int(rolling_vol_window)
+pump_threshold_sigma = float(pump_threshold_sigma)
+dump_threshold_sigma = float(dump_threshold_sigma)
 
 train_pct = float(train_pct)
 val_pct = float(val_pct)
@@ -71,6 +82,10 @@ print(f"  device: {device}")
 print(f"  seq_len: {seq_len}")
 print(f"  batch_size: {batch_size}")
 print(f"  epochs: {epochs}")
+print(f"  horizon: {horizon}")
+print(f"  rolling_vol_window: {rolling_vol_window}")
+print(f"  pump_threshold_sigma: {pump_threshold_sigma}")
+print(f"  dump_threshold_sigma: {dump_threshold_sigma}")
 print(f"  train_pct: {train_pct}")
 print(f"  val_pct: {val_pct}")
 print(f"  test_pct: {test_pct}")
@@ -114,12 +129,12 @@ raw = (
         & (pl.col("quote_volume") > 0)
     )
     .with_columns(
-        # base returns
+        # base returns (all use log returns as requested)
         ret=(pl.col("close") / pl.col("open")).log(),
         cc_ret=(pl.col("close") / pl.col("close").shift(1)).log().over("symbol"),
-        # bar structure
+        # bar structure (also log-based)
         hl_range=(pl.col("high") / pl.col("low")).log(),
-        # wick and body
+        # wick and body ratios
         upper_wick_frac=(
             (pl.col("high") - pl.max_horizontal("open", "close"))
             / (pl.col("high") - pl.col("low") + pl.lit(eps))
@@ -132,7 +147,7 @@ raw = (
             (pl.col("high") - pl.max_horizontal("open", "close") + pl.lit(eps))
             / (pl.min_horizontal("open", "close") - pl.col("low") + pl.lit(eps))
         ).log(),
-        # range-based vol
+        # range-based vol (log-ratio based)
         sigma_rs=(
             (
                 (pl.col("high") / pl.col("close")).log()
@@ -143,7 +158,7 @@ raw = (
                 * (pl.col("low") / pl.col("open")).log()
             )
         ).sqrt(),
-        # volume / participation
+        # volume / participation (log-volume based)
         log_quote_vol=(pl.col("quote_volume") + pl.lit(eps)).log(),
         log_base_vol=(pl.col("base_volume") + pl.lit(eps)).log(),
     )
@@ -162,14 +177,14 @@ market_ref = raw.filter(pl.col("symbol") == market_pair).select(
         ret_rel=pl.col("ret") - pl.col("ref"),
     )
     .with_columns(
-        # momentum
+        # momentum (sum of log returns is log of cumulative return)
         mom_3=pl.col("ret").rolling_sum(window_size=3).over("symbol"),
-        # relative momentum
+        # relative momentum (difference of log returns)
         rel_mom_3=pl.col("ret_rel").rolling_sum(window_size=3).over("symbol"),
-        # realized vol
+        # realized vol (stdev of log returns)
         rv_30=pl.col("ret").rolling_std(window_size=30).over("symbol"),
         rv_90=pl.col("ret").rolling_std(window_size=90).over("symbol"),
-        # volume baselines
+        # volume baselines (using log-volume)
         log_quote_vol_mean_30=pl.col("log_quote_vol")
         .rolling_mean(window_size=30)
         .over("symbol"),
@@ -190,19 +205,36 @@ market_ref = raw.filter(pl.col("symbol") == market_pair).select(
         ),
     )
     .with_columns(
-        # --- ISSUE FIX: Pre-compute label and fwd_ret BEFORE split ---
+        # --- Volatility-adjusted labeling logic using log returns ---
+        # 1. Forward Return: cumulative log returns over horizon N (starting at t+1)
         fwd_ret=pl.col("ret")
-        .shift(-1)
+        .shift(-horizon)
+        .rolling_sum(window_size=horizon)
         .over("symbol"),
+        # 2. Rolling Volatility: stdev of N-day backward log returns
+        # We first compute the N-day backward return series, then take its rolling std
+        hist_vol=(
+            pl.col("ret")
+            .rolling_sum(window_size=horizon)
+            .over("symbol")
+            .rolling_std(window_size=rolling_vol_window)
+            .over("symbol")
+        ),
     )
     .with_columns(
-        label=pl.when(pl.col("fwd_ret") >= 0.05)
+        # 3. Standardized Forward Return (Z-score)
+        target_z=pl.col("fwd_ret")
+        / (pl.col("hist_vol") + pl.lit(eps))
+    )
+    .with_columns(
+        # 4. Labeling based on sigma thresholds
+        label=pl.when(pl.col("target_z") >= pump_threshold_sigma)
         .then(2)
-        .when(pl.col("fwd_ret") <= -0.05)
+        .when(pl.col("target_z") <= -dump_threshold_sigma)
         .then(0)
         .otherwise(1)
     )
-    .select(["ts", "symbol", "fwd_ret", "label"] + features_list)
+    .select(["ts", "symbol", "fwd_ret", "target_z", "label"] + features_list)
     .sink_parquet(output_features_file)
 )
 
@@ -222,8 +254,7 @@ class iTransformerEncoder(nn.Module):
         super().__init__()
         self.time_projector = nn.Linear(seq_len, d_model)
 
-        # --- ISSUE FIX: Learnable Feature Embedding ---
-        # This tells the transformer WHICH feature it is looking at
+        # Learnable Feature Embedding
         self.feature_embed = nn.Parameter(torch.randn(1, num_features, d_model))
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -279,7 +310,6 @@ class CryptoPanelDataset(Dataset):
         seq_len: int,
     ):
         self.seq_len = seq_len
-        # ISSUE FIX: No internal shifting; use pre-calculated columns
         df = df.sort(["symbol", "ts"])
         df = df.with_columns(
             pl.int_range(0, pl.len()).over("symbol").alias("row_num_in_group")
@@ -370,7 +400,6 @@ train_dataloader = DataLoader(
 )
 
 # Compute class weights for CE loss
-# Filter valid indices labels to get accurate counts
 train_labels_for_weight = train_dataset.labels[train_dataset.valid_indices].numpy()
 class_counts = np.bincount(train_labels_for_weight)
 class_weights = torch.tensor(1.0 / (class_counts + 1e-8), dtype=torch.float32).to(
@@ -385,9 +414,8 @@ model = Supervised_iTransformer(seq_len=seq_len, num_features=len(features_list)
 )
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr_nn)
-# --- ISSUE FIX: LR Scheduler ---
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.5, patience=2, verbose=True
+    optimizer, mode="min", factor=0.5, patience=2
 )
 
 # Training Loop
@@ -405,7 +433,6 @@ for epoch in range(active_epochs):
         loss = criterion(logits, y_batch)
         loss.backward()
 
-        # --- ISSUE FIX: Gradient Clipping ---
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
@@ -445,14 +472,11 @@ with torch.no_grad():
         probs = F.softmax(logits, dim=1)
 
         # Confidence-based prediction
-        # Default to 'Flat' (1) unless confidence for Pump(2) or Dump(0) is high
         preds = torch.ones(x_batch.size(0), dtype=torch.long, device=device)
 
-        # Check for Pump confidence
         pump_mask = probs[:, 2] > confidence_threshold
         preds[pump_mask] = 2
 
-        # Check for Dump confidence
         dump_mask = probs[:, 0] > confidence_threshold
         preds[dump_mask] = 0
 
@@ -478,7 +502,6 @@ print("\nPerformance Stats (Forward Returns):")
 def report_stats(name, mask, returns):
     subset = returns[mask]
     if len(subset) > 0:
-        # Filter out NaNs if any exist in returns
         valid_subset = subset[~np.isnan(subset)]
         if len(valid_subset) > 0:
             print(
