@@ -43,6 +43,8 @@ test_pct = "0.2"
 # Learning Rates
 lr_nn = "1e-3"
 confidence_threshold = "0.95"
+loss_function = "focal"  # "cross-entropy" or "focal"
+focal_gamma = "2.0"
 
 # %%
 # convert string parameters and print them
@@ -64,6 +66,8 @@ test_pct = float(test_pct)
 
 lr_nn = float(lr_nn)
 confidence_threshold = float(confidence_threshold)
+focal_gamma = float(focal_gamma)
+loss_function = str(loss_function).strip().lower()
 
 device_type = str(device_type).strip().lower()
 if device_type == "auto":
@@ -91,6 +95,8 @@ print(f"  val_pct: {val_pct}")
 print(f"  test_pct: {test_pct}")
 print(f"  lr_nn: {lr_nn}")
 print(f"  confidence_threshold: {confidence_threshold}")
+print(f"  loss_function: {loss_function}")
+print(f"  focal_gamma: {focal_gamma}")
 
 # %%
 # derive features
@@ -246,6 +252,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import classification_report, accuracy_score
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, weight=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.weight = weight
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.weight)
+        pt = torch.exp(-ce_loss)
+        focal_loss = (1 - pt) ** self.gamma * ce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 # iTransformer Encoder with Feature Embeddings
@@ -412,7 +438,14 @@ print(f"Class weights: {class_weights}")
 model = Supervised_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(
     device
 )
-criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+if loss_function == "focal":
+    criterion = FocalLoss(weight=class_weights, gamma=focal_gamma)
+    print(f"Using Focal Loss (gamma={focal_gamma})")
+else:
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    print("Using Cross Entropy Loss")
+
 optimizer = torch.optim.Adam(model.parameters(), lr=lr_nn)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode="min", factor=0.5, patience=2
