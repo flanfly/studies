@@ -36,6 +36,7 @@ test_pct = "0.2"
 
 # Learning Rates
 lr_nn = "1e-3"
+confidence_threshold = "0.95"
 
 # %%
 # convert string parameters and print them
@@ -51,6 +52,7 @@ val_pct = float(val_pct)
 test_pct = float(test_pct)
 
 lr_nn = float(lr_nn)
+confidence_threshold = float(confidence_threshold)
 
 device_type = str(device_type).strip().lower()
 if device_type == "auto":
@@ -73,6 +75,7 @@ print(f"  train_pct: {train_pct}")
 print(f"  val_pct: {val_pct}")
 print(f"  test_pct: {test_pct}")
 print(f"  lr_nn: {lr_nn}")
+print(f"  confidence_threshold: {confidence_threshold}")
 
 # %%
 # derive features
@@ -188,7 +191,9 @@ market_ref = raw.filter(pl.col("symbol") == market_pair).select(
     )
     .with_columns(
         # --- ISSUE FIX: Pre-compute label and fwd_ret BEFORE split ---
-        fwd_ret=pl.col("ret").shift(-1).over("symbol"),
+        fwd_ret=pl.col("ret")
+        .shift(-1)
+        .over("symbol"),
     )
     .with_columns(
         label=pl.when(pl.col("fwd_ret") >= 0.05)
@@ -210,16 +215,17 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import classification_report, accuracy_score
 
+
 # iTransformer Encoder with Feature Embeddings
 class iTransformerEncoder(nn.Module):
     def __init__(self, seq_len, num_features, d_model=128, n_heads=4, num_layers=3):
         super().__init__()
         self.time_projector = nn.Linear(seq_len, d_model)
-        
+
         # --- ISSUE FIX: Learnable Feature Embedding ---
         # This tells the transformer WHICH feature it is looking at
         self.feature_embed = nn.Parameter(torch.randn(1, num_features, d_model))
-        
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -231,25 +237,30 @@ class iTransformerEncoder(nn.Module):
 
     def forward(self, x):
         # x shape: [Batch, Time, Features]
-        x = x.permute(0, 2, 1) # [Batch, Features, Time]
-        x = self.time_projector(x) # [Batch, Features, d_model]
-        
+        x = x.permute(0, 2, 1)  # [Batch, Features, Time]
+        x = self.time_projector(x)  # [Batch, Features, d_model]
+
         # Add feature identity information
         x = x + self.feature_embed
-        
-        out = self.transformer(x) # [Batch, Features, d_model]
+
+        out = self.transformer(x)  # [Batch, Features, d_model]
         return out
 
+
 class Supervised_iTransformer(nn.Module):
-    def __init__(self, seq_len, num_features, num_classes=3, d_model=128, n_heads=4, num_layers=3):
+    def __init__(
+        self, seq_len, num_features, num_classes=3, d_model=128, n_heads=4, num_layers=3
+    ):
         super().__init__()
-        self.encoder = iTransformerEncoder(seq_len, num_features, d_model, n_heads, num_layers)
+        self.encoder = iTransformerEncoder(
+            seq_len, num_features, d_model, n_heads, num_layers
+        )
         self.flatten_dim = num_features * d_model
         self.classifier = nn.Sequential(
             nn.Linear(self.flatten_dim, 256),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(256, num_classes)
+            nn.Linear(256, num_classes),
         )
 
     def forward(self, x):
@@ -257,6 +268,7 @@ class Supervised_iTransformer(nn.Module):
         flat_out = enc_out.flatten(start_dim=1)
         logits = self.classifier(flat_out)
         return logits
+
 
 # Dataset class (Expects labels/rets to be pre-calculated)
 class CryptoPanelDataset(Dataset):
@@ -269,16 +281,18 @@ class CryptoPanelDataset(Dataset):
         self.seq_len = seq_len
         # ISSUE FIX: No internal shifting; use pre-calculated columns
         df = df.sort(["symbol", "ts"])
-        df = df.with_columns(pl.int_range(0, pl.len()).over("symbol").alias("row_num_in_group"))
+        df = df.with_columns(
+            pl.int_range(0, pl.len()).over("symbol").alias("row_num_in_group")
+        )
         df = df.with_row_index("global_idx")
-        
+
         # Ensure windows have enough history AND have a valid future label
         valid_rows = df.filter(
-            (pl.col("row_num_in_group") >= (seq_len - 1)) &
-            (pl.col("label").is_not_null())
+            (pl.col("row_num_in_group") >= (seq_len - 1))
+            & (pl.col("label").is_not_null())
         )
         self.valid_indices = valid_rows["global_idx"].to_list()
-        
+
         feature_data = df.select(feature_cols).to_numpy()
         feature_data = np.nan_to_num(feature_data, nan=0.0, posinf=0.0, neginf=0.0)
         self.features = torch.tensor(feature_data, dtype=torch.float32)
@@ -296,6 +310,7 @@ class CryptoPanelDataset(Dataset):
         fwd_ret = self.fwd_rets[end_idx]
         return x, y, fwd_ret
 
+
 # Load and Split Data
 print("Loading data...")
 full_df = pl.read_parquet(output_features_file).sort(["symbol", "ts"])
@@ -305,7 +320,9 @@ train_cutoff_ts = unique_ts[int(n_ts * train_pct)]
 val_cutoff_ts = unique_ts[int(n_ts * (train_pct + val_pct))]
 
 train_df = full_df.filter(pl.col("ts") < train_cutoff_ts)
-val_df = full_df.filter((pl.col("ts") >= train_cutoff_ts) & (pl.col("ts") < val_cutoff_ts))
+val_df = full_df.filter(
+    (pl.col("ts") >= train_cutoff_ts) & (pl.col("ts") < val_cutoff_ts)
+)
 test_df = full_df.filter(pl.col("ts") >= val_cutoff_ts)
 print(f"Split rows - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
@@ -318,14 +335,17 @@ train_stats = train_df.select(
 means = {c: train_stats[f"{c}_mean"][0] for c in features_list}
 stds = {c: train_stats[f"{c}_std"][0] for c in features_list}
 
+
 def normalize_df(df, means, stds, features):
     exprs = []
     for c in features:
         mean = means.get(c, 0.0)
         std = stds.get(c, 1.0)
-        if std == 0 or std is None or np.isnan(std): std = 1.0
+        if std == 0 or std is None or np.isnan(std):
+            std = 1.0
         exprs.append(((pl.col(c) - mean) / std).alias(c))
     return df.with_columns(exprs)
+
 
 train_df = normalize_df(train_df, means, stds, features_list)
 val_df = normalize_df(val_df, means, stds, features_list)
@@ -345,22 +365,30 @@ else:
     active_batch_size = batch_size
     max_train_batches = None
 
-train_dataloader = DataLoader(train_dataset, batch_size=active_batch_size, shuffle=True, drop_last=True)
+train_dataloader = DataLoader(
+    train_dataset, batch_size=active_batch_size, shuffle=True, drop_last=True
+)
 
 # Compute class weights for CE loss
 # Filter valid indices labels to get accurate counts
 train_labels_for_weight = train_dataset.labels[train_dataset.valid_indices].numpy()
 class_counts = np.bincount(train_labels_for_weight)
-class_weights = torch.tensor(1.0 / (class_counts + 1e-8), dtype=torch.float32).to(device)
+class_weights = torch.tensor(1.0 / (class_counts + 1e-8), dtype=torch.float32).to(
+    device
+)
 class_weights = class_weights / class_weights.sum() * 3.0
 print(f"Class weights: {class_weights}")
 
 # Model, Loss, Optimizer
-model = Supervised_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(device)
+model = Supervised_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(
+    device
+)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr_nn)
 # --- ISSUE FIX: LR Scheduler ---
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode="min", factor=0.5, patience=2, verbose=True
+)
 
 # Training Loop
 print(f"Starting training for {active_epochs} epochs...")
@@ -368,23 +396,24 @@ for epoch in range(active_epochs):
     model.train()
     epoch_losses = []
     for i, (x_batch, y_batch, _) in enumerate(train_dataloader):
-        if max_train_batches and i >= max_train_batches: break
+        if max_train_batches and i >= max_train_batches:
+            break
         x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-        
+
         optimizer.zero_grad()
         logits = model(x_batch)
         loss = criterion(logits, y_batch)
         loss.backward()
-        
+
         # --- ISSUE FIX: Gradient Clipping ---
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
+
         optimizer.step()
-        
+
         epoch_losses.append(loss.item())
-        if (i+1) % 10 == 0:
+        if (i + 1) % 10 == 0:
             print(f"Batch {i+1} | Loss: {loss.item():.4f}")
-    
+
     avg_loss = np.mean(epoch_losses)
     print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
     scheduler.step(avg_loss)
@@ -407,11 +436,26 @@ all_fwd_rets = []
 
 with torch.no_grad():
     for i, (x_batch, y_batch, fwd_ret_batch) in enumerate(eval_dataloader):
-        if is_dev_mode and i >= 100: break
+        if is_dev_mode and i >= 100:
+            break
         x_batch = x_batch.to(device)
         logits = model(x_batch)
-        preds = torch.argmax(logits, dim=1)
-        
+
+        # Apply Softmax to get probabilities
+        probs = F.softmax(logits, dim=1)
+
+        # Confidence-based prediction
+        # Default to 'Flat' (1) unless confidence for Pump(2) or Dump(0) is high
+        preds = torch.ones(x_batch.size(0), dtype=torch.long, device=device)
+
+        # Check for Pump confidence
+        pump_mask = probs[:, 2] > confidence_threshold
+        preds[pump_mask] = 2
+
+        # Check for Dump confidence
+        dump_mask = probs[:, 0] > confidence_threshold
+        preds[dump_mask] = 0
+
         all_preds.append(preds.cpu().numpy())
         all_labels.append(y_batch.numpy())
         all_fwd_rets.append(fwd_ret_batch.numpy())
@@ -422,20 +466,29 @@ fwd_rets_eval = np.concatenate(all_fwd_rets)
 
 print(f"Accuracy: {accuracy_score(y_true, y_pred):.4f}")
 print("\nClassification Report:")
-print(classification_report(y_true, y_pred, target_names=["Dump", "Flat", "Pump"], zero_division=0))
+print(
+    classification_report(
+        y_true, y_pred, target_names=["Dump", "Flat", "Pump"], zero_division=0
+    )
+)
 
 print("\nPerformance Stats (Forward Returns):")
+
+
 def report_stats(name, mask, returns):
     subset = returns[mask]
     if len(subset) > 0:
         # Filter out NaNs if any exist in returns
         valid_subset = subset[~np.isnan(subset)]
         if len(valid_subset) > 0:
-            print(f"{name:15s} | Mean: {valid_subset.mean():.4%}, Stdev: {valid_subset.std():.4%}, Count: {len(valid_subset)}")
+            print(
+                f"{name:15s} | Mean: {valid_subset.mean():.4%}, Stdev: {valid_subset.std():.4%}, Count: {len(valid_subset)}"
+            )
         else:
             print(f"{name:15s} | No valid return values found in subset.")
     else:
         print(f"{name:15s} | No samples found.")
+
 
 report_stats("Long (Pred P)", (y_pred == 2), fwd_rets_eval)
 report_stats("Short (Pred D)", (y_pred == 0), fwd_rets_eval)
