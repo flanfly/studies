@@ -33,6 +33,9 @@ device_type = "auto"  # "cuda", "cpu", or "auto"
 seq_len = "30"
 batch_size = "1024"
 epochs = "10"
+dim_model = "128"
+num_layers = "3"
+dim_feedforward = "0"  # 0 means 4 * dim_model
 
 # Labeling Parameters
 holding_period = "3"
@@ -58,6 +61,11 @@ import polars as pl
 seq_len = int(seq_len)
 batch_size = int(batch_size)
 epochs = int(epochs)
+dim_model = int(dim_model)
+num_layers = int(num_layers)
+dim_feedforward = int(dim_feedforward)
+if dim_feedforward == 0:
+    dim_feedforward = 4 * dim_model
 
 holding_period = int(holding_period)
 rolling_vol_window = int(rolling_vol_window)
@@ -88,6 +96,9 @@ print(f"  device: {device}")
 print(f"  seq_len: {seq_len}")
 print(f"  batch_size: {batch_size}")
 print(f"  epochs: {epochs}")
+print(f"  dim_model: {dim_model}")
+print(f"  num_layers: {num_layers}")
+print(f"  dim_feedforward: {dim_feedforward}")
 print(f"  holding_period: {holding_period}")
 print(f"  rolling_vol_window: {rolling_vol_window}")
 print(f"  strategy_quantile: {strategy_quantile}")
@@ -228,7 +239,9 @@ market_ref = raw.filter(pl.col("symbol") == market_pair).select(
     )
     .with_columns(
         # 3. Standardized Forward Return (Z-score), clipped to +/- 3 sigma
-        target_z=(pl.col("fwd_ret") / (pl.col("hist_vol") + pl.lit(eps))).clip(-3.0, 3.0)
+        target_z=(pl.col("fwd_ret") / (pl.col("hist_vol") + pl.lit(eps))).clip(
+            -3.0, 3.0
+        )
     )
     .select(["ts", "symbol", "fwd_ret", "target_z"] + features_list)
     .sink_parquet(output_features_file)
@@ -245,7 +258,15 @@ from torch.utils.data import Dataset, DataLoader
 
 # iTransformer Encoder with Feature Embeddings
 class iTransformerEncoder(nn.Module):
-    def __init__(self, seq_len, num_features, d_model=128, n_heads=4, num_layers=3):
+    def __init__(
+        self,
+        seq_len,
+        num_features,
+        d_model=128,
+        n_heads=4,
+        num_layers=3,
+        dim_feedforward=512,
+    ):
         super().__init__()
         self.time_projector = nn.Linear(seq_len, d_model)
         self.feature_embed = nn.Parameter(torch.randn(1, num_features, d_model))
@@ -254,7 +275,7 @@ class iTransformerEncoder(nn.Module):
             d_model=d_model,
             nhead=n_heads,
             batch_first=True,
-            dim_feedforward=d_model * 4,
+            dim_feedforward=dim_feedforward,
             dropout=0.1,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -268,10 +289,18 @@ class iTransformerEncoder(nn.Module):
 
 
 class Regression_iTransformer(nn.Module):
-    def __init__(self, seq_len, num_features, d_model=128, n_heads=4, num_layers=3):
+    def __init__(
+        self,
+        seq_len,
+        num_features,
+        d_model=128,
+        n_heads=4,
+        num_layers=3,
+        dim_feedforward=512,
+    ):
         super().__init__()
         self.encoder = iTransformerEncoder(
-            seq_len, num_features, d_model, n_heads, num_layers
+            seq_len, num_features, d_model, n_heads, num_layers, dim_feedforward
         )
         self.flatten_dim = num_features * d_model
         self.head = nn.Sequential(
@@ -383,9 +412,13 @@ train_dataloader = DataLoader(
 )
 
 # Model, Loss, Optimizer
-model = Regression_iTransformer(seq_len=seq_len, num_features=len(features_list)).to(
-    device
-)
+model = Regression_iTransformer(
+    seq_len=seq_len,
+    num_features=len(features_list),
+    d_model=dim_model,
+    num_layers=num_layers,
+    dim_feedforward=dim_feedforward,
+).to(device)
 
 if loss_type.lower() == "mse":
     criterion = nn.MSELoss()
@@ -425,7 +458,7 @@ for epoch in range(active_epochs):
     avg_loss = np.mean(epoch_losses)
     print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
     scheduler.step(avg_loss)
-    
+
     if early_stop > 0 and (epoch + 1) >= early_stop:
         print(f"Early stopping at epoch {epoch+1}")
         break

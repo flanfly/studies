@@ -173,6 +173,13 @@ def pipeline():
 if __name__ == "__main__":
     from google.cloud import aiplatform
     from tempfile import NamedTemporaryFile
+    from sys import argv
+
+    name = (
+        argv[1]
+        if len(argv) > 1
+        else f"itrans-reg-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
 
     with NamedTemporaryFile(suffix=".yaml") as f:
         kfp.compiler.Compiler().compile(pipeline, f.name)
@@ -180,7 +187,8 @@ if __name__ == "__main__":
         aiplatform.init(project=PROJECT_ID, location=REGION)
 
         job = aiplatform.PipelineJob(
-            display_name="hybrid-eval",
+            job_id=name,
+            display_name="itrans-reg",
             template_path=f.name,
             pipeline_root=PIPELINE_ROOT,
             enable_caching=True,
