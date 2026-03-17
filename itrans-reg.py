@@ -46,6 +46,9 @@ test_pct = "0.2"
 # Learning Rates
 lr_nn = "1e-3"
 
+# Early Stopping (set to epoch number to stop after that epoch, 0 to disable)
+early_stop = "0"
+
 # %%
 # convert string parameters and print them
 import numpy as np
@@ -65,6 +68,7 @@ val_pct = float(val_pct)
 test_pct = float(test_pct)
 
 lr_nn = float(lr_nn)
+early_stop = int(early_stop)
 
 device_type = str(device_type).strip().lower()
 if device_type == "auto":
@@ -91,6 +95,7 @@ print(f"  train_pct: {train_pct}")
 print(f"  val_pct: {val_pct}")
 print(f"  test_pct: {test_pct}")
 print(f"  lr_nn: {lr_nn}")
+print(f"  early_stop: {early_stop}")
 
 # %%
 # derive features
@@ -211,18 +216,19 @@ market_ref = raw.filter(pl.col("symbol") == market_pair).select(
         .over("symbol"),
         # 2. Rolling Volatility: stdev of N-day backward log returns
         # We first compute the N-day backward return series, then take its rolling std
+        # Lagged by 1 to prevent information leakage
         hist_vol=(
             pl.col("ret")
             .rolling_sum(window_size=holding_period)
             .over("symbol")
             .rolling_std(window_size=rolling_vol_window)
             .over("symbol")
+            .shift(1)
         ),
     )
     .with_columns(
-        # 3. Standardized Forward Return (Z-score)
-        target_z=pl.col("fwd_ret")
-        / (pl.col("hist_vol") + pl.lit(eps))
+        # 3. Standardized Forward Return (Z-score), clipped to +/- 3 sigma
+        target_z=(pl.col("fwd_ret") / (pl.col("hist_vol") + pl.lit(eps))).clip(-3.0, 3.0)
     )
     .select(["ts", "symbol", "fwd_ret", "target_z"] + features_list)
     .sink_parquet(output_features_file)
@@ -419,6 +425,10 @@ for epoch in range(active_epochs):
     avg_loss = np.mean(epoch_losses)
     print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
     scheduler.step(avg_loss)
+    
+    if early_stop > 0 and (epoch + 1) >= early_stop:
+        print(f"Early stopping at epoch {epoch+1}")
+        break
 
 torch.save(model.state_dict(), output_model_file)
 print(f"Model saved to {output_model_file}")
