@@ -129,6 +129,17 @@ bottomup = (
     )
     .sort("date")
     .join_asof(
+        pl.read_parquet("fred.parquet")
+        .sort("ts")
+        .select(
+            date=pl.col("ts").dt.date(),
+            # 10y tips
+            tips=pl.col("DFII10"),
+        ),
+        on="date",
+        strategy="backward",
+    )
+    .join_asof(
         pl.read_csv("sharadar-sfa/SHARADAR_SF1_3_a158fbb8637a13efbab2ba75fc06dc74.csv")
         .select(
             date=pl.col("datekey").str.strptime(pl.Date, format="%Y-%m-%d"),
@@ -142,9 +153,12 @@ bottomup = (
         by="ticker",
         strategy="backward",
     )
+    .with_columns(
+        divyield=pl.col("divyield") - pl.col("tips"),
+    )
     .join(
         pl.read_csv(
-            "sharadar-sfa/SHARADAR_TICKERS_2_e2ada4bebc2110c46304bab3f8d254dd.csv"
+            "sharadar-sfa/SHARADAR_TICKERS_2_e2ada4bebc2110c46304bab3f8d254dd.csv",
         )
         .unique("ticker")
         .select(
@@ -164,8 +178,7 @@ bottomup = (
                     "Communication Services": "XLC",
                 }
             ),
-        )
-        .drop_nulls(),
+        ),
         on="ticker",
         how="inner",
     )
@@ -236,6 +249,7 @@ bottomup = (
         roc=pl.col("netinc").sum() / pl.col("equity").sum(),
     )
     .sort(["etf", "date"])
+    # yielding nulls if any join key is missing or data is sparse
     .with_columns(
         # 1d change of market breadth
         breadth=pl.col("breadth") - pl.col("breadth").shift(10).over("etf"),
@@ -267,9 +281,9 @@ macro = (
         # 5y inflation rate
         inf=pl.col("T5YIE"),
         # non-farm payrolls
-        nonfarm=pl.col("PAYEMS"),
+        nonfarm=pl.col("PAYEMS").forward_fill(),
         # housing starts
-        house=pl.col("HOUST"),
+        house=pl.col("HOUST").forward_fill(),
     )
     # uv run yf.py DX-Y.NYB XLB XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY ITA --output yf.parquet
     .join(
@@ -296,13 +310,13 @@ macro = (
             vxfront=(pl.col("m2") - pl.col("m1")) / pl.col("m1"),
             # VIX macro slope
             vxmacro=(
-                pl.when(pl.col("m8").is_nan())
-                .then(
-                    pl.when(pl.col("m7").is_nan())
-                    .then(pl.col("m6"))
-                    .otherwise(pl.col("m7"))
+                pl.when(pl.col("m8").is_not_nan() & pl.col("m8").is_not_null())
+                .then(pl.col("m8"))
+                .otherwise(
+                    pl.when(pl.col("m7").is_not_nan() & pl.col("m7").is_not_null())
+                    .then(pl.col("m7"))
+                    .otherwise(pl.col("m6"))
                 )
-                .otherwise("m8")
                 - pl.col("m1")
             )
             / pl.col("m1"),
@@ -310,36 +324,34 @@ macro = (
         on="ts",
         how="left",
     )
-    .drop_nulls()
     .with_columns(
         date=pl.col("ts").dt.date(),
     )
+    .sort("date")
+    .drop_nulls()
+    # normalize time-series wise
     .with_columns(
         # regime z-score: z-score of raw yield over 3y window
         ycrv=zscore(3 * 252)(pl.col("ycrv")),
         # tips: 1m delta and 1y z-score
-        tips=zscore(252)(pl.col("tips") - pl.col("tips").shift(20).over("date")),
+        tips=zscore(252)(pl.col("tips") - pl.col("tips").shift(20)),
         # hys: 3y percentile rank and maybe 1m spread change
         hys=(pl.col("hys") - pl.col("hys").rolling_min(756))
         / (pl.col("hys").rolling_max(756) - pl.col("hys").rolling_min(756)),
         # dxy: 3m roc
-        dxy=pl.col("dxy") / pl.col("dxy").shift(60).over("date") - 1,
+        dxy=pl.col("dxy") / pl.col("dxy").shift(60) - 1,
         # vix front and macro: as is
         # non-farm payrolls: yoy change, 3m mean
-        nonfarm=(pl.col("nonfarm") / pl.col("nonfarm").shift(252).over("date") - 1)
-        .rolling_mean(3 * 20)
-        .over("date"),
+        nonfarm=(pl.col("nonfarm") / pl.col("nonfarm").shift(252) - 1).rolling_mean(
+            3 * 20
+        ),
         # housing starts: yoy change, 3m mean
-        house=(pl.col("house") / pl.col("house").shift(252).over("date") - 1)
-        .rolling_mean(3 * 20)
-        .over("date"),
-    )
-    # inflation: 2nd derivative over 1m of the 1st derivative over 1y
-    .with_columns(
-        infrate=pl.col("inf") - pl.col("inf").shift(252).over("date"),
+        house=(pl.col("house") / pl.col("house").shift(252) - 1).rolling_mean(3 * 20),
+        # inflation: 2nd derivative over 1m of the 1st derivative over 1y
+        infrate=pl.col("inf") - pl.col("inf").shift(252),
     )
     .with_columns(
-        infaccel=pl.col("infrate") - pl.col("infrate").shift(20).over("date"),
+        infaccel=pl.col("infrate") - pl.col("infrate").shift(20),
     )
     .select(
         [
@@ -358,12 +370,13 @@ macro = (
     )
 )
 
-print(macro.tail())
+
+def rank(expr: pl.Expr) -> pl.Expr:
+    return expr.rank(method="average") / expr.count()
+
 
 df = (
-    macro.join(bottomup, on="date")
-    # uv run yf.py DX-Y.NYB XLB XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY ITA --output yf.parquet
-    .join(
+    bottomup.join(
         pl.read_parquet("yf.parquet")
         .filter(
             pl.col("symbol").is_in(
@@ -386,33 +399,92 @@ df = (
             date=pl.col("ts").dt.date(),
             etf=pl.col("symbol"),
             close=pl.col("close"),
-            volume=pl.col("volume"),
         )
         .sort("date"),
         on=["date", "etf"],
         how="inner",
     )
-    # 1m,3m,6m,12m momentum
+    .sort(["etf", "date"])
     .with_columns(
+        # 1m,3m,6m,12m momentum
         **{
             f"mom{n}m": (pl.col("close") / pl.col("close").shift(n * 20) - 1).over(
                 "etf"
             )
             for n in [1, 3, 6, 12]
-        }
-    )
-    # distance from 20d, 50d, 200d SMA
-    .with_columns(
+        },
+        # distance from 20d, 50d, 200d SMA
         **{
             f"sma{n}m": (
                 pl.col("close") / pl.col("close").rolling_mean(n * 20) - 1
             ).over("etf")
             for n in [1, 3, 6, 12]
-        }
+        },
+        fwdret=(pl.col("close").shift(-20).over("etf") / pl.col("close")) - 1,
     )
-    # target
-    .with_columns(target=(pl.col("close") / pl.col("close").shift(-20).over("etf")) - 1)
+    .sort(["etf", "date"])
+    # normalization: time-series z-score
+    .with_columns(
+        divyield=zscore(3 * 252)(pl.col("divyield")).over("etf"),
+        roc=zscore(3 * 252)(pl.col("roc")).over("etf"),
+    )
+    # normalization: cross-sectional rank
+    .with_columns(
+        # highlow: cross-sectional rank
+        highlow=rank(pl.col("highlow")).over("date"),
+        # breadth (10d change): cross-sectional z-score
+        breadth=rank(pl.col("breadth")).over("date"),
+        # divyield: 3y ts z-score, then cross-sectional
+        divyield=rank(pl.col("divyield")).over("date"),
+        # roc (1q change): 3y ts z-score, then cross-sectional
+        roc=rank(pl.col("roc")).over("date"),
+        # momentum: 1m,3m,6m,12m cross-sectional z-score
+        **{f"mom{n}m": rank(pl.col(f"mom{n}m")).over("date") for n in [1, 3, 6, 12]},
+        # sma distance: 1m,3m,6m,12m cross-sectional z-score
+        **{f"sma{n}m": rank(pl.col(f"sma{n}m")).over("date") for n in [1, 3, 6, 12]},
+        # fwdret: 1m forward return cross-sectional rank (target, not feature)
+        fwdret=rank(pl.col("fwdret")).over("date"),
+    )
+    # final select
+    .select(
+        [
+            "date",
+            "etf",
+            "highlow",
+            "breadth",
+            "divyield",
+            "roc",
+            *[f"mom{n}m" for n in [1, 3, 6, 12]],
+            *[f"sma{n}m" for n in [1, 3, 6, 12]],
+            "fwdret",
+        ]
+    )
+    .pivot(
+        index="date",
+        on="etf",
+        values=[
+            "highlow",
+            "breadth",
+            "divyield",
+            "roc",
+            *[f"mom{n}m" for n in [1, 3, 6, 12]],
+            *[f"sma{n}m" for n in [1, 3, 6, 12]],
+            "fwdret",
+        ],
+    )
+    # join macro features
+    .join_asof(
+        macro.sort("date"),
+        on="date",
+        strategy="backward",
+    )
 )
+
+print(df.head())
+print(df.tail())
+
+df.write_parquet("features.parquet")
+
 # missing
 # PMI new orders vs. inventories
 # MOVE index
