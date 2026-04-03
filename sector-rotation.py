@@ -303,16 +303,22 @@ macro = (
         # housing starts
         house=pl.col("HOUST").forward_fill(),
     )
-    # uv run yf.py DX-Y.NYB --output yf.parquet
+    # uv run yf.py DX-Y.NYB SPY CL=F GC=F HG=F XLB XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY --output yf.parquet
     .join(
         pl.read_parquet("yf.parquet")
         .sort("ts")
-        .filter(pl.col("symbol") == "DX-Y.NYB")
+        .filter(pl.col("symbol").is_in(["DX-Y.NYB", "CL=F", "GC=F", "HG=F"]))
         .pivot(on="symbol", index="ts", values=["close"])
         .select(
             ts=pl.col("ts"),
             # DXY
             dxy=pl.col("DX-Y.NYB"),
+            # oil futures
+            wti=pl.col("CL=F"),
+            # gold futures
+            au=pl.col("GC=F"),
+            # copper futures
+            cu=pl.col("HG=F"),
         ),
         on="ts",
         how="left",
@@ -326,18 +332,6 @@ macro = (
             ts=pl.col("ts"),
             # VIX front spread
             vxfront=(pl.col("m2") - pl.col("m1")) / pl.col("m1"),
-            # VIX macro slope
-            vxmacro=(
-                pl.when(pl.col("m8").is_not_nan() & pl.col("m8").is_not_null())
-                .then(pl.col("m8"))
-                .otherwise(
-                    pl.when(pl.col("m7").is_not_nan() & pl.col("m7").is_not_null())
-                    .then(pl.col("m7"))
-                    .otherwise(pl.col("m6"))
-                )
-                - pl.col("m1")
-            )
-            / pl.col("m1"),
         ),
         on="ts",
         how="left",
@@ -367,6 +361,11 @@ macro = (
         house=(pl.col("house") / pl.col("house").shift(252) - 1).rolling_mean(3 * 20),
         # inflation: 2nd derivative over 1m of the 1st derivative over 1y
         infrate=pl.col("inf") - pl.col("inf").shift(252),
+        vxfront=zscore(252)(pl.col("vxfront")),
+        vxfrontrate=zscore(252)(pl.col("vxfront") - pl.col("vxfront").shift(20)),
+        wtirate=zscore(252)(pl.col("wti").log() - pl.col("wti").log().shift(20)),
+        wti=zscore(252)(pl.col("wti")),
+        aucuratio=zscore(252)(pl.col("au") / pl.col("cu")),
     )
     .with_columns(
         infaccel=pl.col("infrate") - pl.col("infrate").shift(20),
@@ -379,7 +378,10 @@ macro = (
             "tips",
             "dxy",
             "vxfront",
-            "vxmacro",
+            "vxfrontrate",
+            "wtirate",
+            "wti",
+            "aucuratio",
             "infrate",
             "infaccel",
             "nonfarm",
@@ -437,7 +439,7 @@ fwd_win = 20
 
 df = (
     bottomup.join(
-        # uv run yf.py XLB XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY --output yf.parquet
+        # uv run yf.py DX-Y.NYB SPY CL=F GC=F HG=F XLB XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY --output yf.parquet
         pl.read_parquet("yf.parquet")
         .filter(pl.col("symbol").is_in(sector_etfs))
         .select(
@@ -563,7 +565,7 @@ df = (
         voldiv=rank(pl.col("voldiv")).over("date"),
         ir=rank(pl.col("ir")).over("date"),
         var=rank(pl.col("var")).over("date"),
-        **{f"alpha{n}m": pl.col("alpha").over("date") for n in [1, 3, 6, 12]},
+        **{f"alpha{n}m": pl.col(f"alpha{n}m").over("date") for n in [1, 3, 6, 12]},
         rate_sense_rank=rank(pl.col("rate_sense")).over("date"),
         fx_sense_rank=rank(pl.col("fx_sense")).over("date"),
     )
@@ -598,13 +600,15 @@ df = (
     )
 )
 
+print(df.head())
+print(df.tail())
+
 df.write_parquet("features.parquet")
 
 # missing
 # PMI new orders vs. inventories
 # MOVE index
 # analyst ratings or forward pe
-# gold vs. copper
 # CESI
 # call and put IV
 # ETF flows: https://data.nasdaq.com/databases/ETFF
@@ -641,7 +645,10 @@ macro_features = [
     "tips",
     "dxy",
     "vxfront",
-    "vxmacro",
+    "vxfrontrate",
+    "wtirate",
+    "wti",
+    "aucuratio",
     "infrate",
     "infaccel",
     "nonfarm",
@@ -661,7 +668,7 @@ corr = (
         pl.col("pair").str.split_exact("_", 1).struct.rename_fields(["feature", "etf"])
     )
     .unnest("pair")
-    .pivot(on="etf", index="feature", values="ic")
+    .pivot(on="etf", index="feature", values="ic", aggregate_function=None)
 )
 
 import seaborn as sns
