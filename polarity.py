@@ -111,52 +111,69 @@ df = (
 start_year = 2020
 horizons = {"1d": 1, "3d": 3, "1w": 7, "2w": 14, "1m": 30}
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["POLARS_MAX_THREADS"] = "1"
+from joblib import Parallel, delayed
+
 symbols = df["symbol"].unique().sort().to_list()
 days = df.filter(pl.col('ts').dt.year() >= start_year)['ts'].unique().sort().to_list()
 
-pred_frag = []
-
-for tup in tqdm(it.product(symbols, days, horizons.items()), total=len(symbols)*len(days)*len(horizons)):
-    sym, day, hori = tup
-    t, v = hori
-    
-    # derive the target column after we cut off the training data
-    train_df = (df
-        .filter((pl.col("symbol") == sym) & (pl.col("ts") <= day) & (pl.col('ts').dt.year() >= start_year))
+def train_and_predict(sym, day):
+    base_df = df.filter((pl.col("symbol") == sym) & (pl.col("ts") <= day) & (pl.col('ts').dt.year() >= start_year))
+    if base_df.height < 10:
+        return None
+        
+    train_df = (
+        base_df
         .with_columns(
-            target=(pl.col("close").shift(-v).log() - pl.col("close").log()).over("symbol")
-        )
+            **{
+                f"target{k}": (pl.col("close").shift(-v).log() - pl.col("close").log()).over("symbol")
+                for k, v in horizons.items()
+            })
         .sort("ts")
-        .drop_nulls(subset=features)
-        .drop_nans(subset=features)
     )
-    test_df = train_df.filter(pl.col('ts') == day)
-    train_h = train_df.filter(pl.col('target').is_null().not_())
     
-    if train_h.height < 10 or test_df.height == 0:
-        continue
-
-    X_train, y_train = train_h[features], train_h["target"]
-    X_test = test_df[features]
-
-    model_lin = LinearRegression().fit(X_train.to_pandas(), y_train.to_pandas())
-    model_gbt = HistGradientBoostingRegressor(
-        max_iter=50, max_depth=3, random_state=42
-    ).fit(X_train, y_train)
-    model_com = HistGradientBoostingRegressor(
-        max_iter=50, max_depth=3, random_state=42
-    ).fit(X_train, y_train - model_lin.predict(X_train))
-
-    pred_frag.append(pl.DataFrame({
+    test_df = train_df.filter(pl.col("ts") == day)
+    if test_df.height == 0:
+        return None
+        
+    pred_row = {
         "ts": test_df["ts"].dt.cast_time_unit("us"),
         "symbol": test_df["symbol"],
-        f"lin{t}": model_lin.predict(X_test),
-        f"gbt{t}": model_gbt.predict(X_test),
-        f"com{t}": model_lin.predict(X_test) + model_com.predict(X_test),
-    }))
+    }
+    
+    for t, v in horizons.items():
+        train_h = train_df.drop_nulls(subset=[f"target{t}"] + features).drop_nans(subset=features)
+        if train_h.height < 10:
+            continue
+            
+        X_train, y_train = train_h[features], train_h[f"target{t}"]
+        X_test = test_df[features]
+
+        model_lin = LinearRegression(n_jobs=1).fit(X_train.to_pandas(), y_train.to_pandas())
+        model_gbt = HistGradientBoostingRegressor(
+            max_iter=50, max_depth=3, random_state=42
+        ).fit(X_train, y_train)
+        model_com = HistGradientBoostingRegressor(
+            max_iter=50, max_depth=3, random_state=42
+        ).fit(X_train, y_train - model_lin.predict(X_train))
+
+        pred_row[f"lin{t}"] = model_lin.predict(X_test)
+        pred_row[f"gbt{t}"] = model_gbt.predict(X_test)
+        pred_row[f"com{t}"] = model_lin.predict(X_test) + model_com.predict(X_test)
+        
+    if len(pred_row) == 2:
+        return None
+    return pl.DataFrame(pred_row)
+
+pred_frag = Parallel(n_jobs=-1)(
+    delayed(train_and_predict)(sym, day) 
+    for sym, day in tqdm(it.product(symbols, days), total=len(symbols)*len(days))
+)
 
 pred_df = (
-    pl.concat(pred_frag,how="diagonal")
+    pl.concat([p for p in pred_frag if p is not None], how="diagonal")
         .sort(['ts','symbol'])
         .group_by(['ts','symbol'])
         .agg(pl.all().first(ignore_nulls=True))
@@ -315,14 +332,13 @@ for model, hold_win in models.items():
             cs_df = df.filter((pl.col("ts") == today) & pl.col(model).is_not_null())
             if cs_df.height > 0:
                 cs_df = cs_df.with_columns(
-                    rank=pl.col(model)
-                    .qcut(10, allow_duplicates=True, labels=[str(i) for i in range(10)])
+                    rank=pl.col(model).rank() / pl.col(model).count()
                 )
                 long = cs_df.filter(
-                    (pl.col("rank").is_in(["8", "9"])) & (pl.col(model) > 0)
+                    (pl.col("rank") >= 0.8) & (pl.col(model) > 0)
                 )
                 short = cs_df.filter(
-                    (pl.col("rank").is_in(["0", "1"])) & (pl.col(model) < 0)
+                    (pl.col("rank") <= 0.2) & (pl.col(model) < 0)
                 )
                 
                 num_positions = long.height + short.height
