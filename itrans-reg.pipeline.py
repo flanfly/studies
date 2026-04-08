@@ -133,6 +133,10 @@ def forecast_returns(
                     --device=cuda \
                     --dev_mode=no \
                     --loss_type=mse \
+                    --dim_model=32 \
+                    --num_layers=1 \
+                    --seq_len=120 \
+                    --early_stop=3 \
                     --market_pair=BTCUSDT
             """,
             report.uri,  # 0
