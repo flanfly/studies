@@ -87,7 +87,7 @@ export GIT_KEY_SECRET=git-key
 uv run sync-datastore.py -d \
         --output-daily-file /dev/null \
         --output-stables-file "$3" \
-        --stable-coin USDC \
+        --stable-coin USDT \
         --window $2 \
         --fill-missing \
         -j $1
@@ -140,7 +140,7 @@ def forecast_returns(
                     --input_gjr_file="$2" \
                     --output_pred_file="$3" \
                     --device_map=cuda \
-                    --reference_pair=BTCUSDC
+                    --reference_pair=BTCUSDT
             """,
             report.uri,  # 0
             klines.uri,  # 1
