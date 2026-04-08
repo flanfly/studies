@@ -14,6 +14,14 @@
 # ---
 
 # %%
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["POLARS_MAX_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import polars as pl
 import numpy as np
 import pandas as pd
@@ -164,10 +172,6 @@ df = (
 df.write_parquet(feature_path)
 
 # %% editable=true slideshow={"slide_type": ""}
-import os
-
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["POLARS_MAX_THREADS"] = "1"
 from joblib import Parallel, delayed
 
 df = pl.read_parquet(feature_path)
