@@ -131,8 +131,8 @@ metrics:
 - [x] Sector ROC (Aggregated from constituents)
 - [ ] **PMI New Orders vs. Inventories**: Leading indicator for cyclical
   sectors.
-- [ ] **Copper-to-Gold Ratio**: Proxy for global growth/risk-on.
-- [ ] **VIX Term Structure**: 1m/3m futures ratio.
+- [x] **Copper-to-Gold Ratio**: Proxy for global growth/risk-on.
+- [x] **VIX Term Structure**: 1m/3m futures ratio.
 - [ ] **MOVE Index**: Bond volatility regime filter.
 - [ ] **CESI**: Citi Economic Surprise Index.
 
@@ -142,6 +142,16 @@ metrics:
 - [ ] **Options Skew**: 25-delta Put/Call IV skew.
 - [x] **Market Breadth**: % of stocks above 50d/200d SMA (implemented via
   constituent aggregation).
+
+
+### Final Strategy Configuration (Optimal)
+- [x] **Target Variable:** Raw Forward 20-Day ETF Log-Return (Absolute Return).
+- [x] **Machine Learning Engine:** Linear `Ridge` Regression (alpha=100.0). (XGBoost Residual boosting degraded OOS Sharpe due to noise overfitting).
+- [x] **Signal Generation:** Absolute directional filtering. Long only if forecast > 0. Short only if forecast < 0.
+- [x] **Portfolio Sizing:** Max 2 Long / Max 2 Short positions, dynamically weighted using 60-Day Inverse Volatility Parity.
+- [x] **Trade Execution:** 4-Week Staggered (Rebalance exactly 25% of the portfolio every Tuesday to eliminate timing luck).
+- [x] **Risk Management:** 2-Sigma Trailing Weekly Volatility Stop-Loss applied to each independent 25% tranche.
+- [x] **Instruments:** Strictly 1x SPDR Sector ETFs (XLK, XLF, XLU, etc.). 2x/3x Leveraged variants severely degraded the Sharpe ratio due to 4-week holding period volatility drag.
 
 ## 4. Implementation Guidelines
 *   **Source Code & Notebook:** The implementation is located in
@@ -158,3 +168,10 @@ metrics:
     11-sector universe.
 *   **Position Sizing:** Use Inverse-Volatility weighting (based on HAR
     forecasts) to ensure equal risk contribution across selected sectors.
+
+## Log
+
+**2026-04-03**: Time series z-score looks ok, some values don't make sense to me. vxmacro and
+vxfront have the same correlations with ETFs but vxmacro is lower. I'll remove
+vxmacro for now.
+
