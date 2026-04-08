@@ -168,7 +168,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["POLARS_MAX_THREADS"] = "1"
 from joblib import Parallel, delayed
 
-df = pl.read_parquet("features.parquet")
+df = pl.read_parquet(feature_path)
 
 symbols = df["symbol"].unique().sort().to_list()
 days = df.filter(pl.col("ts").dt.year() >= start_year)["ts"].unique().sort().to_list()
