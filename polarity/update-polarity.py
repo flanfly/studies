@@ -61,6 +61,8 @@ def get_data(asset: str, metric: str, idtoken: str):
         timeout=30,
     )
 
+    if resp.status_code == 401 and "rate limit exceeded" in resp.text.lower():
+        raise Exception(f"Rate limit exceeded: {resp.text}")
     if resp.status_code == 401 or resp.status_code == 404:
         raise Unrecoverable(f"Client error {resp.status_code}: {resp.text}.")
     if resp.status_code != requests.codes.ok:
@@ -309,31 +311,55 @@ def main():
         l.info("fetching available metrics...")
         metrics_by_coin = available_metrics()
 
+        whitelist = [
+            "price",
+            "udpis",
+            "udpim",
+            "udpil",
+            "tci",
+            "mbi",
+            "mtm",
+            "tcicv",
+            "upprob",
+            "mdccv",
+        ]
+        filtered_metrics_by_coin = {
+            coin: {m for m in metrics if m in whitelist}
+            for coin, metrics in metrics_by_coin.items()
+            if len({m for m in metrics if m in whitelist}) > 1
+        }
+
         l.info(f"writing to {args.output_dir}")
-        l.info(f"{len(metrics_by_coin)} coins found")
+        l.info(f"{len(filtered_metrics_by_coin)} coins found")
 
         df = None
 
         with ThreadPoolExecutor(max_workers=args.parallelism) as executor:
-            items = [(c, m) for c, ms in metrics_by_coin.items() for m in ms]
+            items = [(c, m) for c, ms in filtered_metrics_by_coin.items() for m in ms]
             gen = executor.map(lambda c: do_work(c, args.idtoken), items)
 
             for t in tqdm(gen, total=len(items), desc="fetching data"):
                 try:
                     coin, metric, df2 = t
 
-                    metrics_by_coin[coin].remove(metric)
+                    filtered_metrics_by_coin[coin].remove(metric)
 
                     # merge dataframes
-                    if df is None:
-                        df = df2
-                    else:
-                        df = do_merge(df, df2)
+                    if not df2.empty:
+                        if df is None:
+                            df = df2
+                        else:
+                            df = do_merge(df, df2)
 
-                    if len(metrics_by_coin[coin]) == 0:
+                    if len(filtered_metrics_by_coin[coin]) == 0:
                         save(df, coin, args.output_dir)
-                        del metrics_by_coin[coin]
-                        df.drop(df.index.get_level_values("asset") == coin.lower(), inplace=True)
+                        del filtered_metrics_by_coin[coin]
+                        df.drop(
+                            index=coin.lower(),
+                            level="asset",
+                            inplace=True,
+                            errors="ignore",
+                        )
                         gc.collect()
 
                 except Exception as e:
@@ -341,7 +367,7 @@ def main():
                     continue
 
         if df is not None:
-            for coin in metrics_by_coin.keys():
+            for coin in filtered_metrics_by_coin.keys():
                 save(df, coin, args.output_dir)
 
 
