@@ -13,6 +13,8 @@ locals {
     "sts.googleapis.com",
     "batch.googleapis.com",
     "secretmanager.googleapis.com",
+    "generativelanguage.googleapis.com",
+    "apikeys.googleapis.com",
   ]
 
   roles = [
@@ -35,8 +37,10 @@ terraform {
 }
 
 provider "google" {
-  project = local.project_id
-  region  = local.region
+  project               = local.project_id
+  region                = local.region
+  user_project_override = true
+  billing_project       = local.project_id
 }
 
 data "google_project" "default" {
@@ -140,6 +144,22 @@ resource "google_service_account_iam_member" "wif_impersonation" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${local.github_repo}"
 }
 
+resource "google_apikeys_key" "gemini_key" {
+  name         = "gemini-api-key"
+  display_name = "Gemini API Key"
+
+  depends_on = [
+    google_project_service.enabled_apis["generativelanguage.googleapis.com"],
+    google_project_service.enabled_apis["apikeys.googleapis.com"],
+  ]
+
+  restrictions {
+    api_targets {
+      service = "generativelanguage.googleapis.com"
+    }
+  }
+}
+
 output "workload_identity_provider" {
   value       = google_iam_workload_identity_pool_provider.github.name
   description = "Use this value for 'workload_identity_provider' in your GitHub Action"
@@ -159,4 +179,10 @@ output "artifact_registry_repository" {
 
 output "git_key" {
   value = google_secret_manager_secret_version.git_key.name
+}
+
+# 3. Output the key (Note: This will be visible in your state file)
+output "gemini_api_key_string" {
+  value     = google_apikeys_key.gemini_key.key_string
+  sensitive = true
 }
