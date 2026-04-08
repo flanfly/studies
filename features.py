@@ -439,19 +439,16 @@ selected_features = [
     "rv_90",
     "sigma_rs",
     "hl_range",
-
     # Volume / participation / attention family
     "vol_z_30",
     "rel_volume_30",
     "log_quote_vol",
     "log_base_vol",
-
     # Short-horizon reversal family
     "mom_3",
     "rel_mom_3",
     "ret",
     "cc_ret",
-
     # Candle-structure family
     "lower_wick_frac",
     "wick_asym",
@@ -462,12 +459,37 @@ winsor_q = 0.01
 alpha = 0.1  # try 1,10,100
 min_symbols = 20
 fee_rate = 0.002  # 0.2% entry and exit fee (0.4% total)
+n_days = 5
 
 df = (
     pl.read_parquet(output_features_file)
-    .select(list(selected_features) + ["ts", "target", "symbol"])
+    # Sort before computing multi-day targets to ensure time series integrity
+    .sort(["symbol", "ts"])
+    .with_columns(
+        [
+            (
+                pl.col("ret").shift(-1).over("symbol")
+                + (
+                    pl.col("cc_ret")
+                    .shift(-2)
+                    .over("symbol")
+                    .rolling_sum(window_size=i - 1)
+                    .shift(-(i - 2))
+                    .over("symbol")
+                    if i > 1
+                    else 0
+                )
+            ).alias(f"target_d{i}")
+            for i in range(1, n_days + 1)
+        ]
+    )
+    .select(
+        list(selected_features)
+        + ["ts", "target", "symbol"]
+        + [f"target_d{i}" for i in range(1, n_days + 1)]
+    )
     .fill_null(np.nan)
-    .drop_nans(["target", *selected_features])
+    .drop_nans(["target", *selected_features] + [f"target_d{i}" for i in range(1, n_days + 1)])
     .filter(pl.len().over("ts") >= min_symbols)
     # winsorize cross-sectionally
     .with_columns(
@@ -492,19 +514,24 @@ df = (
 )
 
 # feature correlation
-#df_corr = pd.DataFrame(
+# df_corr = pd.DataFrame(
 #    np.corrcoef(df.select(selected_features).to_numpy(), rowvar=False),
 #    index=selected_features,
 #    columns=selected_features,
-#)
-#print(df_corr.where(np.triu(np.ones(df_corr.shape), k=1).astype(bool)))
+# )
+# print(df_corr.where(np.triu(np.ones(df_corr.shape), k=1).astype(bool)))
 
 
 def evaluate(
-    df: pl.DataFrame, alpha: float, features: list[str], net_features: list[str]
+    df: pl.DataFrame,
+    alpha: float,
+    features: list[str],
+    net_features: list[str],
+    n_days: int,
 ) -> pl.DataFrame:
     net_features = [f for f in features if f in net_features]
-    net_df = df.select(["ts", "symbol", "target"] + net_features)
+    target_cols = [f"target_d{i}" for i in range(1, n_days + 1)]
+    net_df = df.select(["ts", "symbol", "target"] + target_cols + net_features)
 
     ts = net_df["ts"].unique().sort().to_list()
     train_ts = ts[: int(len(ts) * 0.8)]
@@ -532,34 +559,45 @@ def evaluate(
         pred=model.predict(test_df.select(net_features).to_numpy())
     )
 
-    # evaluate signal quality with daily IC
-    signal = (
-        prediction.with_columns(
-            pred_rank=pl.col("pred").rank("average").over("ts"),
-            tgt_rank=pl.col("target").rank("average").over("ts"),
-        )
-        .group_by("ts")
-        .agg(
-            ic=pl.corr("pred_rank", "tgt_rank"),
-            n=pl.len(),
-        )
-        .drop_nulls(["ic"])
-        .sort("ts")
-        .select(
-            pl.lit(alpha).alias("alpha"),
-            pl.col("ic").mean().alias("mean_ic"),
-            pl.col("ic").std().alias("std_ic"),
-            (pl.col("ic").mean() / pl.col("ic").std()).alias("icir"),
-            (pl.col("ic") > 0).mean().alias("hit_rate"),
+    # evaluate signal quality with daily IC for each day
+    ic_exprs = [
+        pl.corr(
+            pl.col("pred").rank("average").over("ts"),
+            pl.col(f"target_d{i}").rank("average").over("ts"),
+        ).alias(f"ic_d{i}")
+        for i in range(1, n_days + 1)
+    ]
+
+    signal_ts = (
+        prediction.group_by("ts").agg(ic_exprs + [pl.len().alias("n")]).sort("ts")
+    )
+
+    # Filter signal_ts to remove rows with any NaN in ic_d columns for mean/std calculation
+    signal_valid = signal_ts.drop_nulls()
+
+    signal = signal_valid.select(
+        [pl.lit(alpha).alias("alpha")]
+        + [
+            item
+            for i in range(1, n_days + 1)
+            for item in [
+                pl.col(f"ic_d{i}").mean().alias(f"ic_d{i}"),
+                pl.col(f"ic_d{i}").std().alias(f"ic_d{i}_std"),
+            ]
+        ]
+        + [
+            pl.col("ic_d1").mean().alias("mean_ic"),
+            pl.col("ic_d1").std().alias("std_ic"),
+            (pl.col("ic_d1").mean() / pl.col("ic_d1").std()).alias("icir"),
+            (pl.col("ic_d1") > 0).mean().alias("hit_rate"),
             pl.col("n").mean().alias("avg_n"),
-        )
-        .with_columns(
-            [pl.lit(coef[i]).alias(f"{features[i]}_coef") for i in range(len(features))]
-        )
+        ]
+    ).with_columns(
+        [pl.lit(coef[i]).alias(f"{features[i]}_coef") for i in range(len(features))]
     )
 
     # portfolio evaluation with transaction costs
-    portfolio = (
+    portfolio_base = (
         prediction
         # portfolio is top decile of predictions, long if pred > 0, short if pred < 0
         .filter(
@@ -568,39 +606,55 @@ def evaluate(
                 / pl.len().over("ts")
             )
             > 0.9
-        )
-        .with_columns(pos=pl.when(pl.col("pred") > 0).then(1).otherwise(-1))
+        ).with_columns(pos=pl.when(pl.col("pred") > 0).then(1).otherwise(-1))
         # normalize to maintain constant leverage of 1
         .with_columns(pos=pl.col("pos") / pl.col("pos").abs().sum().over("ts"))
-        .with_columns(
+    )
+
+    fwdret_exprs = [
+        (pl.col("pos") * (pl.col(f"target_d{i}").exp() - 1)).sum().alias(f"fwdret_d{i}")
+        for i in range(1, n_days + 1)
+    ]
+
+    portfolio_metrics = (
+        portfolio_base.with_columns(
             gross=pl.col("pos") * (pl.col("target").exp() - 1),
             fee=2 * pl.col("pos").abs() * fee_rate,
         )
         .with_columns(net=pl.col("gross") - pl.col("fee"))
         .group_by("ts")
         .agg(
-            net=pl.col("net").sum(),
-            fee=pl.col("fee").sum(),
+            [pl.col("net").sum().alias("net"), pl.col("fee").sum().alias("fee")]
+            + fwdret_exprs
         )
         .sort("ts")
-        .select(
-            mean_ret=pl.col("net").mean() * 365,
-            std_ret=pl.col("net").std() * (365**0.5),
-            sharpe=pl.col("net").mean() / pl.col("net").std() * (365**0.5),
-            fee=pl.col("fee").mean(),
-            equity=(1 + pl.col("net")).cum_prod(),
-        )
-        .with_columns(
-            mdd=(pl.col("equity") / pl.col("equity").cum_max() - 1).min(),
-        )
     )
 
-    return signal.with_columns(portfolio[0])
+    portfolio_summary = portfolio_metrics.select(
+        mean_ret=pl.col("net").mean() * 365,
+        std_ret=pl.col("net").std() * (365**0.5),
+        sharpe=pl.col("net").mean() / pl.col("net").std() * (365**0.5),
+        fee=pl.col("fee").mean(),
+        equity=(1 + pl.col("net")).cum_prod(),
+        *[
+            item
+            for i in range(1, n_days + 1)
+            for item in [
+                pl.col(f"fwdret_d{i}").mean().alias(f"fwdret_d{i}"),
+                pl.col(f"fwdret_d{i}").std().alias(f"fwdret_d{i}_std"),
+            ]
+        ],
+    ).with_columns(
+        mdd=(pl.col("equity") / (pl.col("equity").cum_max() + 1e-12) - 1).min(),
+    )
+
+    return signal.with_columns(portfolio_summary.head(1).drop("equity"))
+
 
 summary = []
 for feature in tqdm(selected_features, desc="Evaluating features"):
     summary.append(
-        evaluate(df, alpha, selected_features, [feature]).with_columns(
+        evaluate(df, alpha, selected_features, [feature], n_days).with_columns(
             name=pl.lit(feature)
         )
     )
@@ -611,3 +665,49 @@ print(summary)
 summary.write_csv(output_summary_file)
 
 # %%
+import matplotlib.pyplot as plt
+
+def plot_feature_decay(summary_df, n_days):
+    features = summary_df["name"].to_list()
+    n_features = len(features)
+    
+    fig, axes = plt.subplots(n_features, 1, figsize=(10, 4 * n_features), sharex=True)
+    if n_features == 1:
+        axes = [axes]
+        
+    for idx, feature_name in enumerate(features):
+        row = summary_df.filter(pl.col("name") == feature_name)
+        
+        days = list(range(1, n_days + 1))
+        means = [row[f"fwdret_d{d}"][0] for d in days]
+        stds = [row[f"fwdret_d{d}_std"][0] for d in days]
+        
+        ax = axes[idx]
+        
+        # Whiskers (+/- 2 sigma)
+        ax.vlines(days, [m - 2 * s for m, s in zip(means, stds)], [m + 2 * s for m, s in zip(means, stds)], colors="black", zorder=1)
+        # Whisker caps
+        ax.hlines([m - 2 * s for m, s in zip(means, stds)], [d - 0.1 for d in days], [d + 0.1 for d in days], colors="black")
+        ax.hlines([m + 2 * s for m, s in zip(means, stds)], [d - 0.1 for d in days], [d + 0.1 for d in days], colors="black")
+
+        # Box (+/- 1 sigma)
+        for d, m, s in zip(days, means, stds):
+            ax.add_patch(plt.Rectangle((d - 0.2, m - s), 0.4, 2 * s, color="skyblue", alpha=0.6, zorder=2))
+            
+        # Center line (mean)
+        ax.hlines(means, [d - 0.2 for d in days], [d + 0.2 for d in days], colors="red", zorder=3, lw=2)
+        
+        ax.set_title(f"Cumulative Forward Returns: {feature_name}", fontweight='bold')
+        ax.set_ylabel("Gross Return")
+        ax.axhline(0, color="black", lw=0.5, alpha=0.5)
+        ax.set_xticks(days)
+        ax.set_xticklabels([f"Day {d}" for d in days])
+        ax.grid(axis='y', linestyle='--', alpha=0.3)
+
+    plt.tight_layout()
+    # plt.savefig("feature_decay.png")
+    plt.show()
+
+# Run the plot
+if 'summary' in locals():
+    plot_feature_decay(summary, n_days)
