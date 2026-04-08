@@ -31,25 +31,24 @@ import itertools as it
 deriv_win = 7
 zscore_win = 30
 
-features = [
+input_features = [
+    # original
     "udpil",
     "udpim",
     "udpis",
     "upprob",
     "mbi",
     "tci",
+
+    # derived
     "tcidelta",
     "mdcdelta",
-    "tcicvroc",
-    "mdccvroc",
-    "udpisroc",
-    "udpimroc",
-    "udpilroc",
-    "upprobroc",
-    "mbiroc",
-    "tciroc",
-    "tcideltaroc",
-    "mdcdeltaroc",
+    #"mom1m",
+]
+
+features = [
+    *input_features,
+    *[f'{f}roc' for f in input_features],
 ]
 
 def rolling_zscore(expr, window):
@@ -84,19 +83,12 @@ df = (
             f"{col}roc": rolling_zscore(
                 pl.col(col) - pl.col(col).shift(deriv_win).over("symbol"), zscore_win
             )
-            for col in [
-                "tcicv",
-                "mdccv",
-                "udpis",
-                "udpim",
-                "udpil",
-                "upprob",
-                "mbi",
-                "tci",
-                "tcidelta",
-                "mdcdelta",
-            ]
+            for col in input_features
         }
+    )
+    # normalize
+    .with_columns(
+        **{col: rolling_zscore(pl.col(col), zscore_win) for col in features}
     )
     .select(
         [
@@ -108,13 +100,18 @@ df = (
     )
 )
 
+df.write_parquet('features.parquet')
+
+# %%
 start_year = 2020
-horizons = {"1d": 1, "3d": 3, "1w": 7, "2w": 14, "1m": 30}
+horizons = {"1d": 1}#, "3d": 3, "1w": 7, "2w": 14, "1m": 30}
 
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["POLARS_MAX_THREADS"] = "1"
 from joblib import Parallel, delayed
+
+df = pl.read_parquet('features.parquet')
 
 symbols = df["symbol"].unique().sort().to_list()
 days = df.filter(pl.col('ts').dt.year() >= start_year)['ts'].unique().sort().to_list()
@@ -178,17 +175,20 @@ pred_df = (
         .group_by(['ts','symbol'])
         .agg(pl.all().first(ignore_nulls=True))
 )
-pred_df.write_parquet('predictions.parquet')
-df = df.join(pred_df, on=["ts", "symbol"], how="inner")
-df
+pred_df.write_parquet('predictions-1.parquet')
+
 
 # %%
 pred_df
 
 # %%
+df = pl.read_parquet('features.parquet').join(pl.read_parquet('predictions.parquet'), on=["ts", "symbol"], how="inner")
+
 (
     df
         .sort(['symbol','ts'])
+        .drop_nans()
+        .drop_nulls()
         .group_by('symbol')
         .agg(
             lin1d=pl.corr(pl.col('close').log().diff().shift(1).over('symbol'),pl.col('lin1d')),
@@ -203,13 +203,13 @@ pred_df
             gbt1w=pl.corr(pl.col('close').log().diff(n=7).shift(1).over('symbol'),pl.col('gbt1w')),
             com1w=pl.corr(pl.col('close').log().diff(n=7).shift(1).over('symbol'),pl.col('com1w')),
             
-            #lin2w=pl.corr(pl.col('close').log().diff(n=14).shift(1).over('symbol'),pl.col('lin2w')),
-            #gbt2w=pl.corr(pl.col('close').log().diff(n=14).shift(1).over('symbol'),pl.col('gbt2w')),
-            #com2w=pl.corr(pl.col('close').log().diff(n=14).shift(1).over('symbol'),pl.col('com2w')),
+            lin2w=pl.corr(pl.col('close').log().diff(n=14).shift(1).over('symbol'),pl.col('lin2w')),
+            gbt2w=pl.corr(pl.col('close').log().diff(n=14).shift(1).over('symbol'),pl.col('gbt2w')),
+            com2w=pl.corr(pl.col('close').log().diff(n=14).shift(1).over('symbol'),pl.col('com2w')),
 
-            #lin1m=pl.corr(pl.col('close').log().diff(n=30).shift(1).over('symbol'),pl.col('lin1m')),
-            #gbt1m=pl.corr(pl.col('close').log().diff(n=30).shift(1).over('symbol'),pl.col('gbt1m')),
-            #com1m=pl.corr(pl.col('close').log().diff(n=30).shift(1).over('symbol'),pl.col('com1m')),
+            lin1m=pl.corr(pl.col('close').log().diff(n=30).shift(1).over('symbol'),pl.col('lin1m')),
+            gbt1m=pl.corr(pl.col('close').log().diff(n=30).shift(1).over('symbol'),pl.col('gbt1m')),
+            com1m=pl.corr(pl.col('close').log().diff(n=30).shift(1).over('symbol'),pl.col('com1m')),
         )
         .mean()
         .unpivot()
@@ -222,18 +222,9 @@ from math import log
 
 models = {
     "lin1d": 1,
-    "gbt1d": 1,
-    "com1d": 1,
-    "lin1w": 7,
-    "gbt1w": 7,
-    "com1w": 7,
-    "lin2w": 14,
-    "gbt2w": 14,
-    "com2w": 14,
-    "lin1m": 30,
-    "gbt1m": 30,
-    "com1m": 30,
 }
+
+df = pl.read_parquet('features.parquet').join(pl.read_parquet('predictions.parquet'), on=["ts", "symbol"], how="inner")
 
 prices_df = df.pivot(index="ts", on="symbol", values="close").sort("ts")
 prices_df = prices_df.fill_null(strategy="forward")
@@ -242,6 +233,9 @@ prices = prices_df.to_pandas().set_index("ts")
 res_frag = []
 trades_frag = []
 leverage = 1
+top = 0.7
+bottom = 0.1
+start_year = 2020
 
 for model, hold_win in models.items():
     portfolio = []
@@ -335,10 +329,10 @@ for model, hold_win in models.items():
                     rank=pl.col(model).rank() / pl.col(model).count()
                 )
                 long = cs_df.filter(
-                    (pl.col("rank") >= 0.8) & (pl.col(model) > 0)
+                    (pl.col("rank") >= top) & (pl.col(model) > 0)
                 )
                 short = cs_df.filter(
-                    (pl.col("rank") <= 0.2) & (pl.col(model) < 0)
+                    (pl.col("rank") <= bottom) & (pl.col(model) < 0)
                 )
                 
                 num_positions = long.height + short.height
@@ -378,10 +372,6 @@ else:
     })
 res_df = pl.concat(res_frag)
 
-# %%
-res_df
-
-# %%
 for model in models:
     (
         res_df
