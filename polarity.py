@@ -205,11 +205,13 @@ def train_and_predict(sym, day):
         train_h = train_df.drop_nulls(subset=[f"target{t}"] + features).drop_nans(
             subset=features
         )
-        if train_h.height < 10:
+        test_h = test_df.drop_nulls(subset=features).drop_nans(subset=features)
+
+        if train_h.height < 10 or test_h.height == 0:
             continue
 
         X_train, y_train = train_h[features], train_h[f"target{t}"]
-        X_test = test_df[features]
+        X_test = test_h[features]
 
         model_lin = LinearRegression(n_jobs=1).fit(
             X_train.to_pandas(), y_train.to_pandas()
@@ -221,9 +223,11 @@ def train_and_predict(sym, day):
             max_iter=50, max_depth=3, random_state=42
         ).fit(X_train, y_train - model_lin.predict(X_train))
 
-        pred_row[f"lin{t}"] = model_lin.predict(X_test)
-        pred_row[f"gbt{t}"] = model_gbt.predict(X_test)
-        pred_row[f"com{t}"] = model_lin.predict(X_test) + model_com.predict(X_test)
+        pred_row[f"lin{t}"] = model_lin.predict(X_test)[0]
+        pred_row[f"gbt{t}"] = model_gbt.predict(X_test)[0]
+        pred_row[f"com{t}"] = (
+            model_lin.predict(X_test)[0] + model_com.predict(X_test)[0]
+        )
 
     if len(pred_row) == 2:
         return None
