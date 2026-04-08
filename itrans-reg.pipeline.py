@@ -27,7 +27,7 @@ REPOSITORY = "flanfly/studies"
 def latest_image_tag():
     from ghapi.all import GhApi
 
-    tag = "@sha256:96134c14d7324eb7b9b52e1abc14452f042eff94dbcbe3db66684892d73df20b"
+    tag = "@sha256:4bb980500bccaf9c449683b9545e0b50537a7236568cffe72b888e824576d376"
     ghpkg = GhApi(token=os.getenv("GITHUB_PAT")).packages
 
     for pkg in ghpkg.list_packages_for_authenticated_user(package_type="container"):
@@ -47,7 +47,7 @@ def latest_image_tag():
 
 
 # 2026-03-13
-DATA_PIPELINE_IMAGE = "asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies@sha256:a5e43e4a01f9e861ce1e15fbd6cf7126a28cec9a3c07e2357aa3fb9c0d2c9497"
+DATA_PIPELINE_IMAGE = "asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies@sha256:4bb980500bccaf9c449683b9545e0b50537a7236568cffe72b888e824576d376"
 IMAGE = f"asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies{latest_image_tag()}"
 
 
