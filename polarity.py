@@ -44,6 +44,7 @@ enable_3d = True
 enable_1w = True
 enable_2w = True
 enable_1m = True
+concurrency = -1
 
 # backtest
 leverage = 1
@@ -102,6 +103,7 @@ Input Path: {input_path}
 
 Derivation Window: {deriv_win} days
 Z-Score Window: {zscore_win} days
+Concurrency: {concurrency} jobs
 
 Prediction Horizons: {', '.join(horizons.keys())}
 Input Features: {', '.join(input_features)}
@@ -234,7 +236,7 @@ def train_and_predict(sym, day):
     return pl.DataFrame(pred_row)
 
 
-pred_frag = Parallel(n_jobs=-1)(
+pred_frag = Parallel(n_jobs=concurrency)(
     delayed(train_and_predict)(sym, day)
     for sym, day in tqdm(it.product(symbols, days), total=len(symbols) * len(days))
 )
