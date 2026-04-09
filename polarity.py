@@ -15,6 +15,7 @@
 
 # %%
 import os
+
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["POLARS_MAX_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -123,9 +124,10 @@ Total Features After Derivation: {len(features)}
 
 
 def rolling_zscore(expr, window):
-    return ((expr - expr.rolling_mean(window)) / expr.rolling_std(window)).over(
-        "symbol"
-    )
+    return (
+        (expr - expr.rolling_mean(window, min_samples=1))
+        / expr.rolling_std(window, min_samples=1)
+    ).over("symbol")
 
 
 df = (
@@ -148,11 +150,18 @@ df = (
             (pl.col("mdccv") - pl.col("close")) / pl.col("close"), zscore_win
         ),
     )
-    # derive 1st deriv
+    # derive 1st deriv, shift at most deriv_win, less if not enough history
     .with_columns(
         **{
             f"{col}roc": rolling_zscore(
-                pl.col(col) - pl.col(col).shift(deriv_win).over("symbol"), zscore_win
+                pl.col(col)
+                - pl.coalesce(
+                    [
+                        pl.col(col).shift(i).over("symbol")
+                        for i in range(deriv_win, -1, -1)
+                    ]
+                ),
+                zscore_win,
             )
             for col in input_features
         }
