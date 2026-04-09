@@ -277,14 +277,14 @@ def train_and_predict(sym, day):
             X_train.to_pandas(), y_train.to_pandas()
         )
         model_gbt = GbtModel(
-            max_iter=50,
+            # max_iter=50,
             max_depth=gbt_max_depth,
             random_state=42,
             min_samples_leaf=gbt_min_leafs,
             learning_rate=gbt_lr,
         ).fit(X_train, y_train)
         model_com = GbtModel(
-            max_iter=50,
+            # max_iter=50,
             max_depth=gbt_max_depth,
             random_state=42,
             min_samples_leaf=gbt_min_leafs,
