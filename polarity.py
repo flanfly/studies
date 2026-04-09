@@ -29,7 +29,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import (
+    HistGradientBoostingRegressor,
+    GradientBoostingRegressor,
+    RandomForestRegressor,
+)
 from xgboost import XGBRegressor
 import datetime as dt
 from scipy.stats import spearmanr
@@ -55,11 +59,15 @@ enable_2w = True
 enable_1m = True
 concurrency = "-1"
 
+gbt_type = "hist"  # "hist", "gbt", "rf"
+gbt_min_leafs = "50"
+gbt_max_depth = "None"
+gbt_lr = "0.1"
+
 # backtest
 leverage = "1"
 top = "0.7"
 bottom = "0.1"
-
 
 # %%
 horizons: Dict[str, int] = {}
@@ -101,16 +109,43 @@ features = [
 
 feature_path = f"features-{experiment_name}.parquet"
 predictions_path = f"predictions-{experiment_name}.parquet"
+if gbt_type == "hist":
+    GbtModel = HistGradientBoostingRegressor
+elif gbt_type == "gbt":
+    GbtModel = GradientBoostingRegressor
+elif gbt_type == "rf":
+    GbtModel = RandomForestRegressor
+else:
+    raise ValueError(f"Unsupported gbt_type: {gbt_type}")
 
-start_year = int(start_year)
 
-deriv_win = int(deriv_win)
-zscore_win = int(zscore_win)
-concurrency = int(concurrency)
+def safe_int(x, default=None):
+    try:
+        return int(x)
+    except ValueError:
+        return default
 
-leverage = float(leverage)
-top = float(top)
-bottom = float(bottom)
+
+def safe_float(x, default=None):
+    try:
+        return float(x)
+    except ValueError:
+        return default
+
+
+start_year = safe_int(start_year)
+
+deriv_win = safe_int(deriv_win)
+zscore_win = safe_int(zscore_win)
+concurrency = safe_int(concurrency, default=-1)
+
+gbt_min_leafs = safe_int(gbt_min_leafs)
+gbt_max_depth = safe_int(gbt_max_depth)
+gbt_lr = safe_float(gbt_lr)
+
+leverage = safe_float(leverage)
+top = safe_float(top)
+bottom = safe_float(bottom)
 
 print(
     f"""
@@ -241,11 +276,19 @@ def train_and_predict(sym, day):
         model_lin = LinearRegression(n_jobs=1).fit(
             X_train.to_pandas(), y_train.to_pandas()
         )
-        model_gbt = HistGradientBoostingRegressor(
-            max_iter=50, max_depth=3, random_state=42
+        model_gbt = GbtModel(
+            max_iter=50,
+            max_depth=gbt_max_depth,
+            random_state=42,
+            min_samples_leaf=gbt_min_leafs,
+            learning_rate=gbt_lr,
         ).fit(X_train, y_train)
-        model_com = HistGradientBoostingRegressor(
-            max_iter=50, max_depth=3, random_state=42
+        model_com = GbtModel(
+            max_iter=50,
+            max_depth=gbt_max_depth,
+            random_state=42,
+            min_samples_leaf=gbt_min_leafs,
+            learning_rate=gbt_lr,
         ).fit(X_train, y_train - model_lin.predict(X_train))
 
         pred_row[f"lin{t}"] = model_lin.predict(X_test)[0]
