@@ -43,22 +43,22 @@ experiment_name = "all-zscore-1"
 
 # feature derivation and normalization
 input_path = "polarity/data/*.parquet"
-deriv_win = 7
-zscore_win = 30
+deriv_win = "7"
+zscore_win = "30"
 
 # walk-forward training & inference
-start_year = 2020
+start_year = "2020"
 enable_1d = True
 enable_3d = True
 enable_1w = True
 enable_2w = True
 enable_1m = True
-concurrency = -1
+concurrency = "-1"
 
 # backtest
-leverage = 1
-top = 0.7
-bottom = 0.1
+leverage = "1"
+top = "0.7"
+bottom = "0.1"
 
 
 # %%
@@ -101,6 +101,16 @@ features = [
 
 feature_path = f"features-{experiment_name}.parquet"
 predictions_path = f"predictions-{experiment_name}.parquet"
+
+start_year = int(start_year)
+
+deriv_win = int(deriv_win)
+zscore_win = int(zscore_win)
+concurrency = int(concurrency)
+
+leverage = float(leverage)
+top = float(top)
+bottom = float(bottom)
 
 print(
     f"""
