@@ -49,8 +49,9 @@ yz_k = 0.34
 yz_win = 25
 
 parameter_sets = [
-    {"max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3},
-
+    {"max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0},
+    {"max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.5},
+    {"max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 2.0},
 ]
 
 for param in parameter_sets:
@@ -59,6 +60,7 @@ for param in parameter_sets:
     rebalance_period = param["period"]
     stop_long = param.get("stop_long")
     stop_short = param.get("stop_short")
+    leverage = param.get("leverage", 1.0)
 
     signals = {
         "mom12m": pl.col("mom12m"),
@@ -319,7 +321,7 @@ for param in parameter_sets:
                         inv_vols[s] / total_inv_vol
                         if total_inv_vol > 0
                         else 1.0 / bkt_len
-                    )
+                    ) * leverage
                     shares = (w * portfolio_equity) / close_dict[s]
                     portfolio.append(
                         {
@@ -337,7 +339,7 @@ for param in parameter_sets:
                         inv_vols[s] / total_inv_vol
                         if total_inv_vol > 0
                         else 1.0 / bkt_len
-                    )
+                    ) * leverage
                     shares = -(w * portfolio_equity) / close_dict[s]
                     portfolio.append(
                         {
@@ -413,15 +415,16 @@ for param in parameter_sets:
         x="date",
         y=[*signals.keys(), "spy"],
         figsize=(15, 7),
-        title=f"rebalance every {rebalance_period}d long {max_long}, short {max_short} stop {stop_long * 100}/{stop_short * 100}%",
+        title=f"rebalance every {rebalance_period}d long {max_long}, short {max_short} stop {stop_long * 100}/{stop_short * 100}% {leverage}x leverage",
     )
     import matplotlib.pyplot as plt
 
-    plt.savefig(f"plot_long{max_long}_short{max_short}.png")
+    plt.savefig(f"plot_long{max_long}_short{max_short}_lev{leverage}.png")
     plt.show()
+    #plt.close()
 
     # Compute Summary Statistics
-    print(f"\n--- Summary for rebalance {rebalance_period}d | long {max_long} | short {max_short} ---")
+    print(f"\n--- Summary for rebalance {rebalance_period}d | long {max_long} | short {max_short} | lev {leverage} ---")
     
     def calc_cagr(series_cum):
         if len(series_cum) < 2: return 0.0
@@ -474,3 +477,5 @@ for param in parameter_sets:
     ))
     print(yearly_ret.round(2).to_string())
     print("\n")
+
+# %%
