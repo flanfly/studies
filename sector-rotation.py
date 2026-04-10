@@ -78,26 +78,20 @@ lev_3x = {
 
 parameter_sets = [
     {
-        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0,
-        "etf_mapping": {}, "name": "1x"
+        "max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0, "name": "2long_1short",
     },
     {
-        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0,
-        "etf_mapping": lev_2x, "name": "2x syn"
+        "max_long": 2, "max_short": 1, "period": 30, "stop_long": .225, "stop_short": 0.15, "leverage": 2.0, "name": "2long_1short_2x",
     },
     {
-        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0,
-        "etf_mapping": lev_3x, "name": "3x syn"
+        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0, "name": "2long_0short_1x",
     },
     {
-        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 2.0,
-        "etf_mapping": {}, "name": "2x"
-    },
-    {
-        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 3.0,
-        "name": "3x"
+        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .225, "stop_short": 0.15, "leverage": 2.0, "name": "2long_0short_2x",
     }
 ]
+
+all_run_stats = []
 
 for param in parameter_sets:
     max_long = param["max_long"]
@@ -120,6 +114,7 @@ for param in parameter_sets:
     }
 
     perf = None
+    trades_per_signal = {}
 
     for signal, expr in signals.items():
         df = (
@@ -196,6 +191,8 @@ for param in parameter_sets:
         # We track cash and shares to exactly calculate daily NAV
         cash = 1.0
         portfolio_equity = 1.0
+        trades = []
+        trades_per_signal[signal] = trades
 
         # Load the whole parquet once outside to get Treasury prices if needed
         # Or simply read it inside if we want to ensure we have it:
@@ -248,21 +245,55 @@ for param in parameter_sets:
 
                     if ptype == "long":
                         entry_high = max(pos.get("entry_high", pos["last_close"]), high)
+                        entry_low_ex = min(pos.get("entry_low_ex", pos["last_close"]), low)
                         pos["entry_high"] = entry_high
+                        pos["entry_low_ex"] = entry_low_ex
+                        
                         if stop_long is not None and stop_long > 0:
                             stop_price = entry_high * (1.0 - stop_long)
                             if low <= stop_price:
                                 exit_price = min(open_p, stop_price)
                                 cash += shares * exit_price
+                                trades.append({
+                                    "open_date": pos["open_date"],
+                                    "close_date": day,
+                                    "etf": sym,
+                                    "direction": "long",
+                                    "shares": shares,
+                                    "entry_price": pos["entry_price"],
+                                    "close_price": exit_price,
+                                    "profit": (exit_price / pos["entry_price"]) - 1.0,
+                                    "mfe": (entry_high / pos["entry_price"]) - 1.0,
+                                    "mae": (entry_low_ex / pos["entry_price"]) - 1.0,
+                                    "leverage": leverage,
+                                    "reason": "stop"
+                                })
                                 continue
                     elif ptype == "short":
                         entry_low = min(pos.get("entry_low", pos["last_close"]), low)
+                        entry_high_ex = max(pos.get("entry_high_ex", pos["last_close"]), high)
                         pos["entry_low"] = entry_low
+                        pos["entry_high_ex"] = entry_high_ex
+                        
                         if stop_short is not None and stop_short > 0:
                             stop_price = entry_low * (1.0 + stop_short)
                             if high >= stop_price:
                                 exit_price = max(open_p, stop_price)
                                 cash += shares * exit_price
+                                trades.append({
+                                    "open_date": pos["open_date"],
+                                    "close_date": day,
+                                    "etf": sym,
+                                    "direction": "short",
+                                    "shares": shares,
+                                    "entry_price": pos["entry_price"],
+                                    "close_price": exit_price,
+                                    "profit": 1.0 - (exit_price / pos["entry_price"]),
+                                    "mfe": 1.0 - (entry_low / pos["entry_price"]),
+                                    "mae": 1.0 - (entry_high_ex / pos["entry_price"]),
+                                    "leverage": leverage,
+                                    "reason": "stop"
+                                })
                                 continue
 
                     pos["last_close"] = close
@@ -328,6 +359,32 @@ for param in parameter_sets:
 
             elif bkt_len > 0:
                 # Full rebalance
+                # Record trades for positions being closed out at rebalance
+                for pos in yd_folio:
+                    sym = pos["symbol"]
+                    if sym == "IEF": continue
+                    
+                    row = df_now.filter(pl.col("symbol") == sym)
+                    if len(row) == 0 and sym in all_needed_syms:
+                        row = df_supp_now.filter(pl.col("symbol") == sym)
+                        
+                    close_price = row["close"][0] if len(row) > 0 else pos["last_close"]
+                    
+                    trades.append({
+                        "open_date": pos["open_date"],
+                        "close_date": day,
+                        "etf": sym,
+                        "direction": pos["type"],
+                        "shares": pos["shares"],
+                        "entry_price": pos["entry_price"],
+                        "close_price": close_price,
+                        "profit": (close_price / pos["entry_price"]) - 1.0 if pos["type"] == "long" else 1.0 - (close_price / pos["entry_price"]),
+                        "mfe": (pos.get("entry_high", close_price) / pos["entry_price"]) - 1.0 if pos["type"] == "long" else 1.0 - (pos.get("entry_low", close_price) / pos["entry_price"]),
+                        "mae": (pos.get("entry_low_ex", close_price) / pos["entry_price"]) - 1.0 if pos["type"] == "long" else 1.0 - (pos.get("entry_high_ex", close_price) / pos["entry_price"]),
+                        "leverage": leverage,
+                        "reason": "rebalance"
+                    })
+                
                 # Target weight for each position using inverse volatility weighting
                 close_dict = dict(df_now[["symbol", "close"]].iter_rows(named=False))
                 var_dict = dict(df_now[["symbol", "var"]].iter_rows(named=False))
@@ -377,6 +434,9 @@ for param in parameter_sets:
                             "last_close": buy_close,
                             "type": "long",
                             "entry_high": buy_close,
+                            "entry_low_ex": buy_close,
+                            "entry_price": buy_close,
+                            "open_date": day,
                         }
                     )
                     cash -= shares * buy_close
@@ -407,6 +467,9 @@ for param in parameter_sets:
                             "last_close": buy_close,
                             "type": "short",
                             "entry_low": buy_close,
+                            "entry_high_ex": buy_close,
+                            "entry_price": buy_close,
+                            "open_date": day,
                         }
                     )
                     cash -= (
@@ -425,6 +488,10 @@ for param in parameter_sets:
                                 "shares": ief_shares,
                                 "last_close": ief_close,
                                 "type": "long",
+                                "entry_high": ief_close,
+                                "entry_low_ex": ief_close,
+                                "entry_price": ief_close,
+                                "open_date": day,
                             }
                         )
                         cash = 0.0
@@ -433,6 +500,33 @@ for param in parameter_sets:
             else:
                 # all to IEF
                 cash = portfolio_equity
+                
+                # Record trades for positions being closed out due to no signal
+                for pos in yd_folio:
+                    sym = pos["symbol"]
+                    if sym == "IEF": continue
+                    
+                    row = df_now.filter(pl.col("symbol") == sym)
+                    if len(row) == 0 and sym in all_needed_syms:
+                        row = df_supp_now.filter(pl.col("symbol") == sym)
+                        
+                    close_price = row["close"][0] if len(row) > 0 else pos["last_close"]
+                    
+                    trades.append({
+                        "open_date": pos["open_date"],
+                        "close_date": day,
+                        "etf": sym,
+                        "direction": pos["type"],
+                        "shares": pos["shares"],
+                        "entry_price": pos["entry_price"],
+                        "close_price": close_price,
+                        "profit": (close_price / pos["entry_price"]) - 1.0 if pos["type"] == "long" else 1.0 - (close_price / pos["entry_price"]),
+                        "mfe": (pos.get("entry_high", close_price) / pos["entry_price"]) - 1.0 if pos["type"] == "long" else 1.0 - (pos.get("entry_low", close_price) / pos["entry_price"]),
+                        "mae": (pos.get("entry_low_ex", close_price) / pos["entry_price"]) - 1.0 if pos["type"] == "long" else 1.0 - (pos.get("entry_high_ex", close_price) / pos["entry_price"]),
+                        "leverage": leverage,
+                        "reason": "flat_market"
+                    })
+                
                 if cash > 0:
                     row_tlt = df_tlt.filter(pl.col("date") == day)
                     if len(row_tlt) > 0:
@@ -444,6 +538,10 @@ for param in parameter_sets:
                                 "shares": ief_shares,
                                 "last_close": ief_close,
                                 "type": "long",
+                                "entry_high": ief_close,
+                                "entry_low_ex": ief_close,
+                                "entry_price": ief_close,
+                                "open_date": day,
                             }
                         )
                         cash = 0.0
@@ -470,18 +568,17 @@ for param in parameter_sets:
     )
 
     pdf = df_perf.to_pandas()
-    pdf.plot(
-        x="date",
-        y=[*signals.keys(), "spy"],
-        figsize=(15, 7),
-        title=f"rebalance every {rebalance_period}d long {max_long}, short {max_short} stop {stop_long * 100}/{stop_short * 100}% {name}",
-    )
     import matplotlib.pyplot as plt
 
+    fig, ax = plt.subplots(figsize=(15, 7))
+    for sig in signals.keys():
+        ax.plot(pdf["date"], pdf[sig], label=sig)
+    ax.plot(pdf["date"], pdf["spy"], label="spy", color="black", linestyle="--")
+    ax.set_title(f"rebalance every {rebalance_period}d long {max_long}, short {max_short} stop {stop_long * 100}/{stop_short * 100}% {name}")
+    ax.legend()
     plt.savefig(f"plot_long{max_long}_short{max_short}_{name}.png")
     plt.show()
 
-    # Compute Summary Statistics
     print(f"\n--- Summary for rebalance {rebalance_period}d | long {max_long} | short {max_short} | variant: {name} ---")
     
     def calc_cagr(series_cum):
@@ -507,7 +604,18 @@ for param in parameter_sets:
         std = active_ret.std() * np.sqrt(252.0)
         return mean / std if std > 0 else 0.0
 
-    stats = []
+    pdf['Year'] = pd.to_datetime(pdf['date']).dt.year
+    yearly_ret = pdf.groupby('Year').apply(lambda x: (
+        pd.Series({sig: (((x[sig].iloc[-1] / x[sig].iloc[0]) - 1.0) * 100) for sig in [*signals.keys(), 'spy']})
+    ))
+    
+    ax = yearly_ret.plot(kind='bar', figsize=(15, 7), title=f"Yearly Return (%) - {name}")
+    ax.set_ylabel("Return (%)")
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(f"yearly_ret_long{max_long}_short{max_short}_{name}.png")
+    plt.show()
+
     for sig in [*signals.keys(), 'spy']:
         s_cum = pdf[sig]
         s_ret = pdf[sig].pct_change().fillna(0.0) if sig != 'spy' else pdf['spy_ret']
@@ -517,23 +625,86 @@ for param in parameter_sets:
         sharpe = calc_sharpe(s_ret)
         ir = calc_ir(s_ret, pdf['spy_ret']) if sig != 'spy' else 0.0
         
-        stats.append({
-            "Signal": sig,
-            "Total CAGR": f"{cagr*100:.2f}%",
-            "Max DD": f"{mdd*100:.2f}%",
-            "Sharpe": f"{sharpe:.2f}",
-            "IR vs SPY": f"{ir:.2f}" if sig != 'spy' else "-"
-        })
+        y_mean = yearly_ret[sig].mean() / 100.0
+        y_std = yearly_ret[sig].std() / 100.0
         
-    stats_df = pd.DataFrame(stats)
-    print(stats_df.to_string(index=False))
+        tdf = pd.DataFrame(trades_per_signal.get(sig, []))
+        if not tdf.empty:
+            wins = tdf[tdf['profit'] > 0]
+            losses = tdf[tdf['profit'] <= 0]
+            win_rate = len(wins) / len(tdf)
+            avg_win = wins['profit'].mean() if len(wins) > 0 else 0.0
+            avg_loss = losses['profit'].mean() if len(losses) > 0 else 0.0
+            
+            if avg_loss < 0:
+                reward_risk = abs(avg_win / avg_loss)
+                kelly = win_rate - ((1.0 - win_rate) / reward_risk)
+            else:
+                kelly = 0.0
+                
+            mfe_mean = tdf['mfe'].mean() if 'mfe' in tdf.columns else 0.0
+            mfe_std = tdf['mfe'].std() if 'mfe' in tdf.columns else 0.0
+            mae_mean = tdf['mae'].mean() if 'mae' in tdf.columns else 0.0
+            mae_std = tdf['mae'].std() if 'mae' in tdf.columns else 0.0
+            
+            tdf.to_csv(f"trades_long{max_long}_short{max_short}_{name}_{sig}.csv", index=False)
+        else:
+            win_rate = avg_win = avg_loss = kelly = mfe_mean = mfe_std = mae_mean = mae_std = 0.0
 
-    print("\nYearly Return (%):")
-    pdf['Year'] = pd.to_datetime(pdf['date']).dt.year
-    yearly_ret = pdf.groupby('Year').apply(lambda x: (
-        pd.Series({sig: (((x[sig].iloc[-1] / x[sig].iloc[0]) - 1.0) * 100) for sig in [*signals.keys(), 'spy']})
-    ))
-    print(yearly_ret.round(2).to_string())
-    print("\n")
+        # Prevent duplicate spy lines in the global summary
+        if sig == 'spy':
+            if not any(r['Variant'] == 'SPY Baseline' for r in all_run_stats):
+                all_run_stats.append({
+                    "Variant": "SPY Baseline",
+                    "Signal": "spy",
+                    "CAGR": f"{cagr*100:.2f}%",
+                    "Yrly Mean": f"{y_mean*100:.2f}%",
+                    "Yrly Std": f"{y_std*100:.2f}%",
+                    "Sharpe": f"{sharpe:.2f}",
+                    "IR": "-",
+                    "Max DD": f"{mdd*100:.2f}%",
+                    "Win Rate": "-",
+                    "Avg Win": "-",
+                    "Avg Loss": "-",
+                    "Kelly": "-",
+                    "Half K.": "-",
+                    "MAE": "-",
+                    "MAE Std": "-",
+                    "MFE": "-",
+                    "MFE Std": "-"
+                })
+        else:
+            all_run_stats.append({
+                "Variant": name,
+                "Signal": sig,
+                "CAGR": f"{cagr*100:.2f}%",
+                "Yrly Mean": f"{y_mean*100:.2f}%",
+                "Yrly Std": f"{y_std*100:.2f}%",
+                "Sharpe": f"{sharpe:.2f}",
+                "IR": f"{ir:.2f}",
+                "Max DD": f"{mdd*100:.2f}%",
+                "Win Rate": f"{win_rate*100:.2f}%",
+                "Avg Win": f"{avg_win*100:.2f}%",
+                "Avg Loss": f"{avg_loss*100:.2f}%",
+                "Kelly": f"{kelly*100:.2f}%",
+                "Half K.": f"{(kelly/2.0)*100:.2f}%",
+                "MAE": f"{mae_mean*100:.2f}%",
+                "MAE Std": f"{mae_std*100:.2f}%",
+                "MFE": f"{mfe_mean*100:.2f}%",
+                "MFE Std": f"{mfe_std*100:.2f}%"
+            })
+
+print("\n" + "="*80)
+print("=== GLOBAL SUMMARY ===")
+print("="*80)
+summary_df = pd.DataFrame(all_run_stats)
+
+# Move SPY to the bottom
+spy_row = summary_df[summary_df['Signal'] == 'spy']
+other_rows = summary_df[summary_df['Signal'] != 'spy']
+summary_df = pd.concat([other_rows, spy_row])
+
+print(summary_df.to_string(index=False))
+print("\n")
 
 # %%
