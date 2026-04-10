@@ -48,10 +48,55 @@ def zscore(window: int) -> Callable[[pl.Expr], pl.Expr]:
 yz_k = 0.34
 yz_win = 25
 
+lev_2x = {
+    "XLB": "UYM", # Ultra Basic Materials 2x
+    "XLC": "XLC", # No 2x
+    "XLE": "DIG", # Ultra Oil & Gas 2x
+    "XLF": "UYG", # Ultra Financials 2x
+    "XLI": "UXI", # Ultra Industrials 2x
+    "XLK": "ROM", # Ultra Technology 2x
+    "XLP": "UGE", # Ultra Consumer Goods 2x
+    "XLRE": "URE", # Ultra Real Estate 2x
+    "XLU": "UPW", # Ultra Utilities 2x
+    "XLV": "RXL", # Ultra Health Care 2x
+    "XLY": "UCC", # Ultra Consumer Services 2x
+}
+
+lev_3x = {
+    "XLB": "UYM", # Fallback to 2x
+    "XLC": "XLC", # No 3x
+    "XLE": "ERX", # Daily Energy Bull 2X (was 3x, now 2x)
+    "XLF": "FAS", # Daily Financial Bull 3X
+    "XLI": "DUSL", # Daily Industrials Bull 3X
+    "XLK": "TECL", # Daily Technology Bull 3X
+    "XLP": "UGE", # Fallback to 2x
+    "XLRE": "DRN", # Daily Real Estate Bull 3X
+    "XLU": "UTSL", # Daily Utilities Bull 3X
+    "XLV": "CURE", # Daily Healthcare Bull 3X
+    "XLY": "WANT", # Daily Consumer Discretionary Bull 3X
+}
+
 parameter_sets = [
-    {"max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0},
-    {"max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.5},
-    {"max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 2.0},
+    {
+        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0,
+        "etf_mapping": {}, "name": "1x"
+    },
+    {
+        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0,
+        "etf_mapping": lev_2x, "name": "2x syn"
+    },
+    {
+        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0,
+        "etf_mapping": lev_3x, "name": "3x syn"
+    },
+    {
+        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 2.0,
+        "etf_mapping": {}, "name": "2x"
+    },
+    {
+        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 3.0,
+        "name": "3x"
+    }
 ]
 
 for param in parameter_sets:
@@ -61,6 +106,8 @@ for param in parameter_sets:
     stop_long = param.get("stop_long")
     stop_short = param.get("stop_short")
     leverage = param.get("leverage", 1.0)
+    etf_mapping = param.get("etf_mapping", {})
+    name = param.get("name", "run")
 
     signals = {
         "mom12m": pl.col("mom12m"),
@@ -152,18 +199,24 @@ for param in parameter_sets:
 
         # Load the whole parquet once outside to get Treasury prices if needed
         # Or simply read it inside if we want to ensure we have it:
-        df_tlt = (
+        all_needed_syms = ["IEF"] + list(etf_mapping.values())
+        df_supp = (
             pl.read_parquet("yf.parquet")
-            .filter(pl.col("symbol") == "IEF")
+            .filter(pl.col("symbol").is_in(all_needed_syms))
             .select(
                 date=pl.col("ts").dt.date(),
                 symbol=pl.col("symbol"),
+                open=pl.col("open"),
+                high=pl.col("high"),
+                low=pl.col("low"),
                 close=pl.col("close"),
             )
         )
+        df_tlt = df_supp.filter(pl.col("symbol") == "IEF")
 
         for day in tqdm(df["date"].unique().sort().to_list()):
             df_now = df.filter(pl.col("date") == day)
+            df_supp_now = df_supp.filter(pl.col("date") == day)
 
             # Compute today's portfolio NAV
             # Process trailing stops for the day
@@ -173,7 +226,12 @@ for param in parameter_sets:
                 shares = pos["shares"]
                 ptype = pos["type"]
 
-                row = df_now.filter(pl.col("symbol") == sym)
+                # If this position is an ETF replacement or IEF, check df_supp_now instead
+                if sym in all_needed_syms:
+                    row = df_supp_now.filter(pl.col("symbol") == sym)
+                else:
+                    row = df_now.filter(pl.col("symbol") == sym)
+
                 if len(row) == 0:
                     if sym == "IEF":
                         row_tlt = df_tlt.filter(pl.col("date") == day)
@@ -258,37 +316,13 @@ for param in parameter_sets:
                     shares = pos["shares"]
                     ptype = pos["type"]
 
-                    if (
-                        sym == "IEF"
-                        or (ptype == "long" and sym in long_bkt)
-                        or (ptype == "short" and sym in short_bkt)
-                        or True
-                    ):
-                        portfolio.append(pos)
-                    else:
-                        # Position dropped from top ranks mid-period, liquidate it into cash
-                        # Then put that cash into IEF
-                        row = df_now.filter(pl.col("symbol") == sym)
-                        if len(row) > 0:
-                            liq_val = shares * row["close"][0]
-                        else:
-                            liq_val = shares * pos["last_close"]
-
-                        cash += liq_val
-
-                        row_tlt = df_tlt.filter(pl.col("date") == day)
-                        if len(row_tlt) > 0 and cash > 0:
-                            ief_close = row_tlt["close"][0]
-                            ief_shares = cash / ief_close
-                            portfolio.append(
-                                {
-                                    "symbol": "IEF",
-                                    "shares": ief_shares,
-                                    "last_close": ief_close,
-                                    "type": "long",
-                                }
-                            )
-                            cash = 0.0
+                    # To determine if we keep it, we need to know the original underlying symbol
+                    # If this is a mapped ETF, we want to know what it mapped *from*
+                    # However, it's easier to just assume we hold everything mid-period unless explicitly liquidating.
+                    # Wait, the logic before was: only hold if still in top rankings. But now we have trailing stops.
+                    # For a simple trailing stop momentum strategy, we usually just hold until rebalance or stop.
+                    # I will let it hold until rebalance day or stopout!
+                    portfolio.append(pos)
 
                 days_since_rebalance += 1
 
@@ -322,17 +356,30 @@ for param in parameter_sets:
                         if total_inv_vol > 0
                         else 1.0 / bkt_len
                     ) * leverage
-                    shares = (w * portfolio_equity) / close_dict[s]
+                    
+                    buy_sym = etf_mapping.get(s, s)
+                    if buy_sym == s:
+                        buy_close = close_dict[s]
+                    else:
+                        row_supp = df_supp_now.filter(pl.col("symbol") == buy_sym)
+                        if len(row_supp) > 0:
+                            buy_close = row_supp["close"][0]
+                        else:
+                            # fallback if mapped ETF data not available yet
+                            buy_sym = s
+                            buy_close = close_dict[s]
+
+                    shares = (w * portfolio_equity) / buy_close
                     portfolio.append(
                         {
-                            "symbol": s,
+                            "symbol": buy_sym,
                             "shares": shares,
-                            "last_close": close_dict[s],
+                            "last_close": buy_close,
                             "type": "long",
-                            "entry_high": close_dict[s],
+                            "entry_high": buy_close,
                         }
                     )
-                    cash -= shares * close_dict[s]
+                    cash -= shares * buy_close
 
                 for s in short_bkt[:max_short]:
                     w = (
@@ -340,18 +387,30 @@ for param in parameter_sets:
                         if total_inv_vol > 0
                         else 1.0 / bkt_len
                     ) * leverage
-                    shares = -(w * portfolio_equity) / close_dict[s]
+                    
+                    buy_sym = etf_mapping.get(s, s)
+                    if buy_sym == s:
+                        buy_close = close_dict[s]
+                    else:
+                        row_supp = df_supp_now.filter(pl.col("symbol") == buy_sym)
+                        if len(row_supp) > 0:
+                            buy_close = row_supp["close"][0]
+                        else:
+                            buy_sym = s
+                            buy_close = close_dict[s]
+
+                    shares = -(w * portfolio_equity) / buy_close
                     portfolio.append(
                         {
-                            "symbol": s,
+                            "symbol": buy_sym,
                             "shares": shares,
-                            "last_close": close_dict[s],
+                            "last_close": buy_close,
                             "type": "short",
-                            "entry_low": close_dict[s],
+                            "entry_low": buy_close,
                         }
                     )
                     cash -= (
-                        shares * close_dict[s]
+                        shares * buy_close
                     )  # subtracting a negative adds to cash
 
                 # any remaining cash goes to IEF
@@ -415,16 +474,15 @@ for param in parameter_sets:
         x="date",
         y=[*signals.keys(), "spy"],
         figsize=(15, 7),
-        title=f"rebalance every {rebalance_period}d long {max_long}, short {max_short} stop {stop_long * 100}/{stop_short * 100}% {leverage}x leverage",
+        title=f"rebalance every {rebalance_period}d long {max_long}, short {max_short} stop {stop_long * 100}/{stop_short * 100}% {name}",
     )
     import matplotlib.pyplot as plt
 
-    plt.savefig(f"plot_long{max_long}_short{max_short}_lev{leverage}.png")
+    plt.savefig(f"plot_long{max_long}_short{max_short}_{name}.png")
     plt.show()
-    #plt.close()
 
     # Compute Summary Statistics
-    print(f"\n--- Summary for rebalance {rebalance_period}d | long {max_long} | short {max_short} | lev {leverage} ---")
+    print(f"\n--- Summary for rebalance {rebalance_period}d | long {max_long} | short {max_short} | variant: {name} ---")
     
     def calc_cagr(series_cum):
         if len(series_cum) < 2: return 0.0
