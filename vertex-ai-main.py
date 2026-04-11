@@ -104,6 +104,8 @@ c.TagRemovePreprocessor.enabled = True
 html_exporter = HTMLExporter(config=c)
 html_exporter.exclude_input = True
 
+hpt = hypertune.HyperTune()
+
 for nb in notebooks:
     l.info(
         f"""Executing notebook {nb.input_arg}{f" and saving to {nb.output_arg}" if nb.output_arg else ""}"""
@@ -116,15 +118,26 @@ for nb in notebooks:
         log_output=True,
     )
 
-    # read scraps
+    # read scraps and report
     l.info(f"Reading scraps from {os.path.join(nb.directory, 'output.ipynb')}")
     try:
         scraps = sb.read_notebook(os.path.join(nb.directory, "output.ipynb"))
-        l.info(f"Scrap names found: {list(scraps.scraps.keys())}")
-        if scraps.scraps:
-            for name, scrap in scraps.scraps.items():
-                l.info(f"Scrap '{name}': {scrap.data}")
         l.info("Notebook Scraps (dataframe):\n" + str(scraps.scrap_dataframe))
+
+        scraps_dict = scraps.scraps if scraps.scraps else {}
+        for name, scrap in scraps_dict.items():
+            if not isinstance(scrap.data, (int, float)):
+                l.warning(
+                    f"Scrap '{name}' is not a number and cannot be reported as a hyperparameter tuning metric: {scrap.data}"
+                )
+                continue
+
+            hpt.report_hyperparameter_tuning_metric(
+                hyperparameter_metric_tag=name,
+                metric_value=float(scrap.data),
+                global_step=1,
+            )
+
     except Exception as e:
         l.error(f"Error reading scraps: {e}")
 
@@ -153,14 +166,3 @@ for nb in notebooks:
         ) as f_in:
             with fsspec.open(ipynb_out, "w", encoding="utf-8") as f_out:
                 f_out.write(f_in.read())
-
-    # report hpo metric
-    if "hpo-metric" in parameters:
-        metric = scraps.scraps[parameters["hpo_metric"]].data
-
-        hpt = hypertune.HyperTune()
-        hpt.report_hyperparameter_tuning_metric(
-            hyperparameter_metric_tag="hpo_metric",
-            metric_value=float(metric),
-            global_step=1,
-        )
