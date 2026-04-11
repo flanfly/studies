@@ -104,6 +104,7 @@ signals_map = {
 expr = signals_map[signal]
 
 df = (
+    # uv run yf.py SPY XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY XLB IEF --output yf.parquet
     pl.read_parquet("yf.parquet")
     .filter(pl.col("symbol").is_in(sector_etfs))
     .select(
