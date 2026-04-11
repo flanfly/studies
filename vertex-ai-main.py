@@ -115,8 +115,16 @@ for nb in notebooks:
     )
 
     # read scraps
-    scraps = sb.read_notebook(os.path.join(nb.directory, "output.ipynb"))
-    l.info("Notebook Scraps:\n" + str(scraps.scrap_dataframe))
+    l.info(f"Reading scraps from {os.path.join(nb.directory, 'output.ipynb')}")
+    try:
+        scraps = sb.read_notebook(os.path.join(nb.directory, "output.ipynb"))
+        l.info(f"Scrap names found: {list(scraps.scraps.keys())}")
+        if scraps.scraps:
+            for name, scrap in scraps.scraps.items():
+                l.info(f"Scrap '{name}': {scrap.data}")
+        l.info("Notebook Scraps (dataframe):\n" + str(scraps.scrap_dataframe))
+    except Exception as e:
+        l.error(f"Error reading scraps: {e}")
 
     # convert to html
     with open(os.path.join(nb.directory, "output.ipynb"), "r", encoding="utf-8") as f:
@@ -127,5 +135,19 @@ for nb in notebooks:
         f.write(body)
 
     if nb.output_arg:
+        l.info(f"Saving HTML output to {nb.output_arg}")
         with fsspec.open(nb.output_arg, "w", encoding="utf-8") as f:
             f.write(body)
+
+        # Also save the executed notebook itself if the user wants to see metadata/scraps
+        if nb.output_arg.endswith(".html"):
+            ipynb_out = nb.output_arg.replace(".html", ".ipynb")
+        else:
+            ipynb_out = nb.output_arg + ".ipynb"
+
+        l.info(f"Saving executed notebook to {ipynb_out}")
+        with open(
+            os.path.join(nb.directory, "output.ipynb"), "r", encoding="utf-8"
+        ) as f_in:
+            with fsspec.open(ipynb_out, "w", encoding="utf-8") as f_out:
+                f_out.write(f_in.read())
