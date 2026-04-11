@@ -2,6 +2,8 @@ import papermill as pm
 import scrapbook as sb
 import nbformat
 
+import hypertune
+
 from nbconvert import HTMLExporter
 from nbconvert.preprocessors import TagRemovePreprocessor
 from traitlets.config import Config
@@ -151,3 +153,14 @@ for nb in notebooks:
         ) as f_in:
             with fsspec.open(ipynb_out, "w", encoding="utf-8") as f_out:
                 f_out.write(f_in.read())
+
+    # report hpo metric
+    if "hpo-metric" in parameters:
+        metric = scraps.scraps[parameters["hpo_metric"]].data
+
+        hpt = hypertune.HyperTune()
+        hpt.report_hyperparameter_tuning_metric(
+            hyperparameter_metric_tag="hpo_metric",
+            metric_value=float(metric),
+            global_step=1,
+        )

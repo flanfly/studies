@@ -816,6 +816,12 @@ wheels = [
 ]
 
 [[package]]
+name = "cloudml-hypertune"
+version = "0.1.0.dev6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/54/142a00a29d1c51dcf8c93b305f35554c947be2faa0d55de1eabcc0a9023c/cloudml-hypertune-0.1.0.dev6.tar.gz", hash = "sha256:b96a5a203ecf7b3302e94f63977d7293fe21c696bea27e35667de82599696a89", size = 3188, upload-time = "2019-12-18T22:43:48.742Z" }
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -5414,6 +5420,7 @@ dependencies = [
     { name = "binance-sdk-spot" },
     { name = "catboost" },
     { name = "chronos-forecasting" },
+    { name = "cloudml-hypertune" },
     { name = "duckdb" },
     { name = "fsspec" },
     { name = "gcsfs" },
@@ -5451,6 +5458,7 @@ requires-dist = [
     { name = "binance-sdk-spot", specifier = ">=6.0.0" },
     { name = "catboost", specifier = ">=1.2.10" },
     { name = "chronos-forecasting", specifier = ">=2.2.2" },
+    { name = "cloudml-hypertune", specifier = ">=0.1.0.dev6" },
     { name = "duckdb", specifier = ">=1.4.3" },
     { name = "fsspec", specifier = ">=2026.1.0" },
     { name = "gcsfs", specifier = ">=2026.1.0" },
