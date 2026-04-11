@@ -78,16 +78,28 @@ lev_3x = {
 
 parameter_sets = [
     {
-        "max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0, "name": "2long_1short",
+        "max_long": 2, "max_short": 1, "period": 20, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
     },
     {
-        "max_long": 2, "max_short": 1, "period": 30, "stop_long": .225, "stop_short": 0.15, "leverage": 2.0, "name": "2long_1short_2x",
+        "max_long": 2, "max_short": 1, "period": 22, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
     },
     {
-        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .5, "stop_short": 0.3, "leverage": 1.0, "name": "2long_0short_1x",
+        "max_long": 2, "max_short": 1, "period": 24, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
     },
     {
-        "max_long": 2, "max_short": 0, "period": 30, "stop_long": .225, "stop_short": 0.15, "leverage": 2.0, "name": "2long_0short_2x",
+        "max_long": 2, "max_short": 1, "period": 26, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
+    },
+     {
+        "max_long": 2, "max_short": 1, "period": 28, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
+    },
+    {
+        "max_long": 2, "max_short": 1, "period": 30, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
+    },
+    {
+        "max_long": 2, "max_short": 1, "period": 32, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
+    },
+    {
+        "max_long": 2, "max_short": 1, "period": 34, "stop_long": .5, "stop_short": 0.3, "hard_stop_long": 1, "hard_stop_short": 1, "leverage": 1.0, 
     }
 ]
 
@@ -99,6 +111,8 @@ for param in parameter_sets:
     rebalance_period = param["period"]
     stop_long = param.get("stop_long")
     stop_short = param.get("stop_short")
+    hard_stop_long = param.get("hard_stop_long", 0.05)
+    hard_stop_short = param.get("hard_stop_short", 0.05)
     leverage = param.get("leverage", 1.0)
     etf_mapping = param.get("etf_mapping", {})
     name = param.get("name", "run")
@@ -249,52 +263,61 @@ for param in parameter_sets:
                         pos["entry_high"] = entry_high
                         pos["entry_low_ex"] = entry_low_ex
                         
-                        if stop_long is not None and stop_long > 0:
-                            stop_price = entry_high * (1.0 - stop_long)
-                            if low <= stop_price:
-                                exit_price = min(open_p, stop_price)
-                                cash += shares * exit_price
-                                trades.append({
-                                    "open_date": pos["open_date"],
-                                    "close_date": day,
-                                    "etf": sym,
-                                    "direction": "long",
-                                    "shares": shares,
-                                    "entry_price": pos["entry_price"],
-                                    "close_price": exit_price,
-                                    "profit": (exit_price / pos["entry_price"]) - 1.0,
-                                    "mfe": (entry_high / pos["entry_price"]) - 1.0,
-                                    "mae": (entry_low_ex / pos["entry_price"]) - 1.0,
-                                    "leverage": leverage,
-                                    "reason": "stop"
-                                })
-                                continue
+                        entry_price = pos["entry_price"]
+                        
+                        stop_price_trail = entry_high * (1.0 - stop_long) if (stop_long is not None and stop_long > 0) else -1
+                        stop_price_hard = entry_price * (1.0 - hard_stop_long) if (hard_stop_long is not None and hard_stop_long > 0) else -1
+                        stop_price = max(stop_price_trail, stop_price_hard)
+                        
+                        if stop_price > 0 and low <= stop_price:
+                            exit_price = min(open_p, stop_price)
+                            cash += shares * exit_price
+                            trades.append({
+                                "open_date": pos["open_date"],
+                                "close_date": day,
+                                "etf": sym,
+                                "direction": "long",
+                                "shares": shares,
+                                "entry_price": entry_price,
+                                "close_price": exit_price,
+                                "profit": (exit_price / entry_price) - 1.0,
+                                "mfe": (entry_high / entry_price) - 1.0,
+                                "mae": (entry_low_ex / entry_price) - 1.0,
+                                "leverage": leverage,
+                                "reason": "stop"
+                            })
+                            continue
+                            
                     elif ptype == "short":
                         entry_low = min(pos.get("entry_low", pos["last_close"]), low)
                         entry_high_ex = max(pos.get("entry_high_ex", pos["last_close"]), high)
                         pos["entry_low"] = entry_low
                         pos["entry_high_ex"] = entry_high_ex
                         
-                        if stop_short is not None and stop_short > 0:
-                            stop_price = entry_low * (1.0 + stop_short)
-                            if high >= stop_price:
-                                exit_price = max(open_p, stop_price)
-                                cash += shares * exit_price
-                                trades.append({
-                                    "open_date": pos["open_date"],
-                                    "close_date": day,
-                                    "etf": sym,
-                                    "direction": "short",
-                                    "shares": shares,
-                                    "entry_price": pos["entry_price"],
-                                    "close_price": exit_price,
-                                    "profit": 1.0 - (exit_price / pos["entry_price"]),
-                                    "mfe": 1.0 - (entry_low / pos["entry_price"]),
-                                    "mae": 1.0 - (entry_high_ex / pos["entry_price"]),
-                                    "leverage": leverage,
-                                    "reason": "stop"
-                                })
-                                continue
+                        entry_price = pos["entry_price"]
+                        
+                        stop_price_trail = entry_low * (1.0 + stop_short) if (stop_short is not None and stop_short > 0) else float('inf')
+                        stop_price_hard = entry_price * (1.0 + hard_stop_short) if (hard_stop_short is not None and hard_stop_short > 0) else float('inf')
+                        stop_price = min(stop_price_trail, stop_price_hard)
+                        
+                        if stop_price < float('inf') and high >= stop_price:
+                            exit_price = max(open_p, stop_price)
+                            cash += shares * exit_price
+                            trades.append({
+                                "open_date": pos["open_date"],
+                                "close_date": day,
+                                "etf": sym,
+                                "direction": "short",
+                                "shares": shares,
+                                "entry_price": entry_price,
+                                "close_price": exit_price,
+                                "profit": 1.0 - (exit_price / entry_price),
+                                "mfe": 1.0 - (entry_low / entry_price),
+                                "mae": 1.0 - (entry_high_ex / entry_price),
+                                "leverage": leverage,
+                                "reason": "stop"
+                            })
+                            continue
 
                     pos["last_close"] = close
                     new_portfolio.append(pos)
