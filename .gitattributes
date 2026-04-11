@@ -1,4 +1,4 @@
 pd-data/*.parquet filter=lfs diff=lfs merge=lfs -text
 .env filter=git-crypt diff=git-crypt
 
-polarity/data/*.parquet filter=lfs diff=lfs merge=lfs -text
+*.parquet filter=lfs diff=lfs merge=lfs -text
