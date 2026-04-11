@@ -22,8 +22,8 @@ stop_short = "0.3"
 hard_stop_long = "0.05"
 hard_stop_short = "0.05"
 leverage = "1.0"
-# mom1m, mom2m, mom3m, mom6m, mom12m, mom12-1m
-signal = "mom12-1m"
+# mom1m, mom2m, mom3m, mom6m, mom12m, mom12-1m-a, mom12-1m-b
+signal = "mom12-1m-a"
 variant_name = "default"
 
 # %%
@@ -98,8 +98,12 @@ yz_k, yz_win = 0.34, 25
 
 signals_map = {
     "mom12m": pl.col("mom12m"),
+    "mom1m": pl.col("mom1m"),
+    "mom2m": pl.col("mom2m"),
+    "mom3m": pl.col("mom3m"),
     "mom6m": pl.col("mom6m"),
-    "mom12-1m": pl.col("mom12m") - pl.col("mom1m"),
+    "mom12-1m-a": pl.col("mom12m") - pl.col("mom1m"),
+    "mom12-1m-b": pl.col("mom11m").shift(21).over("symbol"),
 }
 expr = signals_map[signal]
 
@@ -138,7 +142,7 @@ df = (
     .with_columns(
         **{
             f"mom{n}m": pl.col("close").pct_change(21 * n).over("symbol")
-            for n in [1, 2, 3, 6, 12]
+            for n in [1, 2, 3, 6, 11, 12]
         },
         sma50d=pl.col("close").rolling_mean(50).over("symbol"),
     )
