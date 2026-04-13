@@ -30,34 +30,6 @@ l.basicConfig(
     handlers=[l.StreamHandler(sys.stdout)],
 )
 
-
-class Notebook(NamedTuple):
-    input_arg: str
-    output_arg: str | None
-    directory: str
-
-
-def new_notebook_io(input: str, output: str | None = None) -> Notebook:
-    if os.path.isdir(input):
-        raise ValueError(f"Input notebook is a directory: {input}")
-    if not os.path.isfile(input):
-        raise ValueError(f"Input notebook does not exist: {input}")
-
-    if output != "" and output is not None:
-        if os.path.isdir(output):
-            output = os.path.join(output, os.path.basename(input))
-        if os.path.isfile(output):
-            l.warning(
-                f"Output notebook file already exists and will be overwritten: {output}"
-            )
-        os.makedirs(os.path.dirname(output), exist_ok=True)
-
-    d = tempfile.mkdtemp(prefix="vertex-ai-wrapper")
-    sh.copy(input, os.path.join(d, "input.ipynb"))
-
-    return Notebook(input_arg=input, output_arg=output, directory=d)
-
-
 parser = argparse.ArgumentParser(
     description="Vertex AI Notebook Wrapper",
     usage="vertex-ai-main.py NOTEBOOK [--verbose] [--html OUTPUT_NOTEBOOK] [--csv OUTPUT_METRICS] [PARAMETERS...]",
@@ -121,11 +93,13 @@ hpt = hypertune.HyperTune()
 with TemporaryDirectory(prefix="vertex-ai-papermill") as dir:
     notebook = f"{dir}/output.ipynb"
 
+    # suppress progress bar spam from papermill
     pm.execute_notebook(
         args.notebook,
         notebook,
         parameters=parameters,
         log_output=True,
+        progress_bar=False,
     )
 
     # save the executed notebook if requested
@@ -183,4 +157,4 @@ with TemporaryDirectory(prefix="vertex-ai-papermill") as dir:
         parameters=pl.lit(json.dumps(parameters)),
     )
     with fsspec.open(args.csv, "w") as f:
-        out_df.write_csv(f)
+        out_df.write_csv(f, include_header=True)
