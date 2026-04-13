@@ -16,7 +16,7 @@ load_dotenv()
 
 PROJECT_ID = "prj-vertexai-test"
 REGION = "asia-southeast1"
-PIPELINE_ROOT = "gs://kai-vertex-ai-test-data/cr2"
+BUCKET = "gs://kai-vertex-ai-test-data/hpo"
 SERVICE_ACCOUNT = "batch-job-sa@prj-vertexai-test.iam.gserviceaccount.com"
 REPOSITORY = "flanfly/studies"
 
@@ -54,10 +54,10 @@ if __name__ == "__main__":
     name = (
         argv[1]
         if len(argv) > 1
-        else f"polarity-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        else f"sector-rotation-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
 
-    aiplatform.init(project=PROJECT_ID, location=REGION)
+    aiplatform.init(project=PROJECT_ID, location=REGION, staging_bucket=BUCKET)
     worker_pool_specs = [
         {
             "machine_spec": {
@@ -70,22 +70,16 @@ if __name__ == "__main__":
             },
         }
     ]
-
     custom_job = aiplatform.CustomJob(
         display_name=name,
         worker_pool_specs=worker_pool_specs,
-        scheduling={
-            "strategy": "SPOT",
-            "restart_job_on_worker_restart": True,
-            "timeout": "86400s",  # 24 hour max timeout
-        },
     )
 
     hpt_job = aiplatform.HyperparameterTuningJob(
         display_name=name,
         custom_job=custom_job,
         metric_spec={
-            "sortino": "maximize",
+            "cagr": "maximize",
         },
         # max_long = "2"
         # max_short = "1"
@@ -95,16 +89,44 @@ if __name__ == "__main__":
         # hard_stop_long = "0.05"
         # hard_stop_short = "0.05"
         # leverage = "1.0"
-        ## mom1m, mom2m, mom3m, mom6m, mom12m, mom12-1m
-        # signal = "mom12-1m"
         # variant_name = "default"
         parameter_spec={
             "signal": hpt.CategoricalParameterSpec(
-                values=["mom1m", "mom2m", "mom3m", "mom6m", "mom12m", "mom12-1m"],
-            )
+                values=[
+                    "mom1m",
+                    "mom2m",
+                    "mom3m",
+                    "mom6m",
+                    "mom12m",
+                    "mom12-1m-a",
+                    "mom12-1m-b",
+                ],
+            ),
+            "max_long": hpt.IntegerParameterSpec(
+                min=0,
+                max=3,
+                scale="linear",
+            ),
+            "max_short": hpt.IntegerParameterSpec(
+                min=0,
+                max=2,
+                scale="linear",
+            ),
+            "period": hpt.DiscreteParameterSpec(
+                values=[1, 5, 10, 21, 42],
+                scale="linear",
+            ),
+            "stop_long": hpt.DiscreteParameterSpec(
+                values=[0.01, 0.05, 0.1, 0.2, 0.5, 0.6, 1],
+                scale="linear",
+            ),
+            "stop_short": hpt.DiscreteParameterSpec(
+                values=[0.01, 0.05, 0.1, 0.2, 0.5, 0.6, 1],
+                scale="linear",
+            ),
         },
-        max_trial_count=6,
-        parallel_trial_count=3,
-        search_algorithm="GRID_SEARCH",
+        max_trial_count=150,
+        parallel_trial_count=5,
+        search_algorithm=None,
     )
     hpt_job.run(service_account=SERVICE_ACCOUNT)
