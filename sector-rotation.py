@@ -27,6 +27,8 @@ signal = "mom12-1m-a"
 gate = "mom12m-andor-6m"
 variant_name = "default"
 daily_exit = "True"
+show_figs = "True"
+use_live_data = "False"
 
 # %%
 import polars as pl
@@ -37,18 +39,20 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import scrapbook as sb
 
-max_long = int(max_long)
-max_short = int(max_short)
-period = int(period)
-stop_long = float(stop_long)
-stop_short = float(stop_short)
-hard_stop_long = float(hard_stop_long)
-hard_stop_short = float(hard_stop_short)
-leverage = float(leverage)
-daily_exit = daily_exit.lower() == "true"
+max_long_param = int(max_long)
+max_short_param = int(max_short)
+period_param = int(period)
+stop_long_param = float(stop_long)
+stop_short_param = float(stop_short)
+hard_stop_long_param = float(hard_stop_long)
+hard_stop_short_param = float(hard_stop_short)
+leverage_param = float(leverage)
+daily_exit_param = daily_exit.lower() == "true"
+show_figs_param = show_figs.lower() == "true"
+use_live_data_param = use_live_data.lower() == "true"
 
 print(
-    f"Params: L={max_long} S={max_short} P={period} SL={stop_long} SS={stop_short} HL={hard_stop_long} HS={hard_stop_short} Lev={leverage} Sig={signal} DX={daily_exit}"
+    f"Params: L={max_long_param} S={max_short_param} P={period_param} SL={stop_long_param} SS={stop_short_param} HL={hard_stop_long_param} HS={hard_stop_short_param} Lev={leverage_param} Sig={signal} DX={daily_exit_param}"
 )
 
 sector_etfs = [
@@ -112,20 +116,48 @@ signal_expr = signals_map[signal]
 
 gates_map = {
     "mom12m-andor-6m": [
-        (pl.col('mom12m') > 0) | (pl.col('mom6m') > 0),
-        (pl.col('mom12m') < 0) & (pl.col('mom6m') < 0)
+        (pl.col("mom12m") > 0) | (pl.col("mom6m") > 0),
+        (pl.col("mom12m") < 0) & (pl.col("mom6m") < 0),
     ],
-    'ema50d': [
-        pl.col('ema50d') < pl.col('close'),
-        pl.col('ema50d') > pl.col('close'),
-    ]
+    "ema50d": [
+        pl.col("ema50d") < pl.col("close"),
+        pl.col("ema50d") > pl.col("close"),
+    ],
 }
 gate_expr = gates_map[gate]
 
-df = (
+if use_live_data_param:
+    from yf import yf_download
+    from tempfile import NamedTemporaryFile
+
+    with NamedTemporaryFile() as f:
+        yf_download(
+            [
+                "SPY",
+                "XLC",
+                "XLE",
+                "XLF",
+                "XLI",
+                "XLK",
+                "XLP",
+                "XLRE",
+                "XLU",
+                "XLV",
+                "XLY",
+                "XLB",
+                "IEF",
+            ],
+            f.name,
+            "ytd",
+        )
+        df = pl.read_parquet(f.name)
+else:
     # uv run yf.py SPY XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY XLB IEF --output yf.parquet
-    pl.read_parquet("yf.parquet")
-    .filter(pl.col("symbol").is_in(sector_etfs))
+    df = pl.read_parquet("yf.parquet")
+
+
+df = (
+    df.filter(pl.col("symbol").is_in(sector_etfs))
     .select(
         date=pl.col("ts").dt.date(),
         symbol=pl.col("symbol"),
@@ -160,7 +192,7 @@ df = (
             for n in [1, 2, 3, 6, 11, 12]
         },
         sma50d=pl.col("close").rolling_mean(50).over("symbol"),
-        ema50d=pl.col("close").ewm_mean(span=50,adjust=True).over("symbol"),
+        ema50d=pl.col("close").ewm_mean(span=50, adjust=True).over("symbol"),
     )
     .with_columns(score=signal_expr)
     .with_columns(
@@ -193,7 +225,7 @@ df_supp = (
 df_tlt = df_supp.filter(pl.col("symbol") == "IEF")
 
 portfolio, trades, perf_frag = [], [], []
-cash, portfolio_equity, days_since_rebalance = 1.0, 1.0, period
+cash, portfolio_equity, days_since_rebalance = 1.0, 1.0, period_param
 
 for day in tqdm(df["date"].unique().sort().to_list()):
     df_now, df_supp_now = df.filter(pl.col("date") == day), df_supp.filter(
@@ -228,8 +260,12 @@ for day in tqdm(df["date"].unique().sort().to_list()):
                     pos.get("entry_low_ex", pos["last_close"]), low
                 )
                 stop_p = max(
-                    entry_high * (1 - stop_long) if stop_long > 0 else -1,
-                    entry_price * (1 - hard_stop_long) if hard_stop_long > 0 else -1,
+                    entry_high * (1 - stop_long_param) if stop_long_param > 0 else -1,
+                    (
+                        entry_price * (1 - hard_stop_long_param)
+                        if hard_stop_long_param > 0
+                        else -1
+                    ),
                 )
                 if stop_p > 0 and low <= stop_p:
                     exit_p = min(open_p, stop_p)
@@ -246,7 +282,7 @@ for day in tqdm(df["date"].unique().sort().to_list()):
                             "profit": (exit_p / entry_price) - 1,
                             "mfe": (entry_high / entry_price) - 1,
                             "mae": (pos["entry_low_ex"] / entry_price) - 1,
-                            "leverage": leverage,
+                            "leverage": leverage_param,
                             "reason": "stop",
                         }
                     )
@@ -257,10 +293,14 @@ for day in tqdm(df["date"].unique().sort().to_list()):
                     pos.get("entry_high_ex", pos["last_close"]), high
                 )
                 stop_p = min(
-                    entry_low * (1 + stop_short) if stop_short > 0 else float("inf"),
                     (
-                        entry_price * (1 + hard_stop_short)
-                        if hard_stop_short > 0
+                        entry_low * (1 + stop_short_param)
+                        if stop_short_param > 0
+                        else float("inf")
+                    ),
+                    (
+                        entry_price * (1 + hard_stop_short_param)
+                        if hard_stop_short_param > 0
                         else float("inf")
                     ),
                 )
@@ -279,7 +319,7 @@ for day in tqdm(df["date"].unique().sort().to_list()):
                             "profit": 1 - (exit_p / entry_price),
                             "mfe": 1 - (entry_low / entry_price),
                             "mae": 1 - (pos["entry_high_ex"] / entry_price),
-                            "leverage": leverage,
+                            "leverage": leverage_param,
                             "reason": "stop",
                         }
                     )
@@ -290,7 +330,7 @@ for day in tqdm(df["date"].unique().sort().to_list()):
             pos["last_close"] = row["close"][0]
             new_portfolio.append(pos)
     portfolio = new_portfolio
-    if daily_exit:
+    if daily_exit_param:
         long_bkt = (
             df_now.filter(pl.col("long_rank").is_null().not_())
             .sort("long_rank")["symbol"]
@@ -314,9 +354,8 @@ for day in tqdm(df["date"].unique().sort().to_list()):
             if orig_sym is None:
                 orig_sym = pos["symbol"]
             still_valid = (
-                (pos["type"] == "long" and orig_sym in long_bkt[:max_long]) or
-                (pos["type"] == "short" and orig_sym in short_bkt[:max_short])
-            )
+                pos["type"] == "long" and orig_sym in long_bkt[:max_long_param]
+            ) or (pos["type"] == "short" and orig_sym in short_bkt[:max_short_param])
             if still_valid:
                 new_portfolio.append(pos)
             else:
@@ -325,22 +364,36 @@ for day in tqdm(df["date"].unique().sort().to_list()):
                     row = df_supp_now.filter(pl.col("symbol") == pos["symbol"])
                 cp = row["close"][0] if len(row) > 0 else pos["last_close"]
                 cash += pos["shares"] * cp
-                trades.append({
-                    "open_date": pos["open_date"],
-                    "close_date": day,
-                    "etf": pos["symbol"],
-                    "direction": pos["type"],
-                    "shares": pos["shares"],
-                    "entry_price": pos["entry_price"],
-                    "close_price": cp,
-                    "profit": ((cp / pos["entry_price"]) - 1 if pos["type"] == "long" else 1 - (cp / pos["entry_price"])),
-                    "mfe": ((pos.get("entry_high", cp) / pos["entry_price"]) - 1 if pos["type"] == "long" else 1 - (pos.get("entry_low", cp) / pos["entry_price"])),
-                    "mae": ((pos.get("entry_low_ex", cp) / pos["entry_price"]) - 1 if pos["type"] == "long" else 1 - (pos.get("entry_high_ex", cp) / pos["entry_price"])),
-                    "leverage": leverage,
-                    "reason": "daily_exit",
-                })
+                trades.append(
+                    {
+                        "open_date": pos["open_date"],
+                        "close_date": day,
+                        "etf": pos["symbol"],
+                        "direction": pos["type"],
+                        "shares": pos["shares"],
+                        "entry_price": pos["entry_price"],
+                        "close_price": cp,
+                        "profit": (
+                            (cp / pos["entry_price"]) - 1
+                            if pos["type"] == "long"
+                            else 1 - (cp / pos["entry_price"])
+                        ),
+                        "mfe": (
+                            (pos.get("entry_high", cp) / pos["entry_price"]) - 1
+                            if pos["type"] == "long"
+                            else 1 - (pos.get("entry_low", cp) / pos["entry_price"])
+                        ),
+                        "mae": (
+                            (pos.get("entry_low_ex", cp) / pos["entry_price"]) - 1
+                            if pos["type"] == "long"
+                            else 1 - (pos.get("entry_high_ex", cp) / pos["entry_price"])
+                        ),
+                        "leverage": leverage_param,
+                        "reason": "daily_exit",
+                    }
+                )
         portfolio = new_portfolio
-    today_value = cash + sum(p["shares"] * p["last_close" ] for p in portfolio)
+    today_value = cash + sum(p["shares"] * p["last_close"] for p in portfolio)
     ret = (today_value / portfolio_equity) - 1.0 if portfolio_equity > 0 else 0.0
     portfolio_equity = today_value
     perf_frag.append(pl.DataFrame({"date": [day], "ret": [ret]}))
@@ -354,10 +407,10 @@ for day in tqdm(df["date"].unique().sort().to_list()):
         .sort("short_rank")["symbol"]
         .to_list()
     )
-    bkt_len = len(long_bkt[:max_long]) + len(short_bkt[:max_short])
+    bkt_len = len(long_bkt[:max_long_param]) + len(short_bkt[:max_short_param])
     yd_folio = portfolio.copy()
 
-    if days_since_rebalance < period:
+    if days_since_rebalance < period_param:
         for pos in yd_folio:
             pass  # kept
         days_since_rebalance += 1
@@ -393,7 +446,7 @@ for day in tqdm(df["date"].unique().sort().to_list()):
                         if pos["type"] == "long"
                         else 1 - (pos.get("entry_high_ex", cp) / pos["entry_price"])
                     ),
-                    "leverage": leverage,
+                    "leverage": leverage_param,
                     "reason": "rebalance",
                 }
             )
@@ -402,15 +455,15 @@ for day in tqdm(df["date"].unique().sort().to_list()):
         if bkt_len > 0:
             close_dict = dict(df_now[["symbol", "close"]].iter_rows(named=False))
             var_dict = dict(df_now[["symbol", "var"]].iter_rows(named=False))
-            selected = long_bkt[:max_long] + short_bkt[:max_short]
+            selected = long_bkt[:max_long_param] + short_bkt[:max_short_param]
             inv_vols = {
                 s: 1.0 / (var_dict.get(s, 1e-6) ** 0.5) if var_dict.get(s, 0) > 0 else 0
                 for s in selected
             }
             tiv = sum(inv_vols.values())
             cash = portfolio_equity
-            for s in long_bkt[:max_long]:
-                w = (inv_vols[s] / tiv if tiv > 0 else 1.0 / bkt_len) * leverage
+            for s in long_bkt[:max_long_param]:
+                w = (inv_vols[s] / tiv if tiv > 0 else 1.0 / bkt_len) * leverage_param
                 bs = etf_mapping.get(s, s)
                 row_s = df_supp_now.filter(pl.col("symbol") == bs)
                 bc = row_s["close"][0] if len(row_s) > 0 else close_dict[s]
@@ -428,8 +481,8 @@ for day in tqdm(df["date"].unique().sort().to_list()):
                     }
                 )
                 cash -= sh * bc
-            for s in short_bkt[:max_short]:
-                w = (inv_vols[s] / tiv if tiv > 0 else 1.0 / bkt_len) * leverage
+            for s in short_bkt[:max_short_param]:
+                w = (inv_vols[s] / tiv if tiv > 0 else 1.0 / bkt_len) * leverage_param
                 bs = etf_mapping.get(s, s)
                 row_s = df_supp_now.filter(pl.col("symbol") == bs)
                 bc = row_s["close"][0] if len(row_s) > 0 else close_dict[s]
@@ -505,7 +558,8 @@ fig, ax = plt.subplots(figsize=(15, 7))
 ax.plot(pdf["date"], pdf["cum"], label="Strategy")
 ax.plot(pdf["date"], pdf["spy"], label="SPY", color="black", linestyle="--")
 plt.savefig(f"result_{variant_name}.png")
-plt.show()
+if show_figs_param:
+    plt.show()
 
 
 def calc_stats(cum, rets, spy_rets):
@@ -537,6 +591,25 @@ half_kelly = kelly / 2
 
 tdf = pd.DataFrame(trades)
 wr = len(tdf[tdf["profit"] > 0]) / len(tdf) if len(tdf) > 0 else 0
+
+# MTD stats
+last_date_local = df["date"].max()
+last_month = last_date_local.month
+last_year = last_date_local.year
+mtd_perf = df_perf.filter(
+    (pl.col("date").dt.month() == last_month) & (pl.col("date").dt.year() == last_year)
+)
+if len(mtd_perf) > 0:
+    mtd_pnl = (mtd_perf["ret"] + 1).product() - 1
+    # Annualized MTD return using trading days (approx 252 per year)
+    num_trading_days_mtd = len(mtd_perf)
+    mtd_cagr = (
+        (1 + mtd_pnl) ** (252 / num_trading_days_mtd) - 1
+        if num_trading_days_mtd > 0
+        else 0
+    )
+    print(f"MTD PnL: {mtd_pnl:.2%}, MTD CAGR: {mtd_cagr:.2%}")
+
 print(
     f"SUMMARY: CAGR={c:.2%} ({c_spy:.2%}), MDD={m:.2%} ({m_spy:.2%}), Sharpe={s:.2f}, Sortino={sortino:.2f} ({sortino_spy:.2f}), IR={i:.2f}, WinRate={wr:.2%}, Kelly={kelly:.2f}, Half-Kelly={half_kelly:.2f}"
 )
@@ -546,5 +619,123 @@ sb.glue("maxdd", float(m))
 sb.glue("sortino", float(sortino))
 sb.glue("sharpe", float(s))
 sb.glue("win_rate", float(wr))
+
+# %%
+# Latest Portfolio
+last_date = df["date"].max()
+df_last = df.filter(pl.col("date") == last_date)
+
+long_bkt = (
+    df_last.filter(pl.col("long_rank").is_null().not_())
+    .sort("long_rank")["symbol"]
+    .to_list()
+)
+short_bkt = (
+    df_last.filter(pl.col("short_rank").is_null().not_())
+    .sort("short_rank")["symbol"]
+    .to_list()
+)
+
+print(f"Latest Date: {last_date}")
+if days_since_rebalance == 0:
+    print("*" * 40)
+    print("NOTE: TODAY IS A REBALANCE DAY")
+    print("*" * 40)
+else:
+    print(f"Trading days since last rebalance: {days_since_rebalance}")
+    days_to_rebalance = period_param - days_since_rebalance
+    # Estimate next rebalance date using business days
+    next_rebalance_date = pd.to_datetime(last_date) + pd.offsets.BDay(days_to_rebalance)
+    print(
+        f"Next rebalance in {days_to_rebalance} trading days (approx. {next_rebalance_date.date()})"
+    )
+
+selected = long_bkt[:max_long_param] + short_bkt[:max_short_param]
+if len(selected) > 0:
+    var_dict = dict(df_last[["symbol", "var"]].iter_rows(named=False))
+    inv_vols = {
+        s: 1.0 / (var_dict.get(s, 1e-6) ** 0.5) if var_dict.get(s, 0) > 0 else 0
+        for s in selected
+    }
+    tiv = sum(inv_vols.values())
+
+    rebalance_data = []
+    target_cash_w = 1.0
+
+    # Longs
+    for s in long_bkt[:max_long_param]:
+        w = (inv_vols[s] / tiv if tiv > 0 else 1.0 / len(selected)) * leverage_param
+        target_cash_w -= w
+        bs = etf_mapping.get(s, s)
+        row_s = df_supp.filter((pl.col("date") == last_date) & (pl.col("symbol") == bs))
+        if len(row_s) == 0:
+            row_s = df_last.filter(pl.col("symbol") == bs)
+
+        cp = row_s["close"][0]
+        st = cp * (1 - stop_long_param) if stop_long_param > 0 else 0
+        hst = cp * (1 - hard_stop_long_param) if hard_stop_long_param > 0 else 0
+        stop_p = max(st, hst)
+
+        rebalance_data.append(
+            {
+                "Symbol": bs,
+                "Type": "LONG",
+                "Weight": f"{w:.2%}",
+                "Price": f"{cp:.2f}",
+                "Stop": f"{stop_p:.2f}",
+                "Limit": f"{(stop_p/cp - 1):.2%}" if cp > 0 else "N/A",
+            }
+        )
+
+    # Shorts
+    for s in short_bkt[:max_short_param]:
+        w = (inv_vols[s] / tiv if tiv > 0 else 1.0 / len(selected)) * leverage_param
+        target_cash_w += w
+        bs = etf_mapping.get(s, s)
+        row_s = df_supp.filter((pl.col("date") == last_date) & (pl.col("symbol") == bs))
+        if len(row_s) == 0:
+            row_s = df_last.filter(pl.col("symbol") == bs)
+
+        cp = row_s["close"][0]
+        st = cp * (1 + stop_short_param) if stop_short_param > 0 else float("inf")
+        hst = (
+            cp * (1 + hard_stop_short_param)
+            if hard_stop_short_param > 0
+            else float("inf")
+        )
+        stop_p = min(st, hst)
+
+        rebalance_data.append(
+            {
+                "Symbol": bs,
+                "Type": "SHORT",
+                "Weight": f"{w:.2%}",
+                "Price": f"{cp:.2f}",
+                "Stop": f"{stop_p:.2f}",
+                "Limit": f"{(stop_p/cp - 1):.2%}" if cp > 0 else "N/A",
+            }
+        )
+
+    if target_cash_w > 0:
+        row_t = df_supp.filter(
+            (pl.col("date") == last_date) & (pl.col("symbol") == "IEF")
+        )
+        if len(row_t) > 0:
+            cp = row_t["close"][0]
+            rebalance_data.append(
+                {
+                    "Symbol": "IEF",
+                    "Type": "LONG",
+                    "Weight": f"{target_cash_w:.2%}",
+                    "Price": f"{cp:.2f}",
+                    "Stop": "N/A",
+                    "Limit": "N/A",
+                }
+            )
+
+    print("\nTarget Portfolio (as if rebalancing today):")
+    print(pd.DataFrame(rebalance_data).to_string(index=False))
+else:
+    print("No symbols selected for portfolio.")
 
 # %%

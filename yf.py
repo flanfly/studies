@@ -14,7 +14,7 @@ l.basicConfig(
 )
 
 
-def yf_download(tickers: list[str], output: str):
+def yf_download(tickers: list[str], output: str, period: str = "max"):
     with open(output, "wb") as fd:
         writer = None
         for t in tqdm(tickers, desc="downloading data", unit="ticker"):
@@ -22,7 +22,7 @@ def yf_download(tickers: list[str], output: str):
 
             pddf = yf.download(
                 t,
-                period="max",
+                period=period,
                 interval="1d",
                 multi_level_index=False,
                 auto_adjust=True,
