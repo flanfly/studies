@@ -50,41 +50,84 @@ PARAMETER_SETS="
 
 # best number of long and long stops
 PARAMETER_SETS="""
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 2 --max_short 0 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 2 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
 
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 3 --max_short 0 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 3 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
 
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 0 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 *
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1 *
 
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 5 --max_short 0 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 5 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
 
-  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 (*)
-  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1 (*)
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
 
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
 
-  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 5 --max_short 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
 
-  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 2 --max_short 0 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 2 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
 
-  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 3 --max_short 0 --hard_stop_long 1 --hard_stop_short 1
-  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 3 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit False --leverage 1
+
+
+
+
+
+
+
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 2 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 3 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1 *
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 5 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1 (*)
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 1 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 4 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 0.5 --stop_short 0.05 --max_long 5 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 2 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 2 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 3 --max_short 0 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
+  --signal mom12-1m-a --period 21 --stop_long 1 --stop_short 1 --max_long 3 --max_short 1 --hard_stop_long 1 --hard_stop_short 1 --daily_exit True --leverage 1
 """
 
 # Trails: number short and stops: 0.05, 1-2 short, one or four long
@@ -136,28 +179,42 @@ PARAMETER_SETS="""
 """
 
 PARAMETER_SETS="""
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 1
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 1.5
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2.5
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 3
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 1 --daily_exit False
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 1.5 --daily_exit False
+
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2 --daily_exit False
+
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2.5 --daily_exit False
+
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 3 --daily_exit False
+
 """
 
 PARAMETER_SETS="""
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2 --daily_exit False
 
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2
-  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2
-  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2 --daily_exit False
 
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.5 --hard_stop_short 1 --leverage 2
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.4 --hard_stop_short 1 --leverage 2
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.3 --hard_stop_short 1 --leverage 2
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.2 --hard_stop_short 1 --leverage 2
+  --signal mom12-1m-a --period 21 --stop_long 0.3 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2 --daily_exit False
 
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.1 --hard_stop_short 1 --leverage 2 *
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.1 --hard_stop_short 1 --leverage 2.5
-  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.1 --hard_stop_short 1 --leverage 3
+  --signal mom12-1m-a --period 21 --stop_long 0.4 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 1 --hard_stop_short 1 --leverage 2 --daily_exit False
+
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.5 --hard_stop_short 1 --leverage 2 --daily_exit False
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.4 --hard_stop_short 1 --leverage 2 --daily_exit False
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.3 --hard_stop_short 1 --leverage 2 --daily_exit False
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.2 --hard_stop_short 1 --leverage 2 --daily_exit False
+
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.1 --hard_stop_short 1 --leverage 2 --daily_exit False
+ *
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.1 --hard_stop_short 1 --leverage 2.5 --daily_exit False
+
+  --signal mom12-1m-a --period 21 --stop_long 0.2 --stop_short 0.05 --max_long 4 --max_short 2 --hard_stop_long 0.1 --hard_stop_short 1 --leverage 3 --daily_exit False
+
 """
 
 OUTPUT_FILE="sector-rotation.trail.csv"

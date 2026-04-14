@@ -14,17 +14,19 @@
 # ---
 
 # %% editable=true slideshow={"slide_type": ""} tags=["parameters"]
-max_long = "2"
+max_long = "4"
 max_short = "1"
-period = "30"
+period = "21"
 stop_long = "0.5"
-stop_short = "0.3"
-hard_stop_long = "0.05"
-hard_stop_short = "0.05"
-leverage = "1.0"
+stop_short = "0.05"
+hard_stop_long = "1"
+hard_stop_short = "1"
+leverage = "2.5"
 # mom1m, mom2m, mom3m, mom6m, mom12m, mom12-1m-a, mom12-1m-b
 signal = "mom12-1m-a"
+gate = "mom12m-andor-6m"
 variant_name = "default"
+daily_exit = "True"
 
 # %%
 import polars as pl
@@ -43,9 +45,10 @@ stop_short = float(stop_short)
 hard_stop_long = float(hard_stop_long)
 hard_stop_short = float(hard_stop_short)
 leverage = float(leverage)
+daily_exit = daily_exit.lower() == "true"
 
 print(
-    f"Params: L={max_long} S={max_short} P={period} SL={stop_long} SS={stop_short} HL={hard_stop_long} HS={hard_stop_short} Lev={leverage} Sig={signal}"
+    f"Params: L={max_long} S={max_short} P={period} SL={stop_long} SS={stop_short} HL={hard_stop_long} HS={hard_stop_short} Lev={leverage} Sig={signal} DX={daily_exit}"
 )
 
 sector_etfs = [
@@ -105,7 +108,19 @@ signals_map = {
     "mom12-1m-a": pl.col("mom12m") - pl.col("mom1m"),
     "mom12-1m-b": pl.col("mom11m").shift(21).over("symbol"),
 }
-expr = signals_map[signal]
+signal_expr = signals_map[signal]
+
+gates_map = {
+    "mom12m-andor-6m": [
+        (pl.col('mom12m') > 0) | (pl.col('mom6m') > 0),
+        (pl.col('mom12m') < 0) & (pl.col('mom6m') < 0)
+    ],
+    'ema50d': [
+        pl.col('ema50d') < pl.col('close'),
+        pl.col('ema50d') > pl.col('close'),
+    ]
+}
+gate_expr = gates_map[gate]
 
 df = (
     # uv run yf.py SPY XLC XLE XLF XLI XLK XLP XLRE XLU XLV XLY XLB IEF --output yf.parquet
@@ -145,15 +160,16 @@ df = (
             for n in [1, 2, 3, 6, 11, 12]
         },
         sma50d=pl.col("close").rolling_mean(50).over("symbol"),
+        ema50d=pl.col("close").ewm_mean(span=50,adjust=True).over("symbol"),
     )
-    .with_columns(score=expr)
+    .with_columns(score=signal_expr)
     .with_columns(
-        long_rank=pl.when((pl.col("mom12m") > 0) | (pl.col("mom6m") > 0))
+        long_rank=pl.when(gate_expr[0])
         .then(
             pl.col("score").rank(descending=True).over("date") / pl.len().over("date")
         )
         .otherwise(None),
-        short_rank=pl.when((pl.col("mom6m") < 0) & (pl.col("mom12m") < 0))
+        short_rank=pl.when(gate_expr[1])
         .then(
             pl.col("score").rank(descending=False).over("date") / pl.len().over("date")
         )
@@ -274,11 +290,60 @@ for day in tqdm(df["date"].unique().sort().to_list()):
             pos["last_close"] = row["close"][0]
             new_portfolio.append(pos)
     portfolio = new_portfolio
-    today_value = cash + sum(p["shares"] * p["last_close"] for p in portfolio)
+    if daily_exit:
+        long_bkt = (
+            df_now.filter(pl.col("long_rank").is_null().not_())
+            .sort("long_rank")["symbol"]
+            .to_list()
+        )
+        short_bkt = (
+            df_now.filter(pl.col("short_rank").is_null().not_())
+            .sort("short_rank")["symbol"]
+            .to_list()
+        )
+        new_portfolio = []
+        for pos in portfolio:
+            if pos["symbol"] == "IEF":
+                new_portfolio.append(pos)
+                continue
+            orig_sym = None
+            for s, mapped in etf_mapping.items():
+                if mapped == pos["symbol"]:
+                    orig_sym = s
+                    break
+            if orig_sym is None:
+                orig_sym = pos["symbol"]
+            still_valid = (
+                (pos["type"] == "long" and orig_sym in long_bkt[:max_long]) or
+                (pos["type"] == "short" and orig_sym in short_bkt[:max_short])
+            )
+            if still_valid:
+                new_portfolio.append(pos)
+            else:
+                row = df_now.filter(pl.col("symbol") == orig_sym)
+                if len(row) == 0 and pos["symbol"] in all_needed_syms:
+                    row = df_supp_now.filter(pl.col("symbol") == pos["symbol"])
+                cp = row["close"][0] if len(row) > 0 else pos["last_close"]
+                cash += pos["shares"] * cp
+                trades.append({
+                    "open_date": pos["open_date"],
+                    "close_date": day,
+                    "etf": pos["symbol"],
+                    "direction": pos["type"],
+                    "shares": pos["shares"],
+                    "entry_price": pos["entry_price"],
+                    "close_price": cp,
+                    "profit": ((cp / pos["entry_price"]) - 1 if pos["type"] == "long" else 1 - (cp / pos["entry_price"])),
+                    "mfe": ((pos.get("entry_high", cp) / pos["entry_price"]) - 1 if pos["type"] == "long" else 1 - (pos.get("entry_low", cp) / pos["entry_price"])),
+                    "mae": ((pos.get("entry_low_ex", cp) / pos["entry_price"]) - 1 if pos["type"] == "long" else 1 - (pos.get("entry_high_ex", cp) / pos["entry_price"])),
+                    "leverage": leverage,
+                    "reason": "daily_exit",
+                })
+        portfolio = new_portfolio
+    today_value = cash + sum(p["shares"] * p["last_close" ] for p in portfolio)
     ret = (today_value / portfolio_equity) - 1.0 if portfolio_equity > 0 else 0.0
     portfolio_equity = today_value
     perf_frag.append(pl.DataFrame({"date": [day], "ret": [ret]}))
-
     long_bkt = (
         df_now.filter(pl.col("long_rank").is_null().not_())
         .sort("long_rank")["symbol"]
@@ -440,7 +505,7 @@ fig, ax = plt.subplots(figsize=(15, 7))
 ax.plot(pdf["date"], pdf["cum"], label="Strategy")
 ax.plot(pdf["date"], pdf["spy"], label="SPY", color="black", linestyle="--")
 plt.savefig(f"result_{variant_name}.png")
-plt.close()
+plt.show()
 
 
 def calc_stats(cum, rets, spy_rets):
@@ -459,10 +524,21 @@ def calc_stats(cum, rets, spy_rets):
 
 
 c, m, s, i, sortino = calc_stats(pdf["cum"], pdf["ret"], pdf["spy_ret"])
+c_spy, m_spy, s_spy, i_spy, sortino_spy = calc_stats(
+    pdf["spy"], pdf["spy_ret"], pdf["spy_ret"]
+)
+
+# Kelly Criterion
+# k = (mu - r) / sigma^2. Assuming r=0.
+mu = pdf["ret"].mean() * 252
+sigma = pdf["ret"].std() * np.sqrt(252)
+kelly = mu / (sigma**2) if sigma > 0 else 0
+half_kelly = kelly / 2
+
 tdf = pd.DataFrame(trades)
 wr = len(tdf[tdf["profit"] > 0]) / len(tdf) if len(tdf) > 0 else 0
 print(
-    f"SUMMARY: CAGR={c:.2%}, MDD={m:.2%}, Sharpe={s:.2f}, Sortino={sortino:.2f}, IR={i:.2f}, WinRate={wr:.2%}"
+    f"SUMMARY: CAGR={c:.2%} ({c_spy:.2%}), MDD={m:.2%} ({m_spy:.2%}), Sharpe={s:.2f}, Sortino={sortino:.2f} ({sortino_spy:.2f}), IR={i:.2f}, WinRate={wr:.2%}, Kelly={kelly:.2f}, Half-Kelly={half_kelly:.2f}"
 )
 
 sb.glue("cagr", float(c))
@@ -470,3 +546,5 @@ sb.glue("maxdd", float(m))
 sb.glue("sortino", float(sortino))
 sb.glue("sharpe", float(s))
 sb.glue("win_rate", float(wr))
+
+# %%
