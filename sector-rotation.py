@@ -21,16 +21,16 @@ stop_long = "0.5"
 stop_short = "0.05"
 hard_stop_long = "1"
 hard_stop_short = "1"
-leverage = "2.5"
+leverage = "2"
 # mom1m, mom2m, mom3m, mom6m, mom12m, mom12-1m-a, mom12-1m-b
 signal = "mom12-1m-a"
 gate = "mom12m-andor-6m"
 variant_name = "default"
-daily_exit = "True"
+daily_exit = "False"
 show_figs = "True"
-use_live_data = "False"
+use_live_data = "True"
 
-# %%
+# %% jupyter={"source_hidden": true}
 import polars as pl
 import numpy as np
 import pandas as pd
@@ -148,7 +148,7 @@ if use_live_data_param:
                 "IEF",
             ],
             f.name,
-            "ytd",
+            "2y",
         )
         df = pl.read_parquet(f.name)
 else:
@@ -620,7 +620,7 @@ sb.glue("sortino", float(sortino))
 sb.glue("sharpe", float(s))
 sb.glue("win_rate", float(wr))
 
-# %%
+# %% jupyter={"source_hidden": true}
 # Latest Portfolio
 last_date = df["date"].max()
 df_last = df.filter(pl.col("date") == last_date)
@@ -737,5 +737,7 @@ if len(selected) > 0:
     print(pd.DataFrame(rebalance_data).to_string(index=False))
 else:
     print("No symbols selected for portfolio.")
+
+# %%
 
 # %%
