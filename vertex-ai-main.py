@@ -132,6 +132,12 @@ with TemporaryDirectory(prefix="vertex-ai-papermill") as dir:
         l.info(f'Metrics: {", ".join(scrapstr)}')
 
         for row in scrapdf.iter_rows(named=True):
+            if "name" not in row or "data" not in row:
+                l.warning(
+                    f"Scrap is missing 'name' or 'data' fields and cannot be reported as a hyperparameter tuning metric: {row}"
+                )
+                continue
+
             name = row["name"]
             value = row["data"]
 
