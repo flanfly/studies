@@ -51,7 +51,7 @@ IMAGE = f"asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies{lates
 
 @dsl.container_component
 def run(
-    results: dsl.Dataset,
+    results: dsl.Output[dsl.Artifact],
 ):
     """Eval crypto momentum strategies."""
 
