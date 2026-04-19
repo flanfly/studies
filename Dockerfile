@@ -7,6 +7,7 @@ run apt-get update && apt-get install -y --no-install-recommends \
     git \
     git-lfs \
     git-crypt \
+    parallel \
     && rm -rf /var/lib/apt/lists/*
 
 copy --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /bin/
