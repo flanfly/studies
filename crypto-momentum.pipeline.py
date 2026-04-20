@@ -60,9 +60,10 @@ def run(
         command=["sh", "-c"],
         args=[
             """
-            crypto-momentum.trail.sh "$0"
+            mkdir -p "$0"
+            sh ./crypto-momentum.trail.sh "$0"
             """,
-            results.uri,  # 0
+            results.path,  # 0
         ],
     )
 
