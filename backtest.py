@@ -164,6 +164,8 @@ class VolumeWeighted(PortfolioModel):
         orders = [Order(pos.symbol, -pos.shares) for pos in folio]
 
         total_vol = sum(vols.get(signal.symbol, 0) for signal in signals)
+        if total_vol <= 0:
+            return orders
 
         orders += [
             Order(
@@ -176,9 +178,22 @@ class VolumeWeighted(PortfolioModel):
             for signal in signals
             if prices.get(signal.symbol, 0) > 0
         ]
-
         return orders
 
+
+class SimpleLeverage(PortfolioModel):
+    def __init__(self, leverage: float, inner: PortfolioModel = EqualWeight()):
+        self.inner = inner
+        self.leverage = leverage
+
+    def __call__(
+        self,
+        df: pl.DataFrame,
+        signals: list[Signal],
+        folio: list[Position],
+        equity: float,
+    ) -> list[Order]:
+        return self.inner(df, signals, folio, equity * self.leverage)
 
 class TopN(PortfolioModel):
     def __init__(self, max_long=5, max_short=5, portfolio_model=None):
