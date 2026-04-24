@@ -637,6 +637,7 @@ class Backtest:
             fig, ax1 = plt.subplots(figsize=(12, 6))
             ax1.plot(history_df["ts"], history_df["equity"], label="Strategy Equity")
             ax1.set_ylabel("Equity")
+            ax1.set_yscale("log")
             ax1.legend(loc="upper left")
 
             if self.benchmark is not None:
@@ -654,5 +655,140 @@ class Backtest:
 
             plt.title("Equity Curve")
             plt.show()
+
+            if self.trades:
+                trades_df = pl.from_dicts([t.__dict__ for t in self.trades])
+                trades_df = trades_df.with_columns(
+                    pnl=(pl.col("exit_price") - pl.col("entry_price")) * pl.col("shares")
+                )
+
+                symbol_stats = trades_df.group_by("symbol").agg(
+                    [
+                        pl.col("pnl").sum().alias("total_pnl"),
+                        pl.col("pnl").count().alias("trade_count"),
+                    ]
+                )
+
+                profitable = (
+                    symbol_stats.filter(pl.col("total_pnl") > 0)
+                    .sort("trade_count", descending=True)
+                    .head(3)
+                )
+                unprofitable = (
+                    symbol_stats.filter(pl.col("total_pnl") <= 0)
+                    .sort("trade_count", descending=True)
+                    .head(3)
+                )
+
+                selected = [
+                    (profitable, "Profitable"),
+                    (unprofitable, "Unprofitable"),
+                ]
+
+                for df_group, group_name in selected:
+                    for sym in df_group["symbol"].to_list():
+                        sym_df = self.df.filter(pl.col(self.symbol_col) == sym).sort(
+                            self.ts_col
+                        )
+                        if sym_df.is_empty():
+                            continue
+
+                        fig, ax = plt.subplots(figsize=(12, 6))
+                        ax.plot(
+                            sym_df[self.ts_col],
+                            sym_df[self.price_col],
+                            label=f"{sym} Price",
+                            alpha=0.6,
+                        )
+
+                        st = trades_df.filter(pl.col("symbol") == sym)
+
+                        # Long trades (shares > 0 at entry, but we need to know if the trade WAS long)
+                        # Actually in our Trades, shares matches the position shares.
+                        long_t = st.filter(pl.col("shares") > 0)
+                        if not long_t.is_empty():
+                            ax.scatter(
+                                long_t["entry_ts"],
+                                long_t["entry_price"],
+                                marker="^",
+                                color="green",
+                                label="Long Entry",
+                                s=100,
+                                zorder=5,
+                            )
+                            ax.scatter(
+                                long_t["exit_ts"],
+                                long_t["exit_price"],
+                                marker="v",
+                                color="red",
+                                label="Long Exit",
+                                s=100,
+                                zorder=5,
+                            )
+
+                        short_t = st.filter(pl.col("shares") < 0)
+                        if not short_t.is_empty():
+                            ax.scatter(
+                                short_t["entry_ts"],
+                                short_t["entry_price"],
+                                marker="v",
+                                color="orange",
+                                label="Short Entry",
+                                s=100,
+                                zorder=5,
+                            )
+                            ax.scatter(
+                                short_t["exit_ts"],
+                                short_t["exit_price"],
+                                marker="^",
+                                color="blue",
+                                label="Short Exit",
+                                s=100,
+                                zorder=5,
+                            )
+
+                        if self.benchmark is not None:
+                            # Re-fetch benchmark data for this symbol's time range
+                            if isinstance(self.benchmark, str):
+                                b_df = self.df.filter(
+                                    pl.col(self.symbol_col) == self.benchmark
+                                )
+                            else:
+                                b_df = self.benchmark
+
+                            b_df = b_df.select(
+                                [
+                                    pl.col(self.ts_col).alias("ts"),
+                                    pl.col(self.price_col).alias("bench_price"),
+                                ]
+                            ).sort("ts")
+
+                            sym_bench = sym_df.join(
+                                b_df, left_on=self.ts_col, right_on="ts", how="left"
+                            )
+                            sym_bench = sym_bench.filter(
+                                pl.col("bench_price").is_not_null()
+                            )
+                            if not sym_bench.is_empty():
+                                bench_vals = sym_bench["bench_price"].to_numpy()
+                                norm_bench = (
+                                    bench_vals
+                                    / bench_vals[0]
+                                    * sym_bench[self.price_col][0]
+                                )
+                                ax.plot(
+                                    sym_bench[self.ts_col],
+                                    norm_bench,
+                                    label="Benchmark (norm)",
+                                    linestyle="--",
+                                    color="gray",
+                                    alpha=0.4,
+                                )
+
+                        ax.set_title(f"{sym} ({group_name}) - Entries & Exits")
+                        ax.set_ylabel("Price")
+                        ax.set_yscale("log")
+                        ax.legend()
+                        plt.show()
 
         return final_report
