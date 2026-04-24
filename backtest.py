@@ -195,6 +195,7 @@ class SimpleLeverage(PortfolioModel):
     ) -> list[Order]:
         return self.inner(df, signals, folio, equity * self.leverage)
 
+
 class TopN(PortfolioModel):
     def __init__(self, max_long=5, max_short=5, portfolio_model=None):
         self.max_long = max_long
@@ -258,11 +259,13 @@ class MaxDrawdown(RiskModel):
             return []
 
         today = df[self.ts_col].max()
+        day_data = df.filter(pl.col(self.ts_col) == today)
         prices = dict(
-            df.filter(pl.col(self.ts_col) == today)
-            .select([self.symbol_col, self.price_col])
-            .iter_rows()
+            day_data.select([self.symbol_col, self.price_col]).iter_rows()
         )
+        # Use low/high columns if available for stop trigger logic
+        lows = dict(day_data.select([self.symbol_col, "low"]).iter_rows()) if "low" in day_data.columns else prices
+        highs = dict(day_data.select([self.symbol_col, "high"]).iter_rows()) if "high" in day_data.columns else prices
 
         orders = []
         for pos in folio:
@@ -271,14 +274,16 @@ class MaxDrawdown(RiskModel):
                 continue
 
             if pos.shares > 0:  # Long
-                if curr_price / pos.open - 1 < -self.absolute:
+                low_price = lows.get(pos.symbol, curr_price)
+                if low_price / pos.open - 1 < -self.absolute:
                     orders.append(Order(pos.symbol, -pos.shares))
-                elif curr_price / pos.high - 1 < -self.trailing:
+                elif low_price / pos.high - 1 < -self.trailing:
                     orders.append(Order(pos.symbol, -pos.shares))
             else:  # Short
-                if 1 - curr_price / pos.open < -self.absolute_short:
+                high_price = highs.get(pos.symbol, curr_price)
+                if 1 - high_price / pos.open < -self.absolute_short:
                     orders.append(Order(pos.symbol, -pos.shares))
-                elif 1 - curr_price / pos.low < -self.trailing_short:
+                elif 1 - high_price / pos.low < -self.trailing_short:
                     orders.append(Order(pos.symbol, -pos.shares))
         return orders
 
@@ -308,6 +313,7 @@ class Backtest:
         portfolio: PortfolioModel = EqualWeight(),
         risk: RiskModel = NoRisk(),
         period=30,
+        fee=0.002,
         initial_equity=1,
         benchmark=None,
         timestamp_col="ts",
@@ -329,6 +335,7 @@ class Backtest:
         self.ts_col = timestamp_col
         self.symbol_col = symbol_col
         self.price_col = price_col
+        self.fee = fee
 
         self.trades: list[Trade] = []
 
@@ -347,58 +354,71 @@ class Backtest:
             prices = dict(
                 day_data.select([self.symbol_col, self.price_col]).iter_rows()
             )
+            highs = dict(day_data.select([self.symbol_col, "high"]).iter_rows()) if "high" in day_data.columns else prices
+            lows = dict(day_data.select([self.symbol_col, "low"]).iter_rows()) if "low" in day_data.columns else prices
 
-            # update equity and high/low for positions
+            # 1. update high/low for positions using current day's extremes
             new_folio = []
             for pos in self.folio:
-                curr_price = prices.get(pos.symbol, pos.open)
-                new_high = max(pos.high, curr_price)
-                new_low = min(pos.low, curr_price)
+                c_high = highs.get(pos.symbol, prices.get(pos.symbol, pos.open))
+                c_low = lows.get(pos.symbol, prices.get(pos.symbol, pos.open))
                 new_folio.append(
                     Position(
                         pos.symbol,
                         pos.shares,
                         pos.open,
                         pos.ts,
-                        new_high,
-                        new_low,
+                        max(pos.high, c_high),
+                        min(pos.low, c_low),
                     )
                 )
             self.folio = new_folio
 
+            day_fees = 0.0
+
+            # 2. Risk Model First (Stops)
+            orders = self.risk(dfnow, self.folio)
+            self.folio, fees = self._execute_orders(self.folio, orders, prices, day)
+            day_fees += fees
+
+            # 3. Portfolio Rebalance
             equity = self.cash + sum(
                 pos.shares * prices.get(pos.symbol, pos.open) for pos in self.folio
             )
-            self.history.append({"ts": day, "equity": equity})
 
             if equity <= 1e-6:
+                print(f"Broke at {day} due to low equity: {equity}")
                 break
 
-            # get the signals from the alpha model
             signals = self.alpha(dfnow)
-
             if last_rebalance is None or (day - last_rebalance).days >= self.period:
                 orders = self.portfolio(dfnow, signals, self.folio, equity)
-                # print(f"Day: {day}, Equity: {equity}, Orders: {len(orders)}")
-                self.folio = self._execute_orders(self.folio, orders, prices, day)
+                self.folio, fees = self._execute_orders(self.folio, orders, prices, day)
+                day_fees += fees
                 last_rebalance = day
 
-            orders = self.risk(dfnow, self.folio)
-            self.folio = self._execute_orders(self.folio, orders, prices, day)
+            # Final equity for the day after all trades and fees
+            equity = self.cash + sum(
+                pos.shares * prices.get(pos.symbol, pos.open) for pos in self.folio
+            )
+            self.history.append({"ts": day, "equity": equity, "fees": day_fees})
 
         return self
 
     def _execute_orders(
         self, folio: list[Position], orders: list[Order], prices: dict, ts: dt.datetime
-    ) -> list[Position]:
+    ) -> Tuple[list[Position], float]:
         new_folio_dict = {pos.symbol: pos for pos in folio}
+        total_fees = 0.0
 
         for order in orders:
             price = prices.get(order.symbol)
             if price is None:
                 continue
 
-            self.cash -= order.shares * price
+            fee = abs(order.shares * price) * self.fee
+            total_fees += fee
+            self.cash -= (order.shares * price + fee)
 
             if order.symbol in new_folio_dict:
                 pos = new_folio_dict[order.symbol]
@@ -471,7 +491,7 @@ class Backtest:
                     new_folio_dict[order.symbol] = Position(
                         order.symbol, order.shares, price, ts, price, price
                     )
-        return list(new_folio_dict.values())
+        return list(new_folio_dict.values()), total_fees
 
     def report(self, plot=False) -> pl.DataFrame:
         if not self.history:
@@ -575,6 +595,7 @@ class Backtest:
                     ((pl.col("equity") / pl.col("equity").cum_max() - 1).min()).alias(
                         "maxdd"
                     ),
+                    pl.col("fees").sum().alias("fees"),
                 ]
             )
             .with_columns(
@@ -592,6 +613,7 @@ class Backtest:
             "cagr",
             "ann_std",
             "maxdd",
+            "fees",
             "mfe",
             "mae",
             "win_rate",
