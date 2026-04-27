@@ -609,7 +609,9 @@ class Backtest:
             trade_yearly = trades_df.group_by("year").agg(
                 [
                     pl.col("mfe").mean().alias("mfe"),
+                    pl.col("mfe").std().alias("mfe_std"),
                     pl.col("mae").mean().alias("mae"),
+                    pl.col("mae").std().alias("mae_std"),
                     ((pl.col("pnl") > 0).sum() / pl.col("pnl").count()).alias(
                         "win_rate"
                     ),
@@ -620,7 +622,9 @@ class Backtest:
                 schema={
                     "year": pl.Int32,
                     "mfe": pl.Float64,
+                    "mfe_std": pl.Float64,
                     "mae": pl.Float64,
+                    "mae_std": pl.Float64,
                     "win_rate": pl.Float64,
                 }
             )
@@ -693,16 +697,26 @@ class Backtest:
             history_df.group_by("year")
             .agg(agg_exprs)
             .with_columns(
-                sharpe=pl.col("ann_return") / pl.col("ann_std"),
-                sortino=pl.col("ann_return") / pl.col("downside_std"),
-                ir=pl.col("active_return_ann") / pl.col("tracking_error"),
+                sharpe=pl.when(pl.col("ann_std") > EPSILON)
+                .then(pl.col("ann_return") / pl.col("ann_std"))
+                .otherwise(pl.lit(None).cast(pl.Float64)),
+                sortino=pl.when(pl.col("downside_std") > EPSILON)
+                .then(pl.col("ann_return") / pl.col("downside_std"))
+                .otherwise(pl.lit(None).cast(pl.Float64)),
+                ir=pl.when(pl.col("tracking_error") > EPSILON)
+                .then(pl.col("active_return_ann") / pl.col("tracking_error"))
+                .otherwise(pl.lit(None).cast(pl.Float64)),
             )
         )
 
         if self.benchmark is not None:
             yearly_stats = yearly_stats.with_columns(
-                bench_sharpe=pl.col("bench_ann_return") / pl.col("bench_ann_std"),
-                bench_sortino=pl.col("bench_ann_return") / pl.col("bench_downside_std"),
+                bench_sharpe=pl.when(pl.col("bench_ann_std") > EPSILON)
+                .then(pl.col("bench_ann_return") / pl.col("bench_ann_std"))
+                .otherwise(pl.lit(None).cast(pl.Float64)),
+                bench_sortino=pl.when(pl.col("bench_downside_std") > EPSILON)
+                .then(pl.col("bench_ann_return") / pl.col("bench_downside_std"))
+                .otherwise(pl.lit(None).cast(pl.Float64)),
             )
 
         final_report = (
@@ -719,7 +733,7 @@ class Backtest:
             strat_report = final_report.select(
                 [pl.col("year"), pl.lit("Strategy").alias("src")] +
                 [pl.col(c) for c in comparison_cols if c in final_report.columns] +
-                [pl.col(c) for c in ["ir", "fees", "mfe", "mae", "win_rate"] if c in final_report.columns]
+                [pl.col(c) for c in ["ir", "fees", "mfe", "mfe_std", "mae", "mae_std", "win_rate"] if c in final_report.columns]
             )
             
             # 2. Benchmark DataFrame

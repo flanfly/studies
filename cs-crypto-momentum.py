@@ -11,12 +11,12 @@
 # - [ ] MDC instead of EMA as trend filter
 
 # %% {"tags": ["parameters"]}
-days_momentum = "30"
-days_holding = "7"
-n_buckets = "5"
+days_momentum = "14"
+days_holding = "10"
+n_buckets = "4"
 ema_fast = "5"
-ema_slow = "50"
-volume_cutoff = "1_000_000"
+ema_slow = "100"
+volume_cutoff = "10_100_000"
 start_date = "2020-01-01"
 
 # %%
@@ -164,8 +164,14 @@ for col in set(res.columns) - {"year", "src"}:
     s = res.filter(pl.col("src") == "Strategy")
     b = res.filter(pl.col("src") == "Benchmark")
 
-    val = s[col].mean() if not s.is_empty() else 0
-    bench_val = b[col].mean() if not b.is_empty() else 0
+    val = s[col].mean() if not s.is_empty() else None
+    bench_val = b[col].mean() if not b.is_empty() else None
+
+    # Handle NaN/Inf for JSON compliance in sb.glue by converting to null (None)
+    if val is not None and (np.isnan(val) or np.isinf(val)):
+        val = None
 
     print(f"{col}: {val} ({bench_val})")
-    sb.glue(col, float(val) if val is not None else 0.0)
+    sb.glue(col, float(val) if val is not None else None)
+
+# %%
