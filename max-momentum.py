@@ -1,3 +1,20 @@
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: tags,-all
+#     cell_metadata_json: true
+#     formats: py:percent,ipynb
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.1
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
 # %% [markdown]
 # # MAX Momentum Strategy Backtest
 # This notebook implements the MAX(N) metric backtest, which ranks assets based on the
@@ -7,9 +24,9 @@
 # %% {"tags": ["parameters"]}
 # 1. PARAMETERS
 n_max = "1"  # N in MAX(N): average of top N daily returns
-lookback_days = "30"  # Lookback window for metric calculation
-holding_days = "7"  # Holding/Rebalance period
-universe_top_n = "300"  # Top n coins by dollar volume (proxy for MCAP)
+lookback_days = "14"  # Lookback window for metric calculation
+holding_days = "1"  # Holding/Rebalance period
+universe_top_n = "50"  # Top n coins by dollar volume (proxy for MCAP)
 start_year = "2023"  # Backtest start year
 
 # %%
