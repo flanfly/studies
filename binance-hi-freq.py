@@ -32,8 +32,8 @@ l.basicConfig(
 )
 
 CONCURRENCY = 10
-KLINE_INTERVAL = KlinesIntervalEnum.INTERVAL_15m.value
-BUFFER_SIZE = (2 * 24 * 60) // 15  # 2 days of 15-minute klines
+KLINE_INTERVAL = KlinesIntervalEnum.INTERVAL_1m.value
+BUFFER_SIZE = 24 * 60  # 24h of 1m candles
 UPDATE_INTERVAL = 60  # seconds
 QUOTE_ASSET = "USDC"
 TELEGRAM_CHAT_ID = "646299665"
@@ -42,6 +42,8 @@ KELLY_FRACTION = 0.354  # half kelly
 HOLDING_MINUTES = 2400
 VOLUME_STDEV_THRESHOLD = 2
 MOMENTUM_THRESHOLD = 0.2
+MOMENTUM_LOOKBACK = 15
+KLINES_BATCH_SIZE = 1000  # max klines per Binance request
 
 
 binance_connector_sem = asyncio.Semaphore(CONCURRENCY)
@@ -99,7 +101,7 @@ async def step(df: pl.DataFrame) -> str | None:
             vol=(pl.col("quote_vol") - pl.col("quote_vol").mean().over("symbol"))
             / pl.col("quote_vol").std().over("symbol"),
             # momentum
-            mom=pl.col("close").pct_change(1).over("symbol"),
+            mom=pl.col("close").pct_change(MOMENTUM_LOOKBACK).over("symbol"),
         )
         .with_columns(
             active=(pl.col("mom") >= MOMENTUM_THRESHOLD)
@@ -120,6 +122,7 @@ async def sell_pair(client: Spot, pair: str) -> None:
 
 async def buy_pair(client: Spot, pair: str, quote_qty: float) -> None:
     l.info(f"Buying ${quote_qty} of {pair}...")
+    return
 
     async with binance_connector_sem:
         try:
@@ -164,9 +167,7 @@ async def run() -> None:
             # fetch latest klines
             pairs = await fetch_trading_pairs(client)
 
-            fut = [fetch_klines(client, now, sym) for sym in pairs]
-            frag = await tqdm.gather(*fut)
-            df = pl.concat([df for df in frag if df is not None])
+            df = await fetch_klines_for_pairs(client, now, pairs)
             latest_kline = df["open_time"].max()
 
             # selling holdings older than HOLDING_MINUTES
@@ -349,27 +350,57 @@ async def fetch_trading_pairs(client: Spot) -> list[str]:
     ]
 
 
-async def fetch_klines(client: Spot, now: dt.datetime, sym: str) -> pl.DataFrame | None:
-    period_s = pd.to_timedelta(KLINE_INTERVAL).total_seconds()
-    start_time = now - dt.timedelta(seconds=period_s * BUFFER_SIZE)
+async def fetch_klines_for_pairs(client: Spot, now: dt.datetime, pairs: list[str]) -> pl.DataFrame:
+    """Fetch klines for all pairs. Every (symbol, batch) request is a parallel task."""
+    interval_s = pd.to_timedelta(KLINE_INTERVAL).total_seconds()
+    earliest = now - dt.timedelta(seconds=interval_s * BUFFER_SIZE)
+    total = BUFFER_SIZE + 1
+    num_batches = (total + KLINES_BATCH_SIZE - 1) // KLINES_BATCH_SIZE
 
-    async with binance_connector_sem:
-        resp = await asyncio.to_thread(
-            client.rest_api.klines,
-            symbol=sym,
-            interval=KLINE_INTERVAL,
-            start_time=int(start_time.timestamp() * 1000),
-            limit=int(BUFFER_SIZE + 1),
-        )
-        raw = resp.data()
+    async def fetch_one(sym: str, b: int) -> tuple[str, list]:
+        offset = b * KLINES_BATCH_SIZE
+        batch_start = earliest + dt.timedelta(seconds=offset * interval_s)
+        batch_limit = min(KLINES_BATCH_SIZE, total - offset)
 
-    if not raw:
-        l.warning(f"Empty klines response for {sym}")
-        return None
+        async with binance_connector_sem:
+            resp = await asyncio.to_thread(
+                client.rest_api.klines,
+                symbol=sym,
+                interval=KLINE_INTERVAL,
+                start_time=int(batch_start.timestamp() * 1000),
+                limit=batch_limit,
+            )
+        return (sym, resp.data())
 
-    return klines_to_df(sym, raw).filter(pl.col('close_time') <= now)
+    tasks = [fetch_one(sym, b) for sym in pairs for b in range(num_batches)]
 
+    results = await tqdm.gather(*tasks)
 
+    # group by symbol, merge batches, deduplicate, convert
+    by_symbol: dict[str, list[list]] = {}
+    for r in results:
+        if r is None:
+            continue
+        sym, klines = r
+        by_symbol.setdefault(sym, []).extend(klines)
+
+    dfs = []
+    for sym, klines in by_symbol.items():
+        if not klines:
+            continue
+        seen: set[int] = set()
+        merged: list[list] = []
+        for k in klines:
+            if k[0] not in seen:
+                seen.add(k[0])
+                merged.append(k)
+        merged.sort(key=lambda k: k[0])
+        dfs.append(klines_to_df(sym, merged))
+
+    if not dfs:
+        return pl.DataFrame()
+
+    return pl.concat(dfs).filter(pl.col("close_time") <= now)
 
 
 if __name__ == "__main__":
