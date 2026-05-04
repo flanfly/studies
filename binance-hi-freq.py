@@ -367,7 +367,9 @@ async def fetch_klines(client: Spot, now: dt.datetime, sym: str) -> pl.DataFrame
         l.warning(f"Empty klines response for {sym}")
         return None
 
-    return klines_to_df(sym, raw)
+    return klines_to_df(sym, raw).filter(pl.col('close_time') <= now)
+
+
 
 
 if __name__ == "__main__":
