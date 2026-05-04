@@ -119,7 +119,7 @@ async def sell_pair(client: Spot, pair: str) -> None:
 
 
 async def buy_pair(client: Spot, pair: str, quote_qty: float) -> None:
-    l.error(f"Buying ${quote_qty} of {pair}...")
+    l.info(f"Buying ${quote_qty} of {pair}...")
 
     async with binance_connector_sem:
         try:
@@ -138,10 +138,10 @@ async def buy_pair(client: Spot, pair: str, quote_qty: float) -> None:
 async def run() -> None:
     # Initialise Spot client from environment credentials
     config = ConfigurationRestAPI(
-        api_key=os.environ["BINANCE_DEMO_KEY"],
-        api_secret=os.environ["BINANCE_DEMO_SECRET"],
-        # base_path=SPOT_REST_API_PROD_URL,
-        base_path="https://demo-api.binance.com",
+        api_key=os.environ["BINANCE_HIFREQ_KEY"],
+        api_secret=os.environ["BINANCE_HIFREQ_SECRET"],
+        base_path=SPOT_REST_API_PROD_URL,
+        # base_path="https://demo-api.binance.com",
     )
     client = Spot(config_rest_api=config)
     bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
@@ -156,7 +156,7 @@ async def run() -> None:
                 l.info(
                     f"Sleeping for {delay.total_seconds():.2f}s until next iteration..."
                 )
-                time.sleep(delay.total_seconds())
+                await asyncio.sleep(delay.total_seconds())
 
         try:
             now = dt.datetime.now(tz=dt.timezone.utc)
@@ -271,30 +271,32 @@ async def fetch_holdings(client: Spot) -> pl.DataFrame:
     fut = [
         fetch_trades(client, f"{r['symbol']}{QUOTE_ASSET}")
         for r in rows
-        if r["free"] > 0
+        if r["free"] > 0 and r["symbol"] != QUOTE_ASSET
     ]
-    if len(fut) == 0:
-        return df
-    trades = await tqdm.gather(*fut)
+    if len(fut) > 0:
+        trades = [t for t in await tqdm.gather(*fut) if t is not None]
+        if len(trades) > 0:
+            return (
+                df.join(
+                    pl.concat(trades)
+                    .filter(pl.col("is_buyer"))
+                    .select(
+                        symbol=pl.col("symbol").str.replace(QUOTE_ASSET, ""),
+                        buy_price=pl.col("price"),
+                        buy_time=pl.col("time"),
+                    ),
+                    on="symbol",
+                    how="left",
+                )
+                .sort(["symbol", "buy_time"])
+                .group_by("symbol")
+                .last()
+            )
 
-    df = (
-        df.join(
-            pl.concat([t for t in trades if t is not None])
-            .filter(pl.col("is_buyer"))
-            .select(
-                symbol=pl.col("symbol").str.replace(QUOTE_ASSET, ""),
-                buy_price=pl.col("price"),
-                buy_time=pl.col("time"),
-            ),
-            on="symbol",
-            how="left",
-        )
-        .sort(["symbol", "buy_time"])
-        .group_by("symbol")
-        .last()
-    )
-
-    return df
+    return df.with_columns(
+        pl.lit(None).cast(pl.Float64).alias("buy_price"),
+        pl.lit(None).cast(pl.Datetime("us", "UTC")).alias("buy_time"),
+    ).sort("symbol")
 
 
 async def fetch_trades(client: Spot, pair: str) -> pl.DataFrame | None:
@@ -348,8 +350,8 @@ async def fetch_trading_pairs(client: Spot) -> list[str]:
 
 
 async def fetch_klines(client: Spot, now: dt.datetime, sym: str) -> pl.DataFrame | None:
-    period_ms = pd.to_timedelta(KLINE_INTERVAL).total_seconds()
-    start_time = now - dt.timedelta(seconds=period_ms * BUFFER_SIZE)
+    period_s = pd.to_timedelta(KLINE_INTERVAL).total_seconds()
+    start_time = now - dt.timedelta(seconds=period_s * BUFFER_SIZE)
 
     async with binance_connector_sem:
         resp = await asyncio.to_thread(
