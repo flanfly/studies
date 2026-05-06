@@ -55,7 +55,7 @@ import backtest as bt
 # Load the daily OHLCV klines for USDT-quoted coins.
 # We alias 'quote_volume' to 'mcap' to serve as our liquidity/market cap filter.
 df = (
-    pl.read_parquet("polarity/data/*.parquet")
+    pl.read_parquet("polarity/latest-data/*.parquet", missing_columns='insert')
     .sort(["asset", "ts"])
     .filter(
         ~pl.col("asset").is_in(
@@ -145,7 +145,22 @@ if not res.is_empty():
 
         if s_val is not None:
             sb.glue(col, float(s_val))
+
+    # Kelly fraction: f* = ann_return / (ann_std²)
+    s_ret = s_df["ann_return"].mean()
+    s_std = s_df["ann_std"].mean()
+    if s_ret is not None and s_std is not None and s_std > 0:
+        kelly = s_ret / (s_std ** 2)
+        half_kelly = kelly / 2
+        print(f"kelly: {_fmt(kelly)}")
+        print(f"half_kelly: {_fmt(half_kelly)}")
+        sb.glue("kelly", float(kelly))
+        sb.glue("half_kelly", float(half_kelly))
+    else:
+        print("kelly: N/A")
+        print("half_kelly: N/A")
 else:
     print("No trades executed.")
 
 # %%
+test.live(equity=10_000)
