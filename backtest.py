@@ -334,7 +334,6 @@ class Backtest:
         risk: RiskModel = NoRisk(),
         period=30,
         fee=0.002,
-        initial_equity=1,
         benchmark=None,
         timestamp_col="ts",
         symbol_col="symbol",
@@ -351,7 +350,6 @@ class Backtest:
         self.portfolio = portfolio
         self.risk = risk
         self.period = period
-        self.initial_equity = initial_equity
         self.benchmark = benchmark
         self.ts_col = timestamp_col
         self.symbol_col = symbol_col
@@ -361,11 +359,12 @@ class Backtest:
 
         self.trades: list[Trade] = []
 
-    def run(self):
+    def run(self, initial_equity=1):
+        self.initial_equity = initial_equity
         days = self.df.select(pl.col(self.ts_col).unique().sort()).to_series().to_list()
 
         self.folio = []
-        self.cash = float(self.initial_equity)
+        self.cash = float(initial_equity)
         last_rebalance = None
         self.history = []
 
@@ -443,6 +442,53 @@ class Backtest:
             })
 
         return self
+
+    # columns: entry ts, symbol, shares (negative for short), exit ts
+    def live(self, equity: float) -> pl.DataFrame:
+        """
+        Compute the portfolio for paper trading using the last day's data.
+        Runs alpha and portfolio construction models with an empty starting
+        folio and returns the resulting positions as a DataFrame.
+
+        Returns
+        -------
+        pl.DataFrame with columns: symbol, shares, entry_ts, exit_ts
+        """
+        today = self.df[self.ts_col].max()
+        dfnow = self.df.filter(pl.col(self.ts_col) <= today).sort(self.ts_col)
+        day_data = self.df.filter(pl.col(self.ts_col) == today)
+        prices = dict(
+            day_data.select([self.symbol_col, self.price_col]).iter_rows()
+        )
+
+        signals = self.alpha(dfnow)
+        orders = self.portfolio(dfnow, signals, [], equity)
+
+        rows = []
+        for order in orders:
+            price = prices.get(order.symbol)
+            if price is not None and abs(order.shares) > EPSILON:
+                exit_ts = today + dt.timedelta(days=self.period)
+                rows.append(
+                    {
+                        "symbol": order.symbol,
+                        "shares": order.shares,
+                        "entry_ts": today,
+                        "exit_ts": exit_ts,
+                    }
+                )
+
+        if not rows:
+            return pl.DataFrame(
+                schema={
+                    "symbol": pl.Utf8,
+                    "shares": pl.Float64,
+                    "entry_ts": pl.Datetime,
+                    "exit_ts": pl.Datetime,
+                }
+            )
+
+        return pl.DataFrame(rows)
 
     def _execute_orders(
         self, folio: list[Position], orders: list[Order], prices: dict, ts: dt.datetime
