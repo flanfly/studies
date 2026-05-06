@@ -452,7 +452,7 @@ class Backtest:
 
         Returns
         -------
-        pl.DataFrame with columns: symbol, shares, entry_ts, exit_ts
+        pl.DataFrame with columns: symbol, shares, entry_ts, exit_ts, entry_price
         """
         today = self.df[self.ts_col].max()
         dfnow = self.df.filter(pl.col(self.ts_col) <= today).sort(self.ts_col)
@@ -475,6 +475,7 @@ class Backtest:
                         "shares": order.shares,
                         "entry_ts": today,
                         "exit_ts": exit_ts,
+                        "entry_price": price,
                     }
                 )
 
@@ -485,6 +486,7 @@ class Backtest:
                     "shares": pl.Float64,
                     "entry_ts": pl.Datetime,
                     "exit_ts": pl.Datetime,
+                    "entry_price": pl.Float64,
                 }
             )
 
