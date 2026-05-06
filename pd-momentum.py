@@ -118,13 +118,12 @@ test = bt.Backtest(
     risk=bt.MaxDrawdown(absolute=0.2,trailing=0.1,symbol_col='asset',price_col='price'),
     period=holding_days_P,
     eager_rebalance=False,
-    initial_equity=1.0,
     symbol_col='asset',
     price_col='price',
     benchmark='btc',
 )
 
-test.run()
+test.run(initial_equity=1.0)
 
 res = test.report(plot='brief')
 

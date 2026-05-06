@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 import time
@@ -7,7 +7,8 @@ import gc
 import os
 import unittest
 
-import pandas as pd
+import polars as pl
+
 import requests  # type: ignore
 import dotenv  # type: ignore
 import argparse
@@ -78,24 +79,44 @@ def get_data(asset: str, metric: str, idtoken: str):
     timestamps = []
     values = []
     for row in body["data"]:
-        timestamps.append(pd.to_datetime(row["closetime"]))
-        values.append(row["closeprice"])
+        timestamps.append(row["closetime"])
+        values.append(
+            float(row["closeprice"]) if row["closeprice"] is not None else None
+        )
 
-    return pd.DataFrame({"timestamp": timestamps, metric: values})
+    if not timestamps:
+        return pl.DataFrame(schema={"timestamp": pl.Utf8, metric: pl.Float64})
+
+    return pl.DataFrame(
+        {"timestamp": timestamps, metric: pl.Series(values, dtype=pl.Float64)}
+    ).with_columns(pl.col("timestamp").str.to_datetime())
 
 
-def save(df: pd.DataFrame, coin: str, output_dir: str):
+def save(df: pl.DataFrame, schema: Dict[str, pl.DataType], coin: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
 
     p = os.path.join(output_dir, f"{coin.lower()}.parquet")
     l.info(f"saving data to {p}...")
 
-    df[df.index.get_level_values("asset") == coin.lower()].to_parquet(
-        p, engine="pyarrow", compression="snappy"
-    )
+    df = df.filter(pl.col("asset") == coin.lower())
+
+    # Add missing metric columns as null, cast existing to schema types
+    metric_schema = {c: t for c, t in schema.items() if c not in ("timestamp", "asset")}
+    for col, ty in metric_schema.items():
+        if col not in df.columns:
+            df = df.with_columns(pl.lit(None).cast(ty).alias(col))
+        else:
+            df = df.with_columns(pl.col(col).cast(ty))
+
+    select_exprs = {
+        "ts": pl.col("timestamp").dt.cast_time_unit("us"),
+        "asset": pl.col("asset"),
+        **{c: pl.col(c) for c in metric_schema},
+    }
+    df.select(**select_exprs).write_parquet(p)
 
 
-def do_work(item: Tuple[str, str], idtoken: str) -> Tuple[str, str, pd.DataFrame]:
+def do_work(item: Tuple[str, str], idtoken: str) -> Tuple[str, str, pl.DataFrame]:
     coin, metric = item
     asset = coin.lower()
 
@@ -106,14 +127,13 @@ def do_work(item: Tuple[str, str], idtoken: str) -> Tuple[str, str, pd.DataFrame
         try:
             df = get_data(asset, metric, idtoken)
             l.debug(f"fetched {len(df)} rows for {asset} {metric}")
-            df["asset"] = asset
-            df.set_index(["timestamp", "asset"], inplace=True)
+            df = df.with_columns(pl.lit(asset).alias("asset"))
 
             return (coin, metric, df)
 
         except Unrecoverable as e:
             l.error(f"unrecoverable error fetching {asset} {metric}: {e}")
-            return (coin, metric, pd.DataFrame())
+            return (coin, metric, pl.DataFrame())
 
         except Exception as e:
             l.error(f"error fetching {asset} {metric}: {e}")
@@ -125,143 +145,184 @@ def do_work(item: Tuple[str, str], idtoken: str) -> Tuple[str, str, pd.DataFrame
 
 class TestDoMerge(unittest.TestCase):
     def test_update_column(self):
-        df1 = pd.DataFrame(
+        df1 = pl.DataFrame(
             {
-                "timestamp": pd.to_datetime(
-                    [
-                        "2023-01-01",
-                        "2023-01-02",
-                        "2023-01-03",
-                        "2023-01-01",
-                        "2023-01-02",
-                        "2023-01-03",
-                    ]
-                ),
+                "timestamp": [
+                    "2023-01-01",
+                    "2023-01-02",
+                    "2023-01-03",
+                    "2023-01-01",
+                    "2023-01-02",
+                    "2023-01-03",
+                ],
                 "asset": ["btc", "btc", "btc", "eth", "eth", "eth"],
                 "metric1": [1.0, 2.0, 3.0, None, None, None],
                 "metric2": [None, None, None, 1.0, 2.0, 3.0],
             }
-        ).set_index(["timestamp", "asset"])
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
-        df2 = pd.DataFrame(
+        df2 = pl.DataFrame(
             {
-                "timestamp": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                 "asset": ["btc", "btc", "btc"],
                 "metric2": [4.0, 5.0, 6.0],
             }
-        ).set_index(["timestamp", "asset"])
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
         merged = do_merge(df1, df2)
-        expected = pd.DataFrame(
-            {
-                "metric1": [1.0, 2.0, 3.0, None, None, None],
-                "metric2": [4.0, 5.0, 6.0, 1.0, 2.0, 3.0],
-            },
-            index=pd.MultiIndex.from_tuples(
-                [
-                    (pd.to_datetime("2023-01-01"), "btc"),
-                    (pd.to_datetime("2023-01-02"), "btc"),
-                    (pd.to_datetime("2023-01-03"), "btc"),
-                    (pd.to_datetime("2023-01-01"), "eth"),
-                    (pd.to_datetime("2023-01-02"), "eth"),
-                    (pd.to_datetime("2023-01-03"), "eth"),
-                ],
-                names=["timestamp", "asset"],
-            ),
-        ).sort_index()
-        pd.testing.assert_frame_equal(merged, expected)
+        expected = (
+            pl.DataFrame(
+                {
+                    "timestamp": [
+                        "2023-01-01",
+                        "2023-01-02",
+                        "2023-01-03",
+                        "2023-01-01",
+                        "2023-01-02",
+                        "2023-01-03",
+                    ],
+                    "asset": ["btc", "btc", "btc", "eth", "eth", "eth"],
+                    "metric1": [1.0, 2.0, 3.0, None, None, None],
+                    "metric2": [4.0, 5.0, 6.0, 1.0, 2.0, 3.0],
+                }
+            )
+            .with_columns(pl.col("timestamp").str.to_datetime())
+            .sort(["timestamp", "asset"])
+        )
+        self.assertTrue(merged.equals(expected))
 
     def test_new_column(self):
-        df1 = pd.DataFrame(
+        df1 = pl.DataFrame(
             {
-                "timestamp": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                 "asset": ["btc", "btc", "btc"],
                 "metric1": [1.0, 2.0, 3.0],
             }
-        ).set_index(["timestamp", "asset"])
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
-        df2 = pd.DataFrame(
+        df2 = pl.DataFrame(
             {
-                "timestamp": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                 "asset": ["btc", "btc", "btc"],
                 "metric2": [4.0, 5.0, 6.0],
             }
-        ).set_index(["timestamp", "asset"])
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
         merged = do_merge(df1, df2)
 
-        expected = pd.DataFrame(
-            {
-                "metric1": [1.0, 2.0, 3.0],
-                "metric2": [4.0, 5.0, 6.0],
-            },
-            index=pd.MultiIndex.from_tuples(
-                [
-                    (pd.to_datetime("2023-01-01"), "btc"),
-                    (pd.to_datetime("2023-01-02"), "btc"),
-                    (pd.to_datetime("2023-01-03"), "btc"),
-                ],
-                names=["timestamp", "asset"],
-            ),
-        ).sort_index()
+        expected = (
+            pl.DataFrame(
+                {
+                    "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
+                    "asset": ["btc", "btc", "btc"],
+                    "metric1": [1.0, 2.0, 3.0],
+                    "metric2": [4.0, 5.0, 6.0],
+                }
+            )
+            .with_columns(pl.col("timestamp").str.to_datetime())
+            .sort(["timestamp", "asset"])
+        )
 
-        pd.testing.assert_frame_equal(merged, expected)
+        self.assertTrue(merged.equals(expected))
 
     def test_new_asset(self):
-        df1 = pd.DataFrame(
+        df1 = pl.DataFrame(
             {
-                "timestamp": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                 "asset": ["btc", "btc", "btc"],
                 "metric1": [1.0, 2.0, 3.0],
             }
-        ).set_index(["timestamp", "asset"])
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
-        df2 = pd.DataFrame(
+        df2 = pl.DataFrame(
             {
-                "timestamp": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                 "asset": ["eth", "eth", "eth"],
                 "metric2": [4.0, 5.0, 6.0],
             }
-        ).set_index(["timestamp", "asset"])
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
         merged = do_merge(df1, df2)
 
-        expected = pd.DataFrame(
-            {
-                "metric1": [1.0, 2.0, 3.0, None, None, None],
-                "metric2": [None, None, None, 4.0, 5.0, 6.0],
-            },
-            index=pd.MultiIndex.from_tuples(
-                [
-                    (pd.to_datetime("2023-01-01"), "btc"),
-                    (pd.to_datetime("2023-01-02"), "btc"),
-                    (pd.to_datetime("2023-01-03"), "btc"),
-                    (pd.to_datetime("2023-01-01"), "eth"),
-                    (pd.to_datetime("2023-01-02"), "eth"),
-                    (pd.to_datetime("2023-01-03"), "eth"),
-                ],
-                names=["timestamp", "asset"],
-            ),
-        ).sort_index()
+        expected = (
+            pl.DataFrame(
+                {
+                    "timestamp": [
+                        "2023-01-01",
+                        "2023-01-02",
+                        "2023-01-03",
+                        "2023-01-01",
+                        "2023-01-02",
+                        "2023-01-03",
+                    ],
+                    "asset": ["btc", "btc", "btc", "eth", "eth", "eth"],
+                    "metric1": [1.0, 2.0, 3.0, None, None, None],
+                    "metric2": [None, None, None, 4.0, 5.0, 6.0],
+                }
+            )
+            .with_columns(pl.col("timestamp").str.to_datetime())
+            .sort(["timestamp", "asset"])
+        )
 
-        pd.testing.assert_frame_equal(merged, expected)
+        self.assertTrue(merged.equals(expected))
 
 
-def do_merge(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
-    if df1 is None or df1.empty:
+def do_merge(df1: pl.DataFrame, df2: pl.DataFrame) -> pl.DataFrame:
+    if df1 is None or df1.is_empty():
         return df2
-    if df2 is None or df2.empty:
+    if df2 is None or df2.is_empty():
         return df1
 
-    adf1, adf2 = df1.align(df2, join="outer", axis=0, copy=False)
+    merged = df1.join(df2, on=["timestamp", "asset"], how="full", suffix="_right")
+
+    # Coalesce suffixed join-key columns back into the originals
+    for key in ("timestamp", "asset"):
+        right_key = f"{key}_right"
+        if right_key in merged.columns:
+            merged = merged.with_columns(
+                pl.col(right_key).fill_null(pl.col(key)).alias(key)
+            ).drop(right_key)
 
     for col in df2.columns:
-        if col not in adf1.columns:
-            adf1[col] = adf2[col]
-        else:
-            adf1[col] = adf2[col].combine_first(adf1[col])
+        if col in ("timestamp", "asset"):
+            continue
+        if col in df1.columns:
+            merged = merged.with_columns(
+                pl.col(f"{col}_right").fill_null(pl.col(col)).alias(col)
+            ).drop(f"{col}_right")
 
-    return adf1.sort_index()
+    return merged.sort(["timestamp", "asset"])
+
+
+def verify_token(idtoken: str) -> bool:
+    if not idtoken:
+        l.error("ID token is required")
+        return False
+
+    headers = {"authorization": "Bearer " + idtoken}
+    resp = requests.get(
+        "https://api.polaritydigital.io/api/getSubscription",
+        headers=headers,
+        timeout=10,
+    )
+
+    if resp.status_code == 401:
+        l.error("Unauthorized: Invalid ID token")
+        return False
+    if resp.status_code != requests.codes.ok:
+        l.error(f"HTTP {resp.status_code}: {resp.text}")
+        return False
+
+    body = resp.json()
+    print(body)
+    if "status" in body and body["status"] != 1:
+        l.error("Error verifying token: %s" % body.get("message", "Unknown error"))
+        return False
+    if "data" not in body or "id" not in body["data"]:
+        l.error("No subscription data found in response")
+        return False
+
+    return True
 
 
 def main():
@@ -300,6 +361,12 @@ def main():
         default="INFO",
         help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
     )
+    parser.add_argument(
+        "--max-coins",
+        type=int,
+        default=0,
+        help="Limit to first N coins (0 = all)",
+    )
     args = parser.parse_args()
 
     l.basicConfig(
@@ -307,22 +374,37 @@ def main():
         filename=args.log_file,
     )
 
+    if not verify_token(args.idtoken):
+        l.error("ID token verification failed. Exiting.")
+        return
+
     with logging_redirect_tqdm():
         l.info("fetching available metrics...")
         metrics_by_coin = available_metrics()
 
-        whitelist = [
-            "price",
-            "udpis",
-            "udpim",
-            "udpil",
-            "tci",
-            "mbi",
-            "mtm",
-            "tcicv",
-            "upprob",
-            "mdccv",
-        ]
+        schema = {
+            "timestamp": pl.Datetime("ns"),
+            "asset": pl.String,
+            "price": pl.Float64,
+            "market_cap": pl.Float64,
+            "udpil": pl.Float64,
+            "udpim": pl.Float64,
+            "udpis": pl.Float64,
+            "mdccv": pl.Float64,
+            "mbi": pl.Float64,
+            "tci": pl.Float64,
+            "mtm": pl.Float64,
+            "mcm": pl.Float64,
+            "tcicv": pl.Float64,
+            "upprob": pl.Float64,
+            "total_volume": pl.Float64,
+            "mean_realized_price_usd_7d": pl.Float64,
+            "mean_realized_price_usd_14d": pl.Float64,
+            "mean_realized_price_usd_30d": pl.Float64,
+            "mean_realized_price_usd_180d": pl.Float64,
+        }
+
+        whitelist = [k for k in schema.keys() if k not in ["timestamp", "asset"]]
         filtered_metrics_by_coin = {
             coin: {m for m in metrics if m in whitelist}
             for coin, metrics in metrics_by_coin.items()
@@ -331,6 +413,16 @@ def main():
 
         l.info(f"writing to {args.output_dir}")
         l.info(f"{len(filtered_metrics_by_coin)} coins found")
+
+        # Limit coins for testing
+        if args.max_coins and args.max_coins > 0:
+            coins_to_process = sorted(filtered_metrics_by_coin.keys())[: args.max_coins]
+            filtered_metrics_by_coin = {
+                c: filtered_metrics_by_coin[c] for c in coins_to_process
+            }
+            l.info(
+                f"limited to {len(filtered_metrics_by_coin)} coins: {coins_to_process}"
+            )
 
         df = None
 
@@ -345,21 +437,16 @@ def main():
                     filtered_metrics_by_coin[coin].remove(metric)
 
                     # merge dataframes
-                    if not df2.empty:
+                    if not df2.is_empty():
                         if df is None:
                             df = df2
                         else:
                             df = do_merge(df, df2)
 
                     if len(filtered_metrics_by_coin[coin]) == 0:
-                        save(df, coin, args.output_dir)
+                        save(df, schema, coin, args.output_dir)
                         del filtered_metrics_by_coin[coin]
-                        df.drop(
-                            index=coin.lower(),
-                            level="asset",
-                            inplace=True,
-                            errors="ignore",
-                        )
+                        df = df.filter(pl.col("asset") != coin.lower())
                         gc.collect()
 
                 except Exception as e:
@@ -368,7 +455,7 @@ def main():
 
         if df is not None:
             for coin in filtered_metrics_by_coin.keys():
-                save(df, coin, args.output_dir)
+                save(df, schema, coin, args.output_dir)
 
 
 if __name__ == "__main__":
