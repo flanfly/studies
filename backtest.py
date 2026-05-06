@@ -604,7 +604,7 @@ class Backtest:
                     )
         return list(new_folio_dict.values()), total_fees
 
-    def report(self, plot=False) -> pl.DataFrame:
+    def report(self, plot='brief') -> pl.DataFrame:
         if not self.history:
             return pl.DataFrame()
 
@@ -802,9 +802,11 @@ class Backtest:
         if plot:
             import matplotlib.pyplot as plt
 
+            show_symbols = (plot == 'full')
+
             # 1. Identify symbols to plot first
             symbols_to_plot = []
-            if self.trades:
+            if show_symbols and self.trades:
                 trades_df = pl.from_dicts([t.__dict__ for t in self.trades])
                 trades_df = trades_df.with_columns(
                     pnl=(pl.col("exit_price") - pl.col("entry_price")) * pl.col("shares")
