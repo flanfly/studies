@@ -40,9 +40,9 @@ listings_df = ro.conversion.rpy2py(crypto2.crypto_listings())
 print(f"   Got {len(listings_df)} coins total.")
 
 # Filter: keep coins added to CMC before the cutoff date
-CUTOFF = "2020-01-01"
+CUTOFF = "2017-01-01"
 listings_df["date_added"] = pd.to_datetime(listings_df["date_added"])
-target_coins = listings_df[listings_df["date_added"] < CUTOFF].copy()[:10]
+target_coins = listings_df[listings_df["date_added"] < CUTOFF].copy()
 print(f"   Coins listed before {CUTOFF}: {len(target_coins)}")
 
 # crypto_history needs at least id, name, symbol, slug
