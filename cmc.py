@@ -39,11 +39,7 @@ print("1. Fetching CMC listings...")
 listings_df = ro.conversion.rpy2py(crypto2.crypto_listings())
 print(f"   Got {len(listings_df)} coins total.")
 
-# Filter: keep coins added to CMC before the cutoff date
-CUTOFF = "2017-01-01"
-listings_df["date_added"] = pd.to_datetime(listings_df["date_added"])
-target_coins = listings_df[listings_df["date_added"] < CUTOFF].copy()
-print(f"   Coins listed before {CUTOFF}: {len(target_coins)}")
+listings_df.to_csv('cmc_listings.csv', index=False)
 
 # crypto_history needs at least id, name, symbol, slug
 coin_cols = ["id", "name", "symbol", "slug"]
@@ -56,7 +52,7 @@ print(f"2. Downloading historical data from {START_DATE}...")
 print("   (This will take a while – CMC API rate limits apply.)")
 
 history_r = crypto2.crypto_history(
-    target_coins[coin_cols],
+    listings_df[coin_cols],
     start_date=START_DATE,
     requestLimit=200,
     sleep=0.5,
