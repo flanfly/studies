@@ -816,7 +816,7 @@ from scipy.stats import norm
 # 1. Base Data Pipeline
 # Assuming 'mcap' is available in your raw data
 df_base = (
-    pl.scan_parquet('polarity/data/*.parquet')
+    pl.scan_parquet('polarity/latest-data/*.parquet')
     .rename({'asset': 'symbol'})
     .sort(['symbol','ts'])
     .with_columns(
@@ -941,9 +941,10 @@ import polars as pl
 
 (
     pl.read_csv('cmc_historical_data_2020.csv')
+    .join(pl.read_csv('cmc_listings.csv'), on=['slug'])
     .select(
         ts=pl.col('time_open').str.to_datetime(format="%Y-%m-%d %H:%M:%S+00:00").dt.replace_time_zone("UTC"),
-        symbol=pl.col('symbol').str.to_lowercase(),
+        ticker=pl.col('symbol').str.to_lowercase(),
         open=pl.col('open'),
         high=pl.col('high'),
         low=pl.col('low'),
@@ -951,16 +952,96 @@ import polars as pl
         volume=pl.col('volume'),
         market_cap=pl.col('market_cap'),
         circulating_supply=pl.col('circulating_supply'),
-        cmc_slug=pl.col('slug'),
-        cmc_id=pl.col('id'),
+        symbol=pl.col('slug'),
+        listed=pl.col('date_added').str.to_datetime(format="%Y-%m-%dT%H:%M:%S.000Z").dt.replace_time_zone("UTC"),
+        is_active=pl.col('is_active') > 0,
+        market_pairs=pl.col('market_pair_count'),
     )
     .sort(['symbol','ts'])
     .unique(['symbol','ts']) # bug in cmc.py?
     .write_parquet('cmc-usd-1d-2020-2026.parquet')
 )
 
+
+# %%
 pl.read_csv('cmc_listings.csv')
 
+
+# %%
+days_momentum = 30
+days_skip = 4
+days_holding = 14
+days_trend = 60
+
+blacklist = ['terra-luna','ftx-token']
+benchmark = 'bitcoin'
+winsorize = [-1, 5]
+mom_buckets = 10
+mom_ranks = ['9']
+min_volume = 1_000_000
+min_mcap = 1_000_000
+start_year = 2020
+
+df = (
+    pl.read_parquet('cmc-usd-1d-2020-2026.parquet')
+    .filter(
+        (pl.col('symbol').is_in(blacklist).not_()) &
+        (pl.col('market_cap') > 0) &
+        (pl.col('is_active')) &
+        (pl.col('market_pairs') > 1)
+    )
+    .join(
+        pl.read_parquet('cmc-usd-1d-2020-2026.parquet')
+        .filter(pl.col('symbol') == benchmark)
+        .select(
+            ts=pl.col('ts'),
+            ref=pl.col('close')
+        ),
+        on='ts'
+    )
+    .sort(['symbol','ts'])
+    .with_columns(
+        fwd=(pl.col('close').shift(-1).over('symbol') / pl.col('close') - 1).clip(*winsorize),
+        mom=pl.col('close').shift(days_skip) / pl.col('close').shift(days_momentum).over('symbol') - 1,
+        momdays=(pl.col('ts').shift(days_skip) - pl.col('ts').shift(days_momentum).over('symbol')).dt.total_days(),
+        trend=pl.col('ref').rolling_mean(days_trend).over('symbol'),
+    )
+    .filter(
+        (pl.col('mom').is_not_null()) &
+        (pl.col('momdays') == days_momentum - days_skip)
+    )
+    .with_columns(
+        rank=pl.col('mom').qcut(
+            mom_buckets,
+            labels=[str(i) for i in range(mom_buckets)],
+            allow_duplicates=True
+        ).over('ts'),
+    )
+    .filter(
+        (pl.col('rank').is_in(mom_ranks)) &
+        (pl.col('mom') > 0) &
+        (pl.col('ts').dt.year() >= start_year) &
+        (pl.col('volume') > min_volume) &
+        (pl.col('market_cap') > min_mcap) &
+        (pl.col('trend') < pl.col('close'))
+    )
+    .select(['ts','symbol','rank','mom','fwd','market_cap'])
+    .group_by('ts')
+    .agg(
+        pl.col('fwd').mean(),
+        pl.col('market_cap').mean(),
+    )
+)
+
+print(f'''
+Average return per position for {days_holding}d: {df.mean()['fwd'][0] * 100}%
+Annualized                           {((df.mean()['fwd'][0] + 1)**(365/days_holding) - 1) * 100}%
+Median                               {df.median()['fwd'][0] * 100}%
+Sigma                                {df.std()['fwd'][0] * 100}%
+''')
+
+# %%
+pl.read_parquet('cmc-usd-1d-2020-2026.parquet')
 
 # %%
 import polars as pl
@@ -971,15 +1052,15 @@ HOLDING_PERIOD = 30
 POSITIONS_PER_SUB_PORTFOLIO = 20
 FEE_PER_LEG = 0.0005 
 ANNUALIZATION_FACTOR = 365
-MIN_MARKET_CAP_RANK = 100
-YEAR = 2020
+MIN_MARKET_CAP_RANK = 300
+YEAR = 2026
 
 df = (
     pl.read_parquet('cmc-usd-1d-2020-2026.parquet')
     .sort(['symbol', 'ts'])
     
     # 1. Base defensive filter (prevents division by zero on corrupted prices)
-    .filter(pl.col('close') > 0.0001) 
+    #.filter(pl.col('close') > 0.0001) 
     
     .with_columns([
         # 2. 90-day momentum (Needs continuous history, computed for ALL coins)
@@ -1060,7 +1141,7 @@ sortino_ratio = (mean_net_ret / downside_deviation) * np.sqrt(ANNUALIZATION_FACT
 
 # Extract BTC's 1-day forward returns from the main DataFrame to use as the benchmark
 btc_benchmark = (
-    df.filter((pl.col('symbol') == 'btc') & (pl.col('ts').dt.year() >= YEAR))
+    df.filter((pl.col('symbol') == 'bitcoin') & (pl.col('ts').dt.year() >= YEAR))
     .select(
         ts=pl.col('ts'),
         btc_ret_1d=pl.col('fwd_ret_1d')
@@ -1211,3 +1292,186 @@ ax2.set_xlim(mean_ret - 4*std_ret, mean_ret + 6*std_ret)
 
 plt.tight_layout()
 plt.show()
+
+# %%
+bps_fee = 5
+days_holding = 14
+num_buckets = 4
+days_delta = 7
+start_year = 2023
+
+df = (
+    pl.read_parquet('polarity/latest-data/*.parquet',missing_columns='insert')
+    .sort(['asset','ts'])
+    .with_columns(
+        fwd=(pl.col('price').shift(-days_holding).over('asset') / pl.col('price') - 1) - (bps_fee / 100.0 / 100.0),
+        tcidelta=pl.col('tci') - pl.col('tci').shift(days_delta).over('asset'),
+
+    )
+    .filter(
+        (pl.col('ts').dt.year() >= start_year) &
+        (pl.col('total_volume') >= 1_000_000)
+    )
+    #.with_columns(**{
+    #    c: pl.col(c).qcut(
+    #        num_buckets,
+    #        labels=[str(i) for i in range(num_buckets)],
+    #        allow_duplicates=True
+    #    ).over('ts') for c in ['udpil','udpim','udpis','mdccv','mbi','tci','mtm','mcm','tcicv','upprob']
+    #})
+
+    # 4.32%
+    #.filter(
+    #    (pl.col('upprob') > 0.75) &
+    #    (pl.col('mdccv') < pl.col('price')) &
+    #    (pl.col('tcidelta') > 0)
+    #)
+
+    .with_columns(
+        ret=pl.when(
+            (pl.col('udpim') < pl.col('udpis')) &
+            (pl.col('upprob') > 0.75) &
+            (pl.col('mdccv') < pl.col('price')) &
+            (pl.col('tcidelta') > 0)
+        ).then(pl.col('fwd')).otherwise(None)
+    )
+    .group_by('ts')
+    .agg(
+        pl.col('fwd').mean(),
+        pl.col('ret').mean(),
+    )
+)
+
+print(f'''
+strategy / market
+mean: {df.mean()['ret'][0]} / {df.mean()['fwd'][0]}
+annualized: {np.pow(df.mean()['ret'][0] + 1, 365/days_holding) - 1} / {np.pow(df.mean()['fwd'][0] + 1, 365/days_holding) - 1}
+stdev: {df.std()['ret'][0]} / {df.std()['fwd'][0]}
+''')
+
+#df.group_by(pl.col('ts').dt.strftime('%Y-%m')).mean().sort('ts').to_pandas().plot(x='ts',y='fwd',kind='bar')
+df.sort('ts').to_pandas().plot(x='ts',y=['ret','fwd'])
+
+# %%
+import polars as pl
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import norm
+
+# 1. Base Data Pipeline
+# Assuming 'mcap' is available in your raw data
+df_base = (
+    #pl.scan_parquet('polarity/latest-data/*.parquet')
+    #.rename({'asset': 'symbol'})
+    pl.scan_parquet("cmc-usd-1d-2020-2026.parquet")
+    .with_columns(
+        price=pl.col('close'),
+    )
+    .sort(['symbol','ts'])
+    .with_columns(
+        fwd=pl.col('price').pct_change(-30).over('symbol'),
+        mom=pl.col('price').pct_change(90).over('symbol'), # 90-day momentum
+    )
+    .filter(pl.col('mom').is_not_null() & pl.col('fwd').is_not_null())
+    .with_columns(
+        rank=pl.col('mom').qcut(
+            10,
+            labels=[str(i) for i in range(10)],
+            allow_duplicates=True
+        ).over('ts'),
+    )
+    .filter((pl.col('rank') == '9') & (pl.col('mom') > 0) & (pl.col('ts').dt.year() >= 2023))
+    # We must explicitly select 'mcap' so it is available for filtering below
+    .select(['ts', 'symbol', 'market_cap', 'fwd']) 
+    .collect()
+)
+
+# 2. Define Market Cap Buckets (Assuming mcap is in raw dollars)
+# If your data stores mcap in millions, adjust these thresholds (e.g., 10000 instead of 10_000_000_000)
+buckets = {
+    "Mega Cap (>= $500B)": df_base.filter(pl.col('market_cap') >= 500_000_000_000),
+    "Mid Cap ($100B - $500B)": df_base.filter((pl.col('market_cap') >= 100_000_000_000) & (pl.col('market_cap') < 500_000_000_000)),
+    "All Coins": df_base
+}
+
+# 3. Setup the Subplots
+# sharex=True and sharey=True are critical so the visual scale matches across all 3 charts
+fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharex=True, sharey=True)
+fig.suptitle('30-Day Forward Returns (Top Decile Momentum) by Market Cap', fontsize=16)
+
+colors = ['forestgreen', 'darkorange', 'steelblue']
+
+# 4. Process and Plot Each Bucket
+for ax, (title, subset_df), color in zip(axes, buckets.items(), colors):
+    
+    # Calculate daily mean returns for this specific mcap bucket
+    daily_returns_df = (
+        subset_df.group_by('ts')
+        .agg(pl.col('fwd').mean())
+        .drop_nulls('fwd')
+    )
+    
+    returns = daily_returns_df['fwd'].to_numpy()
+    
+    # Outlier handling (1st and 99th percentile) to ensure clean bell curves
+    if len(returns) > 0:
+        lower_bound = np.percentile(returns, 1)
+        upper_bound = np.percentile(returns, 99)
+        clean_returns = returns[(returns >= lower_bound) & (returns <= upper_bound)]
+        
+        mu = np.mean(clean_returns)
+        sigma = np.std(clean_returns)
+        
+        # Histogram
+        ax.hist(clean_returns, bins=40, density=True, alpha=0.6, color=color, edgecolor='black')
+        
+        # Bell Curve
+        xmin, xmax = ax.get_xlim() # Get axis limits to draw the line
+        x = np.linspace(xmin, xmax, 100)
+        p = norm.pdf(x, mu, sigma)
+        ax.plot(x, p, 'k', linewidth=2)
+        
+        # Markings
+        ax.axvline(0, color='black', linestyle='-', linewidth=1)
+        ax.axvline(mu, color='red', linestyle='--', linewidth=1.5, label=f'Mean: {mu:.4f}')
+        ax.axvline(mu + sigma, color='green', linestyle=':', linewidth=1.5, label='+1 Sigma')
+        ax.axvline(mu - sigma, color='green', linestyle=':', linewidth=1.5)
+        
+        ax.set_title(f'{title}\nStd Dev: {sigma:.4f}')
+        ax.legend()
+    else:
+        ax.set_title(f'{title}\n(Not Enough Data)')
+    
+    ax.set_xlabel('30-Day Forward Return')
+    ax.grid(True, alpha=0.3)
+
+# Formatting the Y-axis only on the first chart to reduce clutter
+axes[0].set_ylabel('Density')
+plt.tight_layout()
+plt.show()
+
+# %%
+dtype = pl.Struct([
+    pl.Field("days_holding", pl.String),
+    pl.Field("top_percentile", pl.String),
+    pl.Field("bottom_percentile", pl.String),
+    pl.Field("days_momentum", pl.String),
+])
+
+(
+    pl.read_csv("momentum-research-backtest-results-20260512-134132/*.csv")
+    .with_columns(
+        pl.col("parameters").str.json_decode(dtype)
+    )
+    .unnest('parameters')
+    .with_columns(
+        pl.col('days_holding').cast(pl.Int32),
+        pl.col('top_percentile').cast(pl.Float32),
+        pl.col('days_momentum').cast(pl.Int32),
+    )
+    .pivot(on='name', values='data')
+    #.select(['sortino','maxdd','cagr','final_equity','signal','gate','interval_days','max_long','max_short'])
+    #.filter((pl.col('sortino') > 1) & (pl.col('top_percentile') < 0.99)) 
+    .sort('sortino')
+    
+).write_csv('res.csv')
