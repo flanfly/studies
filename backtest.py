@@ -113,6 +113,20 @@ class EqualWeight(PortfolioModel):
             # liquidate all positions if no signals or no equity
             return [Order(pos.symbol, -pos.shares) for pos in folio]
 
+        # deduplicate signals by symbol (keep last occurrence)
+        deduped = {s.symbol: s for s in signals}
+        if len(deduped) < len(signals):
+            from collections import Counter
+            counts = Counter(s.symbol for s in signals)
+            dupes = [(sym, n) for sym, n in counts.items() if n > 1]
+            dupes.sort(key=lambda x: -x[1])
+            import warnings
+            warnings.warn(
+                f"EqualWeight: {len(signals)} signals but only {len(deduped)} unique symbols. "
+                f"Duplicates: {dupes}"
+            )
+        signals = list(deduped.values())
+
         target_shares = {}
         target_weight_value = equity / len(signals)
         for signal in signals:
@@ -452,7 +466,7 @@ class Backtest:
 
         Returns
         -------
-        pl.DataFrame with columns: symbol, shares, entry_ts, exit_ts, entry_price
+        pl.DataFrame with columns: symbol, shares, position_value, entry_ts, exit_ts, entry_price
         """
         today = self.df[self.ts_col].max()
         dfnow = self.df.filter(pl.col(self.ts_col) <= today).sort(self.ts_col)
@@ -469,10 +483,12 @@ class Backtest:
             price = prices.get(order.symbol)
             if price is not None and abs(order.shares) > EPSILON:
                 exit_ts = today + dt.timedelta(days=self.period)
+                position_value = order.shares * price
                 rows.append(
                     {
                         "symbol": order.symbol,
                         "shares": order.shares,
+                        "position_value": position_value,
                         "entry_ts": today,
                         "exit_ts": exit_ts,
                         "entry_price": price,
@@ -484,6 +500,7 @@ class Backtest:
                 schema={
                     "symbol": pl.Utf8,
                     "shares": pl.Float64,
+                    "position_value": pl.Float64,
                     "entry_ts": pl.Datetime,
                     "exit_ts": pl.Datetime,
                     "entry_price": pl.Float64,
