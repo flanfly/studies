@@ -1,0 +1,1249 @@
+root - INFO - Executing momentum-research-backtest.ipynb and saving output to momentum-research-backtest-results-20260512-134132/metrics_14_0.5_0.5_50.html
+root - INFO - Parameters: days_holding=14, top_percentile=0.5, bottom_percentile=0.5, days_momentum=50
+papermill - INFO - Input Notebook:  momentum-research-backtest.ipynb
+papermill - INFO - Output Notebook: /var/folders/tl/9yq9dyyj1sl6tn4r875nj5ym0000gn/T/vertex-ai-papermillkijaf9j2/output.ipynb
+papermill - WARNING - Passed unknown parameter: days_momentum
+papermill - INFO - Executing notebook with kernel: python3
+papermill - INFO - Executing Cell 1---------------------------------------
+papermill - INFO - Ending Cell 1------------------------------------------
+papermill - INFO - Executing Cell 2---------------------------------------
+papermill - INFO - Ending Cell 2------------------------------------------
+papermill - INFO - Executing Cell 3---------------------------------------
+papermill - INFO - 
+days_holding: 14
+days_momentum_score: 40
+days_momentum_gate: []
+
+top_percentile: 0.5
+bottom_percentile: 0.5
+
+
+papermill - INFO - Ending Cell 3------------------------------------------
+papermill - INFO - Executing Cell 4---------------------------------------
+papermill - WARNING -   0%|          | 0/1224 [00:00<?, ?it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 95 signals but only 94 unique symbols. Duplicates: [('render', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 94 signals but only 93 unique symbols. Duplicates: [('bdx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 94 signals but only 93 unique symbols. Duplicates: [('ens', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 93 signals but only 92 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 93 signals but only 92 unique symbols. Duplicates: [('aave', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 94 signals but only 93 unique symbols. Duplicates: [('stx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 94 signals but only 93 unique symbols. Duplicates: [('bgb', 2)]
+  warnings.warn(
+  1%|          | 11/1224 [00:00<00:11, 104.98it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 94 signals but only 93 unique symbols. Duplicates: [('jst', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 94 signals but only 93 unique symbols. Duplicates: [('usdc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 97 signals but only 96 unique symbols. Duplicates: [('rose', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 97 signals but only 96 unique symbols. Duplicates: [('ankr', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('paxg', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 99 signals but only 98 unique symbols. Duplicates: [('bnb', 2)]
+  warnings.warn(
+  2%|▏         | 23/1224 [00:00<00:11, 107.83it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('gno', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('kas', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 99 signals but only 98 unique symbols. Duplicates: [('bch', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('vvs', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 99 signals but only 98 unique symbols. Duplicates: [('dash', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 99 signals but only 98 unique symbols. Duplicates: [('eth', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING -   3%|▎         | 34/1224 [00:00<00:11, 103.16it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('lunc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('iota', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 97 signals but only 96 unique symbols. Duplicates: [('jst', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('neo', 2)]
+  warnings.warn(
+  4%|▎         | 45/1224 [00:00<00:12, 93.55it/s] 
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 100 signals but only 99 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 100 signals but only 99 unique symbols. Duplicates: [('avax', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 100 signals but only 99 unique symbols. Duplicates: [('axs', 2)]
+  warnings.warn(
+  4%|▍         | 55/1224 [00:00<00:12, 95.24it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 100 signals but only 99 unique symbols. Duplicates: [('flow', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 100 signals but only 99 unique symbols. Duplicates: [('kcs', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('trx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('nft', 2)]
+  warnings.warn(
+  5%|▌         | 65/1224 [00:00<00:12, 96.23it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('btc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('cake', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('cvx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('op', 2)]
+  warnings.warn(
+  6%|▌         | 76/1224 [00:00<00:11, 99.89it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 106 signals but only 105 unique symbols. Duplicates: [('eurc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 106 signals but only 105 unique symbols. Duplicates: [('theta', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('iota', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+  7%|▋         | 87/1224 [00:00<00:11, 102.39it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('ldo', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('sol', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('op', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('flr', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('uni', 2)]
+  warnings.warn(
+
+papermill - WARNING -   8%|▊         | 99/1224 [00:00<00:10, 106.50it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('qnt', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('sfp', 2)]
+  warnings.warn(
+
+papermill - WARNING -   9%|▉         | 110/1224 [00:01<00:10, 107.38it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('jst', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('near', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('twt', 2)]
+  warnings.warn(
+
+papermill - WARNING -  10%|▉         | 121/1224 [00:01<00:10, 105.33it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('twt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('ton', 2)]
+  warnings.warn(
+
+papermill - WARNING -  11%|█         | 132/1224 [00:01<00:10, 106.32it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('jst', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 102 signals but only 101 unique symbols. Duplicates: [('avax', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('xec', 2)]
+  warnings.warn(
+ 12%|█▏        | 143/1224 [00:01<00:10, 104.05it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 99 signals but only 98 unique symbols. Duplicates: [('zec', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 100 signals but only 99 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('crv', 2)]
+  warnings.warn(
+ 13%|█▎        | 154/1224 [00:01<00:10, 100.24it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('axs', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('sol', 2)]
+  warnings.warn(
+
+papermill - WARNING -  13%|█▎        | 165/1224 [00:01<00:10, 99.07it/s] 
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('jasmy', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('nft', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 101 signals but only 100 unique symbols. Duplicates: [('grt', 2)]
+  warnings.warn(
+
+papermill - WARNING -  14%|█▍        | 177/1224 [00:01<00:10, 103.06it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('doge', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('sun', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('lunc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('iota', 2)]
+  warnings.warn(
+ 15%|█▌        | 188/1224 [00:01<00:10, 103.56it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('okb', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('cake', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 103 signals but only 102 unique symbols. Duplicates: [('cvx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('doge', 2)]
+  warnings.warn(
+ 16%|█▋        | 199/1224 [00:02<00:11, 87.76it/s] 
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('avax', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('apt', 2)]
+  warnings.warn(
+
+papermill - WARNING -  17%|█▋        | 209/1224 [00:02<00:11, 87.74it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('eurs', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('tusd', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 106 signals but only 105 unique symbols. Duplicates: [('dcr', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 106 signals but only 105 unique symbols. Duplicates: [('xmr', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('chz', 2)]
+  warnings.warn(
+ 18%|█▊        | 221/1224 [00:02<00:10, 94.93it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('btc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('theta', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+
+papermill - WARNING -  19%|█▉        | 231/1224 [00:02<00:11, 89.77it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('cake', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 104 signals but only 103 unique symbols. Duplicates: [('inj', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('ens', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 105 signals but only 104 unique symbols. Duplicates: [('vet', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 108 signals but only 107 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+ 20%|█▉        | 241/1224 [00:02<00:11, 86.73it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 108 signals but only 107 unique symbols. Duplicates: [('iota', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 110 signals but only 109 unique symbols. Duplicates: [('inj', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 110 signals but only 109 unique symbols. Duplicates: [('sol', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 110 signals but only 109 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 109 signals but only 108 unique symbols. Duplicates: [('ada', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 109 signals but only 108 unique symbols. Duplicates: [('vet', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 108 signals but only 107 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+ 20%|██        | 250/1224 [00:02<00:11, 86.14it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 108 signals but only 107 unique symbols. Duplicates: [('zec', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 107 signals but only 106 unique symbols. Duplicates: [('bdx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 107 signals but only 106 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 106 signals but only 105 unique symbols. Duplicates: [('near', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 107 signals but only 106 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+ 21%|██        | 259/1224 [00:02<00:11, 82.51it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 108 signals but only 107 unique symbols. Duplicates: [('flow', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 109 signals but only 108 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 109 signals but only 108 unique symbols. Duplicates: [('rose', 2)]
+  warnings.warn(
+ 22%|██▏       | 269/1224 [00:02<00:11, 85.89it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 111 signals but only 110 unique symbols. Duplicates: [('eth', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 111 signals but only 110 unique symbols. Duplicates: [('fdusd', 2)]
+  warnings.warn(
+
+papermill - WARNING -  23%|██▎       | 278/1224 [00:02<00:11, 83.96it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 111 signals but only 110 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 112 signals but only 111 unique symbols. Duplicates: [('super', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 110 signals but only 109 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 110 signals but only 109 unique symbols. Duplicates: [('axl', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 109 signals but only 108 unique symbols. Duplicates: [('nft', 2)]
+  warnings.warn(
+ 23%|██▎       | 287/1224 [00:03<00:11, 81.62it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 108 signals but only 107 unique symbols. Duplicates: [('ltc', 2)]
+  warnings.warn(
+
+papermill - WARNING -  24%|██▍       | 296/1224 [00:03<00:11, 80.42it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 110 signals but only 109 unique symbols. Duplicates: [('api3', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 116 signals but only 115 unique symbols. Duplicates: [('algo', 2)]
+  warnings.warn(
+
+papermill - WARNING -  25%|██▍       | 305/1224 [00:03<00:11, 80.06it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 116 signals but only 115 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 116 signals but only 115 unique symbols. Duplicates: [('api3', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 117 signals but only 116 unique symbols. Duplicates: [('op', 2)]
+  warnings.warn(
+ 26%|██▌       | 314/1224 [00:03<00:13, 67.17it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 117 signals but only 116 unique symbols. Duplicates: [('btc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 117 signals but only 116 unique symbols. Duplicates: [('kava', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 116 signals but only 115 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 116 signals but only 115 unique symbols. Duplicates: [('kava', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 117 signals but only 116 unique symbols. Duplicates: [('stx', 2)]
+  warnings.warn(
+
+papermill - WARNING -  26%|██▋       | 322/1224 [00:03<00:18, 48.66it/s]
+papermill - WARNING -  27%|██▋       | 333/1224 [00:03<00:14, 59.49it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 118 signals but only 117 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 118 signals but only 117 unique symbols. Duplicates: [('hbar', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 118 signals but only 117 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING -  28%|██▊       | 341/1224 [00:03<00:14, 62.98it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 119 signals but only 118 unique symbols. Duplicates: [('mana', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 119 signals but only 118 unique symbols. Duplicates: [('btc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 118 signals but only 117 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+ 29%|██▊       | 349/1224 [00:04<00:13, 64.36it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 118 signals but only 117 unique symbols. Duplicates: [('mana', 2)]
+  warnings.warn(
+
+papermill - WARNING -  29%|██▉       | 357/1224 [00:04<00:12, 67.77it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 120 signals but only 119 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+ 30%|██▉       | 365/1224 [00:04<00:13, 66.01it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 121 signals but only 120 unique symbols. Duplicates: [('sfp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 121 signals but only 120 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 120 signals but only 119 unique symbols. Duplicates: [('ape', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 119 signals but only 118 unique symbols. Duplicates: [('jasmy', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 95 signals but only 94 unique symbols. Duplicates: [('api3', 2)]
+  warnings.warn(
+ 31%|███       | 374/1224 [00:04<00:11, 70.99it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 95 signals but only 94 unique symbols. Duplicates: [('frax', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 95 signals but only 94 unique symbols. Duplicates: [('aave', 2)]
+  warnings.warn(
+
+papermill - WARNING -  31%|███▏      | 385/1224 [00:04<00:10, 80.17it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 95 signals but only 94 unique symbols. Duplicates: [('usdc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 123 signals but only 122 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 124 signals but only 123 unique symbols. Duplicates: [('sfp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('ton', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('kau', 2)]
+  warnings.warn(
+ 32%|███▏      | 394/1224 [00:04<00:10, 82.50it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('sfp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 127 signals but only 126 unique symbols. Duplicates: [('uni', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 127 signals but only 126 unique symbols. Duplicates: [('xdc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 127 signals but only 126 unique symbols. Duplicates: [('xec', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 130 signals but only 129 unique symbols. Duplicates: [('xdc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 130 signals but only 129 unique symbols. Duplicates: [('inj', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 130 signals but only 129 unique symbols. Duplicates: [('bch', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 129 signals but only 128 unique symbols. Duplicates: [('sun', 2)]
+  warnings.warn(
+ 33%|███▎      | 404/1224 [00:04<00:09, 86.34it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 128 signals but only 127 unique symbols. Duplicates: [('gt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('mina', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('fdusd', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('crvusd', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('hbar', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('floki', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('doge', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('lunc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('apt', 2)]
+  warnings.warn(
+ 34%|███▍      | 417/1224 [00:04<00:08, 94.33it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('nft', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('op', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 125 signals but only 124 unique symbols. Duplicates: [('sol', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('wbt', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 126 signals but only 125 unique symbols. Duplicates: [('inj', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 129 signals but only 128 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+ 35%|███▍      | 428/1224 [00:04<00:08, 97.68it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 129 signals but only 128 unique symbols. Duplicates: [('sol', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 129 signals but only 128 unique symbols. Duplicates: [('axs', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 129 signals but only 128 unique symbols. Duplicates: [('dash', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('sol', 2)]
+  warnings.warn(
+
+papermill - WARNING -  36%|███▌      | 440/1224 [00:05<00:07, 103.01it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('inj', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('chz', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('vet', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('dash', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('super', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 131 signals but only 130 unique symbols. Duplicates: [('okb', 2)]
+  warnings.warn(
+
+papermill - WARNING -  37%|███▋      | 453/1224 [00:05<00:07, 109.27it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('chz', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 130 signals but only 129 unique symbols. Duplicates: [('bgb', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 130 signals but only 129 unique symbols. Duplicates: [('xaut', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 130 signals but only 129 unique symbols. Duplicates: [('iota', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 130 signals but only 129 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('xdc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('xlm', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('stx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('jasmy', 2)]
+  warnings.warn(
+ 38%|███▊      | 466/1224 [00:05<00:06, 113.57it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('usdc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('dash', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('xlm', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('xec', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('vvs', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('cro', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+ 39%|███▉      | 478/1224 [00:05<00:06, 111.91it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('qnt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('bonk', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('floki', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('theta', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('zec', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 132 signals but only 131 unique symbols. Duplicates: [('jasmy', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 133 signals but only 132 unique symbols. Duplicates: [('render', 2)]
+  warnings.warn(
+ 40%|████      | 490/1224 [00:05<00:06, 111.84it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('twt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('xlm', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('ltc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('xdc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('doge', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 134 signals but only 133 unique symbols. Duplicates: [('atom', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('dcr', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('bgb', 2)]
+  warnings.warn(
+ 41%|████      | 502/1224 [00:05<00:06, 108.06it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('bdx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('xcn', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('gno', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('htx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 135 signals but only 134 unique symbols. Duplicates: [('sei', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('sui', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('w', 2)]
+  warnings.warn(
+ 42%|████▏     | 513/1224 [00:05<00:07, 97.52it/s] 
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 137 signals but only 136 unique symbols. Duplicates: [('fdusd', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 137 signals but only 136 unique symbols. Duplicates: [('xrp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 136 signals but only 135 unique symbols. Duplicates: [('usde', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 137 signals but only 136 unique symbols. Duplicates: [('wbt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 137 signals but only 136 unique symbols. Duplicates: [('apt', 2)]
+  warnings.warn(
+ 43%|████▎     | 526/1224 [00:05<00:06, 104.97it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 137 signals but only 136 unique symbols. Duplicates: [('tusd', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('ultima', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('dexe', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('cake', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+ 44%|████▍     | 539/1224 [00:05<00:06, 111.46it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+
+papermill - WARNING -  45%|████▌     | 552/1224 [00:06<00:05, 115.36it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 140 signals but only 139 unique symbols. Duplicates: [('ondo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 140 signals but only 139 unique symbols. Duplicates: [('pendle', 2)]
+  warnings.warn(
+ 46%|████▌     | 566/1224 [00:06<00:05, 121.30it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 138 signals but only 137 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 138 signals but only 137 unique symbols. Duplicates: [('fil', 2)]
+  warnings.warn(
+
+papermill - WARNING -  47%|████▋     | 579/1224 [00:06<00:05, 120.35it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 139 signals but only 138 unique symbols. Duplicates: [('twt', 2)]
+  warnings.warn(
+
+papermill - WARNING -  48%|████▊     | 593/1224 [00:06<00:05, 125.82it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 98 signals but only 97 unique symbols. Duplicates: [('ankr', 2)]
+  warnings.warn(
+
+papermill - WARNING -  50%|████▉     | 606/1224 [00:06<00:04, 126.57it/s]
+papermill - WARNING -  51%|█████     | 619/1224 [00:06<00:04, 125.08it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 142 signals but only 141 unique symbols. Duplicates: [('near', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 142 signals but only 141 unique symbols. Duplicates: [('dai', 2)]
+  warnings.warn(
+
+papermill - WARNING -  52%|█████▏    | 633/1224 [00:06<00:04, 128.31it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 144 signals but only 143 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 144 signals but only 143 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 144 signals but only 143 unique symbols. Duplicates: [('jup', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 145 signals but only 144 unique symbols. Duplicates: [('mnt', 2)]
+  warnings.warn(
+
+papermill - WARNING -  53%|█████▎    | 646/1224 [00:06<00:04, 122.58it/s]
+papermill - WARNING -  54%|█████▍    | 659/1224 [00:06<00:04, 114.48it/s]
+papermill - WARNING -  55%|█████▍    | 671/1224 [00:07<00:05, 103.97it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 147 signals but only 146 unique symbols. Duplicates: [('dcr', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 145 signals but only 144 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 146 signals but only 145 unique symbols. Duplicates: [('ada', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 147 signals but only 146 unique symbols. Duplicates: [('jst', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 147 signals but only 146 unique symbols. Duplicates: [('mana', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 148 signals but only 147 unique symbols. Duplicates: [('algo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 150 signals but only 149 unique symbols. Duplicates: [('strk', 2)]
+  warnings.warn(
+ 56%|█████▌    | 682/1224 [00:07<00:05, 91.54it/s] 
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 153 signals but only 152 unique symbols. Duplicates: [('wld', 2)]
+  warnings.warn(
+
+papermill - WARNING -  57%|█████▋    | 692/1224 [00:07<00:06, 87.01it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 154 signals but only 153 unique symbols. Duplicates: [('bsv', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 153 signals but only 152 unique symbols. Duplicates: [('api3', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 154 signals but only 153 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 154 signals but only 153 unique symbols. Duplicates: [('leo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 154 signals but only 153 unique symbols. Duplicates: [('xec', 2)]
+  warnings.warn(
+ 57%|█████▋    | 702/1224 [00:07<00:05, 88.39it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 153 signals but only 152 unique symbols. Duplicates: [('bch', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 153 signals but only 152 unique symbols. Duplicates: [('ape', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 154 signals but only 153 unique symbols. Duplicates: [('mina', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 153 signals but only 152 unique symbols. Duplicates: [('beam', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 155 signals but only 154 unique symbols. Duplicates: [('sun', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 155 signals but only 154 unique symbols. Duplicates: [('leo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 155 signals but only 154 unique symbols. Duplicates: [('zec', 2)]
+  warnings.warn(
+ 58%|█████▊    | 712/1224 [00:07<00:06, 85.05it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 155 signals but only 154 unique symbols. Duplicates: [('sei', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 156 signals but only 155 unique symbols. Duplicates: [('trx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 155 signals but only 154 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+
+papermill - WARNING -  59%|█████▉    | 721/1224 [00:07<00:06, 83.15it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 157 signals but only 156 unique symbols. Duplicates: [('ton', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 156 signals but only 155 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+
+papermill - WARNING -  60%|█████▉    | 730/1224 [00:07<00:06, 81.63it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 157 signals but only 156 unique symbols. Duplicates: [('beam', 2)]
+  warnings.warn(
+ 60%|██████    | 739/1224 [00:07<00:06, 80.30it/s]
+papermill - WARNING -  61%|██████    | 748/1224 [00:08<00:07, 67.11it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 161 signals but only 160 unique symbols. Duplicates: [('bonk', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 162 signals but only 161 unique symbols. Duplicates: [('jto', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 162 signals but only 161 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 160 signals but only 159 unique symbols. Duplicates: [('fil', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 160 signals but only 159 unique symbols. Duplicates: [('neo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 160 signals but only 159 unique symbols. Duplicates: [('zec', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 162 signals but only 161 unique symbols. Duplicates: [('kava', 2)]
+  warnings.warn(
+ 62%|██████▏   | 758/1224 [00:08<00:06, 73.36it/s]
+papermill - WARNING -  63%|██████▎   | 769/1224 [00:08<00:05, 81.02it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 163 signals but only 162 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 163 signals but only 162 unique symbols. Duplicates: [('jto', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 162 signals but only 161 unique symbols. Duplicates: [('bch', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 163 signals but only 162 unique symbols. Duplicates: [('aave', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 164 signals but only 163 unique symbols. Duplicates: [('atom', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 163 signals but only 162 unique symbols. Duplicates: [('xec', 2)]
+  warnings.warn(
+ 64%|██████▎   | 779/1224 [00:08<00:05, 84.31it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 162 signals but only 161 unique symbols. Duplicates: [('doge', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 162 signals but only 161 unique symbols. Duplicates: [('xlm', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 163 signals but only 162 unique symbols. Duplicates: [('mnt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 163 signals but only 162 unique symbols. Duplicates: [('xlm', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 163 signals but only 162 unique symbols. Duplicates: [('xrp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 164 signals but only 163 unique symbols. Duplicates: [('ton', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 166 signals but only 165 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+ 64%|██████▍   | 788/1224 [00:08<00:05, 80.42it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 168 signals but only 167 unique symbols. Duplicates: [('1inch', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 167 signals but only 166 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 167 signals but only 166 unique symbols. Duplicates: [('dash', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 166 signals but only 165 unique symbols. Duplicates: [('atom', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 167 signals but only 166 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+ 65%|██████▌   | 797/1224 [00:08<00:06, 70.72it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 168 signals but only 167 unique symbols. Duplicates: [('bat', 2)]
+  warnings.warn(
+ 66%|██████▌   | 805/1224 [00:08<00:06, 69.50it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 168 signals but only 167 unique symbols. Duplicates: [('cro', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 168 signals but only 167 unique symbols. Duplicates: [('sfp', 2)]
+  warnings.warn(
+ 66%|██████▋   | 813/1224 [00:08<00:05, 68.63it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 168 signals but only 167 unique symbols. Duplicates: [('lunc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 171 signals but only 170 unique symbols. Duplicates: [('pendle', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 171 signals but only 170 unique symbols. Duplicates: [('sei', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 171 signals but only 170 unique symbols. Duplicates: [('bsv', 2)]
+  warnings.warn(
+
+papermill - WARNING -  67%|██████▋   | 821/1224 [00:09<00:07, 51.79it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('xrp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 172 signals but only 171 unique symbols. Duplicates: [('kaia', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 172 signals but only 171 unique symbols. Duplicates: [('mana', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 174 signals but only 173 unique symbols. Duplicates: [('dash', 2)]
+  warnings.warn(
+ 68%|██████▊   | 827/1224 [00:09<00:08, 45.44it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 174 signals but only 173 unique symbols. Duplicates: [('link', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 174 signals but only 173 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 174 signals but only 173 unique symbols. Duplicates: [('icp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 174 signals but only 173 unique symbols. Duplicates: [('bonk', 2)]
+  warnings.warn(
+ 68%|██████▊   | 833/1224 [00:09<00:08, 45.49it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('comp', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('sol', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('mx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('pyth', 2)]
+  warnings.warn(
+ 69%|██████▊   | 839/1224 [00:09<00:08, 47.55it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('usdg', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('inj', 2)]
+  warnings.warn(
+ 69%|██████▉   | 847/1224 [00:09<00:06, 53.92it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('ada', 2)]
+  warnings.warn(
+
+papermill - WARNING -  70%|██████▉   | 853/1224 [00:09<00:07, 52.74it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('jup', 2)]
+  warnings.warn(
+ 70%|███████   | 859/1224 [00:10<00:06, 52.21it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 173 signals but only 172 unique symbols. Duplicates: [('gno', 2)]
+  warnings.warn(
+ 71%|███████   | 865/1224 [00:10<00:06, 51.90it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 175 signals but only 174 unique symbols. Duplicates: [('ldo', 2)]
+  warnings.warn(
+ 71%|███████   | 872/1224 [00:10<00:06, 56.40it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 175 signals but only 174 unique symbols. Duplicates: [('fil', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 176 signals but only 175 unique symbols. Duplicates: [('mina', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 176 signals but only 175 unique symbols. Duplicates: [('algo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 176 signals but only 175 unique symbols. Duplicates: [('uni', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 177 signals but only 176 unique symbols. Duplicates: [('bgb', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 177 signals but only 176 unique symbols. Duplicates: [('ton', 2)]
+  warnings.warn(
+ 72%|███████▏  | 880/1224 [00:10<00:05, 62.38it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 176 signals but only 175 unique symbols. Duplicates: [('pi', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 179 signals but only 178 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING -  73%|███████▎  | 888/1224 [00:10<00:05, 65.33it/s]
+papermill - WARNING -  73%|███████▎  | 895/1224 [00:10<00:05, 62.96it/s]
+papermill - WARNING -  74%|███████▍  | 906/1224 [00:10<00:04, 74.55it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 180 signals but only 179 unique symbols. Duplicates: [('sun', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 181 signals but only 180 unique symbols. Duplicates: [('ens', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 181 signals but only 180 unique symbols. Duplicates: [('ape', 2)]
+  warnings.warn(
+
+papermill - WARNING -  75%|███████▍  | 917/1224 [00:10<00:03, 82.83it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 181 signals but only 180 unique symbols. Duplicates: [('super', 2)]
+  warnings.warn(
+
+papermill - WARNING -  76%|███████▌  | 926/1224 [00:10<00:03, 81.98it/s]
+papermill - WARNING -  76%|███████▋  | 935/1224 [00:11<00:03, 77.83it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 182 signals but only 181 unique symbols. Duplicates: [('htx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 182 signals but only 181 unique symbols. Duplicates: [('gala', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 182 signals but only 181 unique symbols. Duplicates: [('rose', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 182 signals but only 181 unique symbols. Duplicates: [('pepe', 2)]
+  warnings.warn(
+ 77%|███████▋  | 943/1224 [00:11<00:03, 73.57it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 182 signals but only 181 unique symbols. Duplicates: [('polyx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 182 signals but only 181 unique symbols. Duplicates: [('near', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 183 signals but only 182 unique symbols. Duplicates: [('jup', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 183 signals but only 182 unique symbols. Duplicates: [('dash', 2)]
+  warnings.warn(
+ 78%|███████▊  | 951/1224 [00:11<00:03, 74.13it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 183 signals but only 182 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 183 signals but only 182 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+
+papermill - WARNING -  79%|███████▊  | 961/1224 [00:11<00:03, 78.59it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 185 signals but only 184 unique symbols. Duplicates: [('eigen', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 186 signals but only 185 unique symbols. Duplicates: [('ab', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 187 signals but only 186 unique symbols. Duplicates: [('pengu', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 187 signals but only 186 unique symbols. Duplicates: [('uni', 2)]
+  warnings.warn(
+ 79%|███████▉  | 970/1224 [00:11<00:03, 79.49it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 188 signals but only 187 unique symbols. Duplicates: [('nft', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 188 signals but only 187 unique symbols. Duplicates: [('uni', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 188 signals but only 187 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 188 signals but only 187 unique symbols. Duplicates: [('sand', 2)]
+  warnings.warn(
+ 80%|████████  | 980/1224 [00:11<00:02, 83.57it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 188 signals but only 187 unique symbols. Duplicates: [('htx', 2)]
+  warnings.warn(
+
+papermill - WARNING -  81%|████████  | 989/1224 [00:11<00:02, 82.56it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 192 signals but only 191 unique symbols. Duplicates: [('frax', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 191 signals but only 190 unique symbols. Duplicates: [('usdc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 191 signals but only 190 unique symbols. Duplicates: [('dai', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 191 signals but only 190 unique symbols. Duplicates: [('wal', 2)]
+  warnings.warn(
+
+papermill - WARNING -  82%|████████▏ | 998/1224 [00:11<00:02, 82.77it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 192 signals but only 191 unique symbols. Duplicates: [('dydx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 191 signals but only 190 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 192 signals but only 191 unique symbols. Duplicates: [('nexo', 2)]
+  warnings.warn(
+
+papermill - WARNING -  82%|████████▏ | 1007/1224 [00:11<00:02, 77.27it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 192 signals but only 191 unique symbols. Duplicates: [('flow', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 192 signals but only 191 unique symbols. Duplicates: [('frxusd', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 195 signals but only 194 unique symbols. Duplicates: [('jst', 2)]
+  warnings.warn(
+ 83%|████████▎ | 1015/1224 [00:12<00:02, 74.16it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 196 signals but only 195 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+
+papermill - WARNING -  84%|████████▎ | 1023/1224 [00:12<00:02, 73.38it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 199 signals but only 198 unique symbols. Duplicates: [('w', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 200 signals but only 199 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 199 signals but only 198 unique symbols. Duplicates: [('sky', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 199 signals but only 198 unique symbols. Duplicates: [('apt', 2)]
+  warnings.warn(
+ 84%|████████▍ | 1031/1224 [00:12<00:02, 70.24it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 200 signals but only 199 unique symbols. Duplicates: [('algo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 200 signals but only 199 unique symbols. Duplicates: [('chz', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 201 signals but only 200 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+ 85%|████████▍ | 1040/1224 [00:12<00:02, 75.44it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 204 signals but only 203 unique symbols. Duplicates: [('eth', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 206 signals but only 205 unique symbols. Duplicates: [('etc', 2)]
+  warnings.warn(
+
+papermill - WARNING -  86%|████████▌ | 1048/1224 [00:12<00:02, 75.73it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('xdc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 207 signals but only 206 unique symbols. Duplicates: [('hbar', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 207 signals but only 206 unique symbols. Duplicates: [('aster', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 207 signals but only 206 unique symbols. Duplicates: [('api3', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 207 signals but only 206 unique symbols. Duplicates: [('ltc', 2)]
+  warnings.warn(
+
+papermill - WARNING -  86%|████████▋ | 1057/1224 [00:12<00:02, 77.50it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('xec', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('aero', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 207 signals but only 206 unique symbols. Duplicates: [('flow', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+ 87%|████████▋ | 1065/1224 [00:12<00:02, 56.22it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 207 signals but only 206 unique symbols. Duplicates: [('bnb', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('crv', 2)]
+  warnings.warn(
+ 88%|████████▊ | 1076/1224 [00:12<00:02, 64.87it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('gmx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('hot', 2)]
+  warnings.warn(
+ 89%|████████▊ | 1084/1224 [00:13<00:02, 63.29it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 207 signals but only 206 unique symbols. Duplicates: [('cvx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 209 signals but only 208 unique symbols. Duplicates: [('uni', 2)]
+  warnings.warn(
+
+papermill - WARNING -  89%|████████▉ | 1091/1224 [00:13<00:02, 63.35it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 210 signals but only 209 unique symbols. Duplicates: [('ltc', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 210 signals but only 209 unique symbols. Duplicates: [('mnt', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 208 signals but only 207 unique symbols. Duplicates: [('btt', 2)]
+  warnings.warn(
+ 90%|████████▉ | 1099/1224 [00:13<00:01, 65.35it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 212 signals but only 211 unique symbols. Duplicates: [('usdtb', 2)]
+  warnings.warn(
+ 90%|█████████ | 1106/1224 [00:13<00:01, 63.11it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 212 signals but only 211 unique symbols. Duplicates: [('usx', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 214 signals but only 213 unique symbols. Duplicates: [('link', 2)]
+  warnings.warn(
+ 91%|█████████ | 1114/1224 [00:13<00:01, 62.24it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 216 signals but only 215 unique symbols. Duplicates: [('fet', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 216 signals but only 215 unique symbols. Duplicates: [('xrp', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 215 signals but only 214 unique symbols. Duplicates: [('dcr', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 215 signals but only 214 unique symbols. Duplicates: [('btc', 2)]
+  warnings.warn(
+ 92%|█████████▏| 1121/1224 [00:13<00:02, 51.35it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 216 signals but only 215 unique symbols. Duplicates: [('m', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 218 signals but only 217 unique symbols. Duplicates: [('sand', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 218 signals but only 217 unique symbols. Duplicates: [('kcs', 2)]
+  warnings.warn(
+ 92%|█████████▏| 1127/1224 [00:13<00:02, 47.33it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('ub', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('tibbir', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('flr', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('ankr', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('pyth', 2)]
+  warnings.warn(
+ 93%|█████████▎| 1134/1224 [00:14<00:01, 51.68it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('ip', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('iota', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('xtz', 2)]
+  warnings.warn(
+ 93%|█████████▎| 1140/1224 [00:14<00:01, 50.58it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('polyx', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 219 signals but only 218 unique symbols. Duplicates: [('shib', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 224 signals but only 223 unique symbols. Duplicates: [('ton', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 223 signals but only 222 unique symbols. Duplicates: [('xdc', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 223 signals but only 222 unique symbols. Duplicates: [('mina', 2)]
+  warnings.warn(
+ 94%|█████████▎| 1146/1224 [00:14<00:01, 52.14it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 223 signals but only 222 unique symbols. Duplicates: [('tibbir', 2)]
+  warnings.warn(
+
+papermill - WARNING -  94%|█████████▍| 1152/1224 [00:14<00:01, 52.29it/s]
+papermill - WARNING -  95%|█████████▍| 1158/1224 [00:14<00:01, 50.54it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 223 signals but only 222 unique symbols. Duplicates: [('hot', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 224 signals but only 223 unique symbols. Duplicates: [('cro', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 224 signals but only 223 unique symbols. Duplicates: [('jto', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 225 signals but only 224 unique symbols. Duplicates: [('pol', 2)]
+  warnings.warn(
+
+papermill - WARNING -  95%|█████████▌| 1165/1224 [00:14<00:01, 55.12it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 225 signals but only 224 unique symbols. Duplicates: [('real', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 225 signals but only 224 unique symbols. Duplicates: [('dot', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 229 signals but only 228 unique symbols. Duplicates: [('usd1', 2)]
+  warnings.warn(
+ 96%|█████████▌| 1171/1224 [00:14<00:01, 48.06it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 228 signals but only 227 unique symbols. Duplicates: [('pyusd', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 227 signals but only 226 unique symbols. Duplicates: [('rlusd', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 228 signals but only 227 unique symbols. Duplicates: [('u', 2)]
+  warnings.warn(
+
+papermill - WARNING -  96%|█████████▋| 1179/1224 [00:14<00:00, 45.82it/s]
+papermill - WARNING -  97%|█████████▋| 1188/1224 [00:15<00:00, 54.21it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 228 signals but only 227 unique symbols. Duplicates: [('ldo', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 227 signals but only 226 unique symbols. Duplicates: [('arb', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 227 signals but only 226 unique symbols. Duplicates: [('jto', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 227 signals but only 226 unique symbols. Duplicates: [('bdx', 2)]
+  warnings.warn(
+ 98%|█████████▊| 1194/1224 [00:15<00:00, 54.20it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 226 signals but only 225 unique symbols. Duplicates: [('rune', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 226 signals but only 225 unique symbols. Duplicates: [('ylds', 2)]
+  warnings.warn(
+
+papermill - WARNING -  98%|█████████▊| 1201/1224 [00:15<00:00, 56.41it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 226 signals but only 225 unique symbols. Duplicates: [('frax', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 228 signals but only 227 unique symbols. Duplicates: [('bfusd', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 228 signals but only 227 unique symbols. Duplicates: [('usx', 2)]
+  warnings.warn(
+
+papermill - WARNING -  99%|█████████▉| 1209/1224 [00:15<00:00, 60.81it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 230 signals but only 229 unique symbols. Duplicates: [('dai', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 230 signals but only 229 unique symbols. Duplicates: [('gusd', 2)]
+  warnings.warn(
+
+papermill - WARNING -  99%|█████████▉| 1216/1224 [00:15<00:00, 57.93it/s]
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 230 signals but only 229 unique symbols. Duplicates: [('crvusd', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 229 signals but only 228 unique symbols. Duplicates: [('prime', 2)]
+  warnings.warn(
+/Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 228 signals but only 227 unique symbols. Duplicates: [('9bit', 2)]
+  warnings.warn(
+
+papermill - WARNING - /Users/kai/studies/backtest.py:124: UserWarning: EqualWeight: 229 signals but only 228 unique symbols. Duplicates: [('pol', 2)]
+  warnings.warn(
+100%|█████████▉| 1223/1224 [00:15<00:00, 56.78it/s]
+papermill - WARNING - 100%|██████████| 1224/1224 [00:15<00:00, 77.92it/s]
+papermill - WARNING - 
+
+papermill - INFO - <Figure size 1200x800 with 2 Axes>
+papermill - INFO - mae: -0.11631551787067448 (None)
+
+papermill - INFO - ann_std: 0.13530857695203138 (0.39146923807752665)
+
+papermill - INFO - sortino: -2.154434789062904 (1.660792322804316)
+
+papermill - INFO - ir: -1.285717219300521 (None)
+
+papermill - INFO - sharpe: -1.4629008056193928 (0.8402291621885591)
+
+papermill - INFO - maxdd: -0.2932932706304695 (-0.2825709930465031)
+
+papermill - INFO - cagr: -0.2535271396760026 (0.582393648182554)
+
+papermill - INFO - mae_std: 0.25645044162984637 (None)
+
+papermill - INFO - fees: 0.09156814401628927 (None)
+
+papermill - INFO - mfe_std: 0.3236963054418197 (None)
+
+papermill - INFO - win_rate: 0.634165413296037 (None)
+
+papermill - INFO - mfe: 0.16204944712275116 (None)
+
+papermill - INFO - ann_return: -0.19431755182448646 (0.32190976643082436)
+
+papermill - INFO - Ending Cell 4------------------------------------------
+papermill - INFO - Executing Cell 5---------------------------------------
+papermill - INFO - Ending Cell 5------------------------------------------
+root - INFO - Saving executed notebook to momentum-research-backtest-results-20260512-134132/metrics_14_0.5_0.5_50.html
+traitlets - WARNING - Alternative text is missing on 1 image(s).
+root - INFO - Metrics: mae=-0.11631551787067448, ann_std=0.13530857695203138, sortino=-2.154434789062904, ir=-1.285717219300521, sharpe=-1.4629008056193928, maxdd=-0.2932932706304695, cagr=-0.2535271396760026, mae_std=0.25645044162984637, fees=0.09156814401628927, mfe_std=0.3236963054418197, win_rate=0.634165413296037, mfe=0.16204944712275116, ann_return=-0.19431755182448646
+root - INFO - Saving metrics to momentum-research-backtest-results-20260512-134132/metrics_14_0.5_0.5_50.csv
