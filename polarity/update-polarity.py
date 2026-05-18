@@ -1,9 +1,7 @@
-from typing import Tuple, Dict
-from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlencode
+from typing import Tuple, Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import logging as l
-import gc
 import os
 import unittest
 
@@ -87,9 +85,13 @@ def get_data(asset: str, metric: str, idtoken: str):
     if not timestamps:
         return pl.DataFrame(schema={"timestamp": pl.Utf8, metric: pl.Float64})
 
-    return pl.DataFrame(
-        {"timestamp": timestamps, metric: pl.Series(values, dtype=pl.Float64)}
-    ).with_columns(pl.col("timestamp").str.to_datetime())
+    return (
+        pl.DataFrame(
+            {"timestamp": timestamps, metric: pl.Series(values, dtype=pl.Float64)}
+        )
+        .with_columns(pl.col("timestamp").str.to_datetime())
+        .unique(subset=["timestamp"], keep="last", maintain_order=False)
+    )
 
 
 def save(df: pl.DataFrame, schema: Dict[str, pl.DataType], coin: str, output_dir: str):
@@ -143,21 +145,14 @@ def do_work(item: Tuple[str, str], idtoken: str) -> Tuple[str, str, pl.DataFrame
             wait += 1
 
 
-class TestDoMerge(unittest.TestCase):
-    def test_update_column(self):
+class TestMergeMetrics(unittest.TestCase):
+    def test_merge_same_timestamps(self):
+        """Two metrics for the same coin with identical timestamp ranges."""
         df1 = pl.DataFrame(
             {
-                "timestamp": [
-                    "2023-01-01",
-                    "2023-01-02",
-                    "2023-01-03",
-                    "2023-01-01",
-                    "2023-01-02",
-                    "2023-01-03",
-                ],
-                "asset": ["btc", "btc", "btc", "eth", "eth", "eth"],
-                "metric1": [1.0, 2.0, 3.0, None, None, None],
-                "metric2": [None, None, None, 1.0, 2.0, 3.0],
+                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
+                "asset": ["btc", "btc", "btc"],
+                "m1": [1.0, 2.0, 3.0],
             }
         ).with_columns(pl.col("timestamp").str.to_datetime())
 
@@ -165,133 +160,110 @@ class TestDoMerge(unittest.TestCase):
             {
                 "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                 "asset": ["btc", "btc", "btc"],
-                "metric2": [4.0, 5.0, 6.0],
+                "m2": [4.0, 5.0, 6.0],
             }
         ).with_columns(pl.col("timestamp").str.to_datetime())
 
-        merged = do_merge(df1, df2)
-        expected = (
-            pl.DataFrame(
-                {
-                    "timestamp": [
-                        "2023-01-01",
-                        "2023-01-02",
-                        "2023-01-03",
-                        "2023-01-01",
-                        "2023-01-02",
-                        "2023-01-03",
-                    ],
-                    "asset": ["btc", "btc", "btc", "eth", "eth", "eth"],
-                    "metric1": [1.0, 2.0, 3.0, None, None, None],
-                    "metric2": [4.0, 5.0, 6.0, 1.0, 2.0, 3.0],
-                }
-            )
-            .with_columns(pl.col("timestamp").str.to_datetime())
-            .sort(["timestamp", "asset"])
-        )
-        self.assertTrue(merged.equals(expected))
-
-    def test_new_column(self):
-        df1 = pl.DataFrame(
-            {
-                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
-                "asset": ["btc", "btc", "btc"],
-                "metric1": [1.0, 2.0, 3.0],
-            }
-        ).with_columns(pl.col("timestamp").str.to_datetime())
-
-        df2 = pl.DataFrame(
-            {
-                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
-                "asset": ["btc", "btc", "btc"],
-                "metric2": [4.0, 5.0, 6.0],
-            }
-        ).with_columns(pl.col("timestamp").str.to_datetime())
-
-        merged = do_merge(df1, df2)
-
+        merged = merge_metrics([df1, df2])
         expected = (
             pl.DataFrame(
                 {
                     "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                     "asset": ["btc", "btc", "btc"],
-                    "metric1": [1.0, 2.0, 3.0],
-                    "metric2": [4.0, 5.0, 6.0],
+                    "m1": [1.0, 2.0, 3.0],
+                    "m2": [4.0, 5.0, 6.0],
                 }
             )
             .with_columns(pl.col("timestamp").str.to_datetime())
-            .sort(["timestamp", "asset"])
+            .sort("timestamp")
         )
-
         self.assertTrue(merged.equals(expected))
 
-    def test_new_asset(self):
+    def test_merge_overlapping_timestamps(self):
+        """Metrics with partially overlapping timestamp ranges."""
         df1 = pl.DataFrame(
             {
                 "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
                 "asset": ["btc", "btc", "btc"],
-                "metric1": [1.0, 2.0, 3.0],
+                "m1": [1.0, 2.0, 3.0],
             }
         ).with_columns(pl.col("timestamp").str.to_datetime())
 
         df2 = pl.DataFrame(
             {
-                "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03"],
-                "asset": ["eth", "eth", "eth"],
-                "metric2": [4.0, 5.0, 6.0],
+                "timestamp": ["2023-01-02", "2023-01-03", "2023-01-04"],
+                "asset": ["btc", "btc", "btc"],
+                "m2": [10.0, 20.0, 30.0],
             }
         ).with_columns(pl.col("timestamp").str.to_datetime())
 
-        merged = do_merge(df1, df2)
-
+        merged = merge_metrics([df1, df2])
         expected = (
             pl.DataFrame(
                 {
-                    "timestamp": [
-                        "2023-01-01",
-                        "2023-01-02",
-                        "2023-01-03",
-                        "2023-01-01",
-                        "2023-01-02",
-                        "2023-01-03",
-                    ],
-                    "asset": ["btc", "btc", "btc", "eth", "eth", "eth"],
-                    "metric1": [1.0, 2.0, 3.0, None, None, None],
-                    "metric2": [None, None, None, 4.0, 5.0, 6.0],
+                    "timestamp": ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"],
+                    "asset": ["btc", "btc", "btc", "btc"],
+                    "m1": [1.0, 2.0, 3.0, None],
+                    "m2": [None, 10.0, 20.0, 30.0],
                 }
             )
             .with_columns(pl.col("timestamp").str.to_datetime())
-            .sort(["timestamp", "asset"])
+            .sort("timestamp")
         )
-
         self.assertTrue(merged.equals(expected))
 
+    def test_merge_three_metrics(self):
+        """Three metrics with staggered timestamp ranges."""
+        df1 = pl.DataFrame(
+            {
+                "timestamp": ["2023-01-01", "2023-01-02"],
+                "asset": ["btc", "btc"],
+                "m1": [1.0, 2.0],
+            }
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
-def do_merge(df1: pl.DataFrame, df2: pl.DataFrame) -> pl.DataFrame:
-    if df1 is None or df1.is_empty():
-        return df2
-    if df2 is None or df2.is_empty():
-        return df1
+        df2 = pl.DataFrame(
+            {
+                "timestamp": ["2023-01-02", "2023-01-03"],
+                "asset": ["btc", "btc"],
+                "m2": [10.0, 20.0],
+            }
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
-    merged = df1.join(df2, on=["timestamp", "asset"], how="full", suffix="_right")
+        df3 = pl.DataFrame(
+            {
+                "timestamp": ["2023-01-03", "2023-01-04"],
+                "asset": ["btc", "btc"],
+                "m3": [100.0, 200.0],
+            }
+        ).with_columns(pl.col("timestamp").str.to_datetime())
 
-    # Coalesce suffixed join-key columns back into the originals
-    for key in ("timestamp", "asset"):
-        right_key = f"{key}_right"
-        if right_key in merged.columns:
-            merged = merged.with_columns(
-                pl.col(right_key).fill_null(pl.col(key)).alias(key)
-            ).drop(right_key)
+        merged = merge_metrics([df1, df2, df3])
+        self.assertEqual(merged.height, 4)
+        self.assertEqual(set(merged.columns), {"timestamp", "asset", "m1", "m2", "m3"})
+        # No duplicate timestamps
+        dupes = merged.group_by("timestamp").len().filter(pl.col("len") > 1)
+        self.assertEqual(dupes.height, 0)
 
-    for col in df2.columns:
-        if col in ("timestamp", "asset"):
-            continue
-        if col in df1.columns:
-            merged = merged.with_columns(
-                pl.col(f"{col}_right").fill_null(pl.col(col)).alias(col)
-            ).drop(f"{col}_right")
 
-    return merged.sort(["timestamp", "asset"])
+def merge_metrics(dfs: List[pl.DataFrame]) -> pl.DataFrame:
+    """Merge a list of metric DataFrames for the SAME coin, aligned on timestamp."""
+    if not dfs:
+        raise ValueError("empty dfs list")
+
+    # All dfs for the same coin — drop asset from subsequent dfs (avoid suffix),
+    # join on timestamp only, then backfill null asset values.
+    base = dfs[0]
+    for df in dfs[1:]:
+        df = df.drop("asset")
+        base = base.join(df, on="timestamp", how="full", coalesce=True)
+
+    # Rows that only exist in subsequent dfs have null asset — fill from the known asset.
+    non_null = base["asset"].drop_nulls()
+    if len(non_null) > 0:
+        base = base.with_columns(pl.col("asset").fill_null(non_null[0]))
+
+    return base.sort("timestamp")
 
 
 def verify_token(idtoken: str) -> bool:
@@ -424,38 +396,47 @@ def main():
                 f"limited to {len(filtered_metrics_by_coin)} coins: {coins_to_process}"
             )
 
-        df = None
+        # Buffer results per coin to avoid cross-coin contamination
+        dfs_by_coin: Dict[str, List[pl.DataFrame]] = {
+            c: [] for c in filtered_metrics_by_coin
+        }
+        pending_counts: Dict[str, int] = {
+            c: len(ms) for c, ms in filtered_metrics_by_coin.items()
+        }
 
         with ThreadPoolExecutor(max_workers=args.parallelism) as executor:
             items = [(c, m) for c, ms in filtered_metrics_by_coin.items() for m in ms]
-            gen = executor.map(lambda c: do_work(c, args.idtoken), items)
 
-            for t in tqdm(gen, total=len(items), desc="fetching data"):
+            futures = {
+                executor.submit(do_work, item, args.idtoken): item for item in items
+            }
+
+            for future in tqdm(
+                as_completed(futures),
+                total=len(items),
+                desc="fetching data",
+            ):
+                coin = None
                 try:
-                    coin, metric, df2 = t
-
-                    filtered_metrics_by_coin[coin].remove(metric)
-
-                    # merge dataframes
+                    coin, metric, df2 = future.result()
                     if not df2.is_empty():
-                        if df is None:
-                            df = df2
-                        else:
-                            df = do_merge(df, df2)
-
-                    if len(filtered_metrics_by_coin[coin]) == 0:
-                        save(df, schema, coin, args.output_dir)
-                        del filtered_metrics_by_coin[coin]
-                        df = df.filter(pl.col("asset") != coin.lower())
-                        gc.collect()
-
+                        dfs_by_coin[coin].append(df2)
                 except Exception as e:
-                    l.error(f"error merging data: {e}")
-                    continue
+                    item = futures[future]
+                    coin = item[0]
+                    l.error(f"error fetching {coin}/{item[1]}: {e}")
 
-        if df is not None:
-            for coin in filtered_metrics_by_coin.keys():
-                save(df, schema, coin, args.output_dir)
+                if coin is not None and coin in pending_counts:
+                    pending_counts[coin] -= 1
+                    if pending_counts[coin] <= 0:
+                        if dfs_by_coin[coin]:
+                            l.info(f"all metrics collected for {coin}, merging...")
+                            merged = merge_metrics(dfs_by_coin[coin])
+                            save(merged, schema, coin, args.output_dir)
+                        else:
+                            l.warning(f"no data collected for {coin}, skipping")
+                        del dfs_by_coin[coin]
+                        del pending_counts[coin]
 
 
 if __name__ == "__main__":
