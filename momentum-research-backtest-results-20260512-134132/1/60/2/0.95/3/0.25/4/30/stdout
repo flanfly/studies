@@ -1,222 +1,0 @@
-root - INFO - Executing momentum-research-backtest.ipynb and saving output to momentum-research-backtest-results-20260512-134132/metrics_60_0.95_0.25_30.html
-root - INFO - Parameters: days_holding=60, top_percentile=0.95, bottom_percentile=0.25, days_momentum=30
-papermill - INFO - Input Notebook:  momentum-research-backtest.ipynb
-papermill - INFO - Output Notebook: /var/folders/tl/9yq9dyyj1sl6tn4r875nj5ym0000gn/T/vertex-ai-papermillt27i08uc/output.ipynb
-papermill - WARNING - Passed unknown parameter: days_momentum
-papermill - INFO - Executing notebook with kernel: python3
-papermill - INFO - Executing Cell 1---------------------------------------
-papermill - INFO - Ending Cell 1------------------------------------------
-papermill - INFO - Executing Cell 2---------------------------------------
-papermill - INFO - Ending Cell 2------------------------------------------
-papermill - INFO - Executing Cell 3---------------------------------------
-papermill - INFO - 
-days_holding: 60
-days_momentum_score: 40
-days_momentum_gate: []
-
-top_percentile: 0.95
-bottom_percentile: 0.25
-
-
-papermill - INFO - Ending Cell 3------------------------------------------
-papermill - INFO - Executing Cell 4---------------------------------------
-papermill - WARNING -   0%|          | 0/1224 [00:00<?, ?it/s]
-papermill - WARNING -   1%|          | 13/1224 [00:00<00:10, 117.51it/s]
-papermill - WARNING -   2%|▏         | 25/1224 [00:00<00:12, 93.55it/s] 
-papermill - WARNING -   3%|▎         | 35/1224 [00:00<00:13, 88.36it/s]
-papermill - WARNING -   4%|▎         | 44/1224 [00:00<00:13, 85.39it/s]
-papermill - WARNING -   4%|▍         | 54/1224 [00:00<00:13, 86.28it/s]
-papermill - WARNING -   5%|▌         | 63/1224 [00:00<00:17, 64.98it/s]
-papermill - WARNING -   6%|▌         | 71/1224 [00:00<00:17, 65.53it/s]
-papermill - WARNING -   6%|▋         | 78/1224 [00:01<00:19, 59.06it/s]
-papermill - WARNING -   7%|▋         | 86/1224 [00:01<00:17, 63.79it/s]
-papermill - WARNING -   8%|▊         | 95/1224 [00:01<00:16, 68.53it/s]
-papermill - WARNING -   8%|▊         | 103/1224 [00:01<00:15, 70.65it/s]
-papermill - WARNING -   9%|▉         | 113/1224 [00:01<00:14, 78.15it/s]
-papermill - WARNING -  10%|▉         | 122/1224 [00:01<00:14, 77.72it/s]
-papermill - WARNING -  11%|█         | 133/1224 [00:01<00:12, 84.41it/s]
-papermill - WARNING -  12%|█▏        | 142/1224 [00:01<00:13, 82.22it/s]
-papermill - WARNING -  13%|█▎        | 154/1224 [00:01<00:11, 91.61it/s]
-papermill - WARNING -  14%|█▎        | 167/1224 [00:02<00:10, 98.71it/s]
-papermill - WARNING -  15%|█▍        | 181/1224 [00:02<00:09, 109.99it/s]
-papermill - WARNING -  16%|█▌        | 193/1224 [00:02<00:10, 95.69it/s] 
-papermill - WARNING -  17%|█▋        | 204/1224 [00:02<00:13, 76.38it/s]
-papermill - WARNING -  17%|█▋        | 213/1224 [00:02<00:13, 72.99it/s]
-papermill - WARNING -  18%|█▊        | 221/1224 [00:02<00:14, 67.41it/s]
-papermill - WARNING -  19%|█▊        | 229/1224 [00:03<00:17, 56.00it/s]
-papermill - WARNING -  19%|█▉        | 236/1224 [00:03<00:17, 56.23it/s]
-papermill - WARNING -  20%|█▉        | 244/1224 [00:03<00:16, 58.34it/s]
-papermill - WARNING -  21%|██        | 251/1224 [00:03<00:18, 53.53it/s]
-papermill - WARNING -  21%|██        | 257/1224 [00:03<00:17, 54.12it/s]
-papermill - WARNING -  22%|██▏       | 264/1224 [00:03<00:16, 57.83it/s]
-papermill - WARNING -  22%|██▏       | 273/1224 [00:03<00:14, 65.83it/s]
-papermill - WARNING -  23%|██▎       | 281/1224 [00:03<00:14, 66.10it/s]
-papermill - WARNING -  24%|██▎       | 288/1224 [00:04<00:14, 62.68it/s]
-papermill - WARNING -  24%|██▍       | 296/1224 [00:04<00:13, 66.70it/s]
-papermill - WARNING -  25%|██▍       | 303/1224 [00:04<00:13, 66.58it/s]
-papermill - WARNING -  26%|██▌       | 315/1224 [00:04<00:11, 78.27it/s]
-papermill - WARNING -  26%|██▋       | 323/1224 [00:04<00:11, 78.10it/s]
-papermill - WARNING -  27%|██▋       | 331/1224 [00:04<00:12, 69.46it/s]
-papermill - WARNING -  28%|██▊       | 340/1224 [00:04<00:11, 73.92it/s]
-papermill - WARNING -  29%|██▊       | 350/1224 [00:04<00:11, 78.11it/s]
-papermill - WARNING -  29%|██▉       | 361/1224 [00:04<00:10, 86.24it/s]
-papermill - WARNING -  30%|███       | 370/1224 [00:05<00:10, 77.87it/s]
-papermill - WARNING -  31%|███       | 379/1224 [00:05<00:10, 79.07it/s]
-papermill - WARNING -  32%|███▏      | 388/1224 [00:05<00:11, 73.56it/s]
-papermill - WARNING -  32%|███▏      | 397/1224 [00:05<00:10, 76.71it/s]
-papermill - WARNING -  33%|███▎      | 405/1224 [00:05<00:11, 72.26it/s]
-papermill - WARNING -  34%|███▎      | 413/1224 [00:05<00:12, 64.06it/s]
-papermill - WARNING -  34%|███▍      | 420/1224 [00:05<00:12, 64.58it/s]
-papermill - WARNING -  35%|███▌      | 429/1224 [00:05<00:11, 70.96it/s]
-papermill - WARNING -  36%|███▌      | 437/1224 [00:06<00:12, 61.48it/s]
-papermill - WARNING -  36%|███▋      | 446/1224 [00:06<00:11, 66.43it/s]
-papermill - WARNING -  37%|███▋      | 453/1224 [00:06<00:12, 61.28it/s]
-papermill - WARNING -  38%|███▊      | 462/1224 [00:06<00:11, 67.92it/s]
-papermill - WARNING -  38%|███▊      | 471/1224 [00:06<00:10, 71.38it/s]
-papermill - WARNING -  39%|███▉      | 479/1224 [00:06<00:10, 67.97it/s]
-papermill - WARNING -  40%|███▉      | 486/1224 [00:06<00:12, 60.81it/s]
-papermill - WARNING -  40%|████      | 494/1224 [00:06<00:11, 64.79it/s]
-papermill - WARNING -  41%|████      | 501/1224 [00:07<00:11, 61.32it/s]
-papermill - WARNING -  42%|████▏     | 508/1224 [00:07<00:12, 55.82it/s]
-papermill - WARNING -  42%|████▏     | 515/1224 [00:07<00:12, 54.96it/s]
-papermill - WARNING -  43%|████▎     | 522/1224 [00:07<00:12, 57.04it/s]
-papermill - WARNING -  43%|████▎     | 528/1224 [00:07<00:17, 40.65it/s]
-papermill - WARNING -  44%|████▎     | 533/1224 [00:07<00:16, 42.46it/s]
-papermill - WARNING -  44%|████▍     | 541/1224 [00:07<00:13, 50.82it/s]
-papermill - WARNING -  45%|████▍     | 547/1224 [00:08<00:15, 44.43it/s]
-papermill - WARNING -  45%|████▌     | 553/1224 [00:08<00:16, 39.92it/s]
-papermill - WARNING -  46%|████▌     | 559/1224 [00:08<00:15, 43.73it/s]
-papermill - WARNING -  46%|████▌     | 565/1224 [00:08<00:14, 45.94it/s]
-papermill - WARNING -  47%|████▋     | 570/1224 [00:08<00:14, 45.02it/s]
-papermill - WARNING -  47%|████▋     | 576/1224 [00:08<00:13, 47.33it/s]
-papermill - WARNING -  48%|████▊     | 584/1224 [00:08<00:11, 55.62it/s]
-papermill - WARNING -  49%|████▊     | 594/1224 [00:08<00:09, 66.63it/s]
-papermill - WARNING -  49%|████▉     | 605/1224 [00:09<00:07, 77.44it/s]
-papermill - WARNING -  50%|█████     | 614/1224 [00:09<00:08, 73.99it/s]
-papermill - WARNING -  51%|█████     | 622/1224 [00:09<00:08, 73.07it/s]
-papermill - WARNING -  52%|█████▏    | 631/1224 [00:09<00:07, 76.52it/s]
-papermill - WARNING -  52%|█████▏    | 641/1224 [00:09<00:07, 80.50it/s]
-papermill - WARNING -  53%|█████▎    | 650/1224 [00:09<00:07, 81.01it/s]
-papermill - WARNING -  54%|█████▍    | 659/1224 [00:09<00:07, 75.05it/s]
-papermill - WARNING -  54%|█████▍    | 667/1224 [00:09<00:07, 75.12it/s]
-papermill - WARNING -  55%|█████▌    | 675/1224 [00:10<00:08, 64.87it/s]
-papermill - WARNING -  56%|█████▌    | 684/1224 [00:10<00:07, 69.99it/s]
-papermill - WARNING -  57%|█████▋    | 692/1224 [00:10<00:07, 70.14it/s]
-papermill - WARNING -  57%|█████▋    | 700/1224 [00:10<00:07, 69.25it/s]
-papermill - WARNING -  58%|█████▊    | 711/1224 [00:10<00:06, 78.11it/s]
-papermill - WARNING -  59%|█████▉    | 722/1224 [00:10<00:05, 85.48it/s]
-papermill - WARNING -  60%|█████▉    | 731/1224 [00:10<00:06, 78.84it/s]
-papermill - WARNING -  60%|██████    | 740/1224 [00:10<00:06, 75.57it/s]
-papermill - WARNING -  61%|██████    | 749/1224 [00:10<00:06, 77.89it/s]
-papermill - WARNING -  62%|██████▏   | 757/1224 [00:11<00:06, 76.18it/s]
-papermill - WARNING -  63%|██████▎   | 767/1224 [00:11<00:05, 79.32it/s]
-papermill - WARNING -  63%|██████▎   | 775/1224 [00:11<00:06, 71.47it/s]
-papermill - WARNING -  64%|██████▍   | 783/1224 [00:11<00:06, 69.56it/s]
-papermill - WARNING -  65%|██████▍   | 791/1224 [00:11<00:06, 70.24it/s]
-papermill - WARNING -  65%|██████▌   | 799/1224 [00:11<00:08, 48.52it/s]
-papermill - WARNING -  66%|██████▌   | 807/1224 [00:11<00:07, 54.44it/s]
-papermill - WARNING -  67%|██████▋   | 815/1224 [00:12<00:06, 59.88it/s]
-papermill - WARNING -  67%|██████▋   | 824/1224 [00:12<00:05, 66.77it/s]
-papermill - WARNING -  68%|██████▊   | 832/1224 [00:12<00:05, 67.29it/s]
-papermill - WARNING -  69%|██████▊   | 840/1224 [00:12<00:05, 68.56it/s]
-papermill - WARNING -  69%|██████▉   | 848/1224 [00:12<00:05, 67.06it/s]
-papermill - WARNING -  70%|███████   | 859/1224 [00:12<00:04, 77.71it/s]
-papermill - WARNING -  71%|███████   | 868/1224 [00:12<00:05, 70.47it/s]
-papermill - WARNING -  72%|███████▏  | 876/1224 [00:13<00:06, 52.94it/s]
-papermill - WARNING -  72%|███████▏  | 883/1224 [00:13<00:06, 51.52it/s]
-papermill - WARNING -  73%|███████▎  | 890/1224 [00:13<00:06, 53.96it/s]
-papermill - WARNING -  73%|███████▎  | 896/1224 [00:13<00:06, 52.79it/s]
-papermill - WARNING -  74%|███████▍  | 903/1224 [00:13<00:05, 54.60it/s]
-papermill - WARNING -  74%|███████▍  | 910/1224 [00:13<00:05, 55.84it/s]
-papermill - WARNING -  75%|███████▌  | 918/1224 [00:13<00:04, 61.69it/s]
-papermill - WARNING -  76%|███████▌  | 925/1224 [00:13<00:05, 54.82it/s]
-papermill - WARNING -  76%|███████▌  | 931/1224 [00:14<00:05, 50.16it/s]
-papermill - WARNING -  77%|███████▋  | 937/1224 [00:14<00:06, 45.84it/s]
-papermill - WARNING -  77%|███████▋  | 942/1224 [00:14<00:06, 42.39it/s]
-papermill - WARNING -  77%|███████▋  | 947/1224 [00:14<00:07, 36.45it/s]
-papermill - WARNING -  78%|███████▊  | 951/1224 [00:14<00:07, 35.30it/s]
-papermill - WARNING -  78%|███████▊  | 960/1224 [00:14<00:05, 46.30it/s]
-papermill - WARNING -  79%|███████▉  | 965/1224 [00:14<00:06, 42.02it/s]
-papermill - WARNING -  79%|███████▉  | 970/1224 [00:15<00:08, 28.47it/s]
-papermill - WARNING -  80%|███████▉  | 975/1224 [00:15<00:07, 31.80it/s]
-papermill - WARNING -  80%|███████▉  | 979/1224 [00:15<00:07, 32.91it/s]
-papermill - WARNING -  80%|████████  | 984/1224 [00:15<00:06, 34.82it/s]
-papermill - WARNING -  81%|████████  | 990/1224 [00:15<00:05, 39.46it/s]
-papermill - WARNING -  81%|████████▏ | 996/1224 [00:15<00:05, 43.96it/s]
-papermill - WARNING -  82%|████████▏ | 1001/1224 [00:15<00:05, 39.70it/s]
-papermill - WARNING -  82%|████████▏ | 1006/1224 [00:16<00:05, 40.46it/s]
-papermill - WARNING -  83%|████████▎ | 1011/1224 [00:16<00:05, 40.68it/s]
-papermill - WARNING -  83%|████████▎ | 1016/1224 [00:16<00:04, 41.66it/s]
-papermill - WARNING -  83%|████████▎ | 1021/1224 [00:16<00:04, 42.79it/s]
-papermill - WARNING -  84%|████████▍ | 1029/1224 [00:16<00:03, 51.55it/s]
-papermill - WARNING -  85%|████████▍ | 1035/1224 [00:16<00:03, 53.56it/s]
-papermill - WARNING -  85%|████████▌ | 1041/1224 [00:16<00:03, 48.38it/s]
-papermill - WARNING -  86%|████████▌ | 1048/1224 [00:16<00:03, 51.98it/s]
-papermill - WARNING -  86%|████████▌ | 1054/1224 [00:17<00:03, 47.48it/s]
-papermill - WARNING -  87%|████████▋ | 1062/1224 [00:17<00:02, 54.44it/s]
-papermill - WARNING -  87%|████████▋ | 1068/1224 [00:17<00:02, 53.70it/s]
-papermill - WARNING -  88%|████████▊ | 1075/1224 [00:17<00:02, 57.37it/s]
-papermill - WARNING -  88%|████████▊ | 1081/1224 [00:17<00:02, 54.04it/s]
-papermill - WARNING -  89%|████████▉ | 1087/1224 [00:17<00:02, 51.36it/s]
-papermill - WARNING -  89%|████████▉ | 1093/1224 [00:17<00:02, 51.71it/s]
-papermill - WARNING -  90%|████████▉ | 1099/1224 [00:17<00:02, 50.58it/s]
-papermill - WARNING -  90%|█████████ | 1105/1224 [00:18<00:02, 50.10it/s]
-papermill - WARNING -  91%|█████████ | 1111/1224 [00:18<00:02, 48.56it/s]
-papermill - WARNING -  91%|█████████ | 1116/1224 [00:18<00:02, 45.49it/s]
-papermill - WARNING -  92%|█████████▏| 1121/1224 [00:18<00:02, 44.63it/s]
-papermill - WARNING -  92%|█████████▏| 1127/1224 [00:18<00:02, 46.88it/s]
-papermill - WARNING -  92%|█████████▏| 1132/1224 [00:18<00:02, 44.91it/s]
-papermill - WARNING -  93%|█████████▎| 1137/1224 [00:18<00:02, 34.53it/s]
-papermill - WARNING -  93%|█████████▎| 1141/1224 [00:18<00:02, 35.43it/s]
-papermill - WARNING -  94%|█████████▎| 1145/1224 [00:19<00:03, 24.11it/s]
-papermill - WARNING -  94%|█████████▍| 1149/1224 [00:19<00:03, 24.89it/s]
-papermill - WARNING -  94%|█████████▍| 1155/1224 [00:19<00:02, 30.43it/s]
-papermill - WARNING -  95%|█████████▍| 1161/1224 [00:19<00:01, 36.17it/s]
-papermill - WARNING -  95%|█████████▌| 1166/1224 [00:19<00:01, 37.92it/s]
-papermill - WARNING -  96%|█████████▌| 1171/1224 [00:19<00:01, 37.20it/s]
-papermill - WARNING -  96%|█████████▌| 1178/1224 [00:20<00:01, 44.95it/s]
-papermill - WARNING -  97%|█████████▋| 1184/1224 [00:20<00:00, 44.86it/s]
-papermill - WARNING -  97%|█████████▋| 1190/1224 [00:20<00:00, 46.63it/s]
-papermill - WARNING -  98%|█████████▊| 1196/1224 [00:20<00:00, 49.65it/s]
-papermill - WARNING -  98%|█████████▊| 1202/1224 [00:20<00:00, 47.57it/s]
-papermill - WARNING -  99%|█████████▊| 1207/1224 [00:20<00:00, 46.17it/s]
-papermill - WARNING -  99%|█████████▉| 1213/1224 [00:20<00:00, 47.29it/s]
-papermill - WARNING - 100%|█████████▉| 1218/1224 [00:20<00:00, 46.87it/s]
-papermill - WARNING - 100%|█████████▉| 1223/1224 [00:21<00:00, 42.71it/s]
-papermill - WARNING - 100%|██████████| 1224/1224 [00:21<00:00, 58.10it/s]
-papermill - WARNING - 
-
-papermill - INFO - <Figure size 1200x800 with 2 Axes>
-papermill - INFO - mfe_std: 0.3739633698027666 (None)
-
-papermill - INFO - fees: 0.08384619352448267 (None)
-
-papermill - INFO - mae_std: 0.3047632707519746 (None)
-
-papermill - INFO - cagr: -0.579734657429039 (0.582393648182554)
-
-papermill - INFO - maxdd: -0.5371449362998693 (-0.2812226384497776)
-
-papermill - INFO - sharpe: -1.6256564090550147 (0.6573939990563521)
-
-papermill - INFO - ir: -1.4345767249431167 (None)
-
-papermill - INFO - mfe: 0.13295036356627385 (None)
-
-papermill - INFO - sortino: -2.41788077745903 (1.2896542090944028)
-
-papermill - INFO - ann_std: 0.3420688993298873 (0.37915241581153036)
-
-papermill - INFO - mae: -0.11285988540201813 (None)
-
-papermill - INFO - win_rate: 0.5690400308497633 (None)
-
-papermill - INFO - ann_return: -0.545988162987526 (0.23533636106967715)
-
-papermill - INFO - Ending Cell 4------------------------------------------
-papermill - INFO - Executing Cell 5---------------------------------------
-papermill - INFO - Ending Cell 5------------------------------------------
-root - INFO - Saving executed notebook to momentum-research-backtest-results-20260512-134132/metrics_60_0.95_0.25_30.html
-traitlets - WARNING - Alternative text is missing on 1 image(s).
-root - INFO - Metrics: mfe_std=0.3739633698027666, fees=0.08384619352448267, mae_std=0.3047632707519746, cagr=-0.579734657429039, maxdd=-0.5371449362998693, sharpe=-1.6256564090550147, ir=-1.4345767249431167, mfe=0.13295036356627385, sortino=-2.41788077745903, ann_std=0.3420688993298873, mae=-0.11285988540201813, win_rate=0.5690400308497633, ann_return=-0.545988162987526
-root - INFO - Saving metrics to momentum-research-backtest-results-20260512-134132/metrics_60_0.95_0.25_30.csv

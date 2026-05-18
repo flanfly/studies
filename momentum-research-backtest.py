@@ -50,25 +50,28 @@ import backtest as bt
 import functools as fc
 import operator
 
-df = (
+polaritydf = (
     pl.read_parquet("polarity/latest-data/*parquet")
     .rename(
         {
             "asset": "symbol",
             "price": "close",
+            "total_volume":"volume",
         }
     )
-    .with_columns(ts=pl.col("ts").dt.cast_time_unit("us"))
+)
 
-    #.join(
-    #    pl.read_parquet('stables-1d.parquet')
-    #    .with_columns(
-    #        ts=pl.col("ts").dt.cast_time_unit("us").dt.replace_time_zone(None),
-    #        symbol=pl.col('symbol').str.to_lowercase().str.strip_suffix('usdt'),
-    #    ),
-    #    on=['ts','symbol'],
-    #    how='inner'
-    #)
+binancedf = (
+    pl.read_parquet('stables-1d.parquet')
+   .rename(
+        {
+            "quote_volume":"volume",
+        }
+    )
+)
+
+df = (polaritydf
+    .with_columns(ts=pl.col("ts").dt.cast_time_unit("us"))
     .sort(["symbol", "ts"])
     .with_columns(**{
         f'mom{n}': pl.col("close").pct_change(n).over("symbol")
@@ -79,28 +82,12 @@ df = (
             pl.col(f"mom{days_momentum_score_P}").rank(method="ordinal").over("ts")
             / pl.col(f"mom{days_momentum_score_P}").count().over("ts")
         ),
-        volume=pl.col('total_volume').rolling_mean(days_holding_P).over('symbol'),
+        volume=pl.col('volume').rolling_mean(days_holding_P).over('symbol'),
     )
     .sort("ts")
-    .filter(pl.col("ts").dt.year() >= 2020)
+    .filter(pl.col("ts").dt.year() >= 2026)
     .drop_nulls(['volume'])
 )
-
-#print(df)
-
-#df = (
-#    df.join(
-#        df.filter(pl.col('symbol') == 'btc')
-#        .sort(["symbol", "ts"])
-#        .select(
-#            ts=pl.col('ts'),
-##            mkt=(pl.col('close') - pl.col('mdccv')) / pl.col('close'),
-#            mktdelta=pl.col('mdccv').diff(5).over('symbol'),
-#        ),
-#        on='ts',
-#        how='inner',
-#    )
-#)
 
 class Alpha(bt.AlphaModel):
     def __init__(self, long_expr: pl.Expr, short_expr: pl.Expr):
@@ -139,11 +126,8 @@ test = bt.Backtest(
             else pl.lit(False)
         ),
     ),
-    #portfolio=bt.VolumeWeighted(),
-    #risk=bt.MaxDrawdown(.1, .1),
     benchmark="btc",
     period=days_holding_P,
-    eager_rebalance=True,
 )
 
 test.run()
