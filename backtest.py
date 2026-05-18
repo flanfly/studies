@@ -978,54 +978,77 @@ class Backtest:
                     .then(pl.col("exit_price") / pl.col("entry_price") - 1)
                     .otherwise(1 - pl.col("exit_price") / pl.col("entry_price"))
                 )
-                returns_all = np.clip(
-                    ret_df["pnl_pct"].drop_nulls().to_numpy(), -1.0, 5.0
+                # Winsorise simple returns at -99.99 % / +500 % (clip away from
+                # -100 % so log(1+r) stays finite), then convert to log returns.
+                simple_clipped = np.clip(
+                    ret_df["pnl_pct"].drop_nulls().to_numpy(), -0.9999, 5.0
                 )
+                log_returns = np.log1p(simple_clipped)
 
-                if len(returns_all) > 1:
-                    mu    = float(np.mean(returns_all))
-                    sigma = float(np.std(returns_all, ddof=1))
-                    skewness    = float(sp_skew(returns_all))
-                    kurt_excess = float(sp_kurtosis(returns_all, fisher=True))
+                if len(log_returns) > 1:
+                    mu_log    = float(np.mean(log_returns))
+                    sig_log   = float(np.std(log_returns, ddof=1))
+                    skewness    = float(sp_skew(log_returns))
+                    kurt_excess = float(sp_kurtosis(log_returns, fisher=True))
 
-                    # Fit Johnson SU — 4-parameter family that can capture any
-                    # combination of mean, σ, skewness and kurtosis while always
-                    # remaining a valid (non-negative, integrating-to-1) PDF.
-                    js_params = johnsonsu.fit(returns_all)
+                    # Fit Johnson SU in log-return space — 4 parameters to match
+                    # all four moments while staying a valid PDF.
+                    js_params = johnsonsu.fit(log_returns)
 
-                    # X grid: use observed ±4σ clamped to winsorise limits
-                    x_lo = max(mu - 4 * sigma, -1.0)
-                    x_hi = min(mu + 4 * sigma,  5.0)
-                    x = np.linspace(x_lo, x_hi, 800)
+                    # X grid in log-return space, clamped to winsorise bounds
+                    x_lo = max(mu_log - 4 * sig_log, np.log1p(-0.9999))
+                    x_hi = min(mu_log + 4 * sig_log, np.log1p(5.0))
+                    x_log = np.linspace(x_lo, x_hi, 800)
 
                     fig2, ax_ret = plt.subplots(figsize=(12, 5))
 
-                    # Histogram of all trades
+                    # Johnson SU — filled gray area drawn first so histogram sits on top
+                    fitted_pdf = johnsonsu.pdf(x_log, *js_params)
+                    mu_simple  = float(np.expm1(mu_log))
+                    lo_simple  = float(np.expm1(mu_log - sig_log))
+                    hi_simple  = float(np.expm1(mu_log + sig_log))
+                    ax_ret.fill_between(
+                        x_log, fitted_pdf,
+                        color="lightgray", alpha=0.8, linewidth=0,
+                        label=f"Johnson SU fit  μ={mu_simple:.2%}  σ⁻={lo_simple:.2%}  σ⁺={hi_simple:.2%}"
+                    )
+
+                    # Histogram in log-return space on top of the filled curve
                     ax_ret.hist(
-                        returns_all,
-                        bins=min(120, max(40, len(returns_all) // 5)),
-                        density=True, alpha=0.35, color="steelblue",
-                        label=f"All trades (n={len(returns_all)})"
+                        log_returns,
+                        bins=min(120, max(40, len(log_returns) // 5)),
+                        density=True, alpha=0.5, color="steelblue",
+                        label="All trades"
                     )
 
-                    # Johnson SU fitted curve
-                    fitted_pdf = johnsonsu.pdf(x, *js_params)
-                    ax_ret.plot(
-                        x, fitted_pdf, color="black", linewidth=1.5,
-                        label=f"Johnson SU fit  μ={mu:.2%}  σ={sigma:.2%}"
-                    )
+                    # Vertical markers — positions in log space, labels in simple returns.
+                    # Each line gets an inline annotation at the top of the axes.
+                    def _vline(ax, xpos, color, lw, ls, top_label, val_label):
+                        ax.axvline(xpos, color=color, linewidth=lw, linestyle=ls)
+                        # two-line label: descriptor on top, value below
+                        ax.text(
+                            xpos, 1.015, f"{top_label}\n{val_label}",
+                            transform=ax.get_xaxis_transform(),  # x in data, y in axes coords
+                            ha="center", va="bottom", fontsize=7,
+                            color="black", clip_on=False,
+                            linespacing=1.3,
+                        )
 
-                    # Shade ±1σ band under the fitted curve
-                    band = (x >= mu - sigma) & (x <= mu + sigma)
-                    ax_ret.fill_between(x[band], fitted_pdf[band], alpha=0.10, color="black")
+                    ax_ret.axvline(np.log1p(0), color="dimgray", linewidth=0.9, linestyle="-")
+                    _vline(ax_ret, mu_log,
+                           "royalblue", 1.5, "--", "mean", f"{mu_simple:.2%}")
+                    _vline(ax_ret, mu_log - sig_log,
+                           "darkorange", 1.2, ":", "−1σ", f"{lo_simple:.2%}")
+                    _vline(ax_ret, mu_log + sig_log,
+                           "darkorange", 1.2, ":", "+1σ", f"{hi_simple:.2%}")
+                    _vline(ax_ret, mu_log - 2 * sig_log,
+                           "firebrick", 1.0, ":", "−2σ",
+                           f"{float(np.expm1(mu_log - 2 * sig_log)):.2%}")
+                    _vline(ax_ret, mu_log + 2 * sig_log,
+                           "firebrick", 1.0, ":", "+2σ",
+                           f"{float(np.expm1(mu_log + 2 * sig_log)):.2%}")
 
-                    # Vertical markers (overall stats)
-                    ax_ret.axvline(0,           color="black",      linewidth=1.5, linestyle="-",  label="Zero")
-                    ax_ret.axvline(mu,           color="royalblue",  linewidth=1.5, linestyle="--", label=f"Mean {mu:.2%}")
-                    ax_ret.axvline(mu - sigma,   color="darkorange", linewidth=1.2, linestyle=":",  label=f"−1σ {mu-sigma:.2%}")
-                    ax_ret.axvline(mu + sigma,   color="darkorange", linewidth=1.2, linestyle=":",  label=f"+1σ {mu+sigma:.2%}")
-
-                    # Skew / kurtosis annotation
+                    # Skew / kurtosis annotation (computed on log returns)
                     ax_ret.text(
                         0.98, 0.97,
                         f"skew = {skewness:.3f}\nexcess kurt = {kurt_excess:.3f}",
@@ -1034,13 +1057,20 @@ class Backtest:
                         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
                     )
 
-                    ax_ret.xaxis.set_major_formatter(
-                        mticker.PercentFormatter(xmax=1, decimals=0)
+                    # X-axis ticks: choose nice simple-return levels, place them
+                    # at their log-return positions, label as simple percentages.
+                    nice_simple = [-0.9, -0.75, -0.5, -0.25, 0.0,
+                                   0.25, 0.5, 1.0, 2.0, 3.0, 5.0]
+                    tick_log = [np.log1p(s) for s in nice_simple
+                                if x_lo <= np.log1p(s) <= x_hi]
+                    ax_ret.set_xticks(tick_log)
+                    ax_ret.set_xticklabels(
+                        [f"{np.expm1(t):.0%}" for t in tick_log]
                     )
-                    ax_ret.set_xlabel("Trade return (winsorised −100 % / +500 %)")
-                    ax_ret.set_ylabel("Density")
-                    ax_ret.set_title("Trade Returns Distribution")
-                    ax_ret.legend(fontsize=8, ncol=2)
+
+                    ax_ret.set_xlabel("Trade return, simple (winsorised −100 % / +500 %)")
+                    ax_ret.set_ylabel("Density (log-return space)")
+                    ax_ret.set_title(f"Trade Returns Distribution  (n = {len(log_returns)})", pad=28)
                     plt.tight_layout()
                     plt.show()
 
