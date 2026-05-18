@@ -965,4 +965,83 @@ class Backtest:
             plt.tight_layout()
             plt.show()
 
+            # --- Trade Returns Distribution ---
+            if self.trades:
+                import numpy as np
+                import matplotlib.ticker as mticker
+                from scipy.stats import skew as sp_skew, kurtosis as sp_kurtosis
+                from scipy.stats import johnsonsu
+
+                # Build a fresh trades frame with pnl_pct and year
+                ret_df = pl.from_dicts([t.__dict__ for t in self.trades]).with_columns(
+                    pnl_pct=pl.when(pl.col("shares") > 0)
+                    .then(pl.col("exit_price") / pl.col("entry_price") - 1)
+                    .otherwise(1 - pl.col("exit_price") / pl.col("entry_price"))
+                )
+                returns_all = np.clip(
+                    ret_df["pnl_pct"].drop_nulls().to_numpy(), -1.0, 5.0
+                )
+
+                if len(returns_all) > 1:
+                    mu    = float(np.mean(returns_all))
+                    sigma = float(np.std(returns_all, ddof=1))
+                    skewness    = float(sp_skew(returns_all))
+                    kurt_excess = float(sp_kurtosis(returns_all, fisher=True))
+
+                    # Fit Johnson SU — 4-parameter family that can capture any
+                    # combination of mean, σ, skewness and kurtosis while always
+                    # remaining a valid (non-negative, integrating-to-1) PDF.
+                    js_params = johnsonsu.fit(returns_all)
+
+                    # X grid: use observed ±4σ clamped to winsorise limits
+                    x_lo = max(mu - 4 * sigma, -1.0)
+                    x_hi = min(mu + 4 * sigma,  5.0)
+                    x = np.linspace(x_lo, x_hi, 800)
+
+                    fig2, ax_ret = plt.subplots(figsize=(12, 5))
+
+                    # Histogram of all trades
+                    ax_ret.hist(
+                        returns_all,
+                        bins=min(120, max(40, len(returns_all) // 5)),
+                        density=True, alpha=0.35, color="steelblue",
+                        label=f"All trades (n={len(returns_all)})"
+                    )
+
+                    # Johnson SU fitted curve
+                    fitted_pdf = johnsonsu.pdf(x, *js_params)
+                    ax_ret.plot(
+                        x, fitted_pdf, color="black", linewidth=1.5,
+                        label=f"Johnson SU fit  μ={mu:.2%}  σ={sigma:.2%}"
+                    )
+
+                    # Shade ±1σ band under the fitted curve
+                    band = (x >= mu - sigma) & (x <= mu + sigma)
+                    ax_ret.fill_between(x[band], fitted_pdf[band], alpha=0.10, color="black")
+
+                    # Vertical markers (overall stats)
+                    ax_ret.axvline(0,           color="black",      linewidth=1.5, linestyle="-",  label="Zero")
+                    ax_ret.axvline(mu,           color="royalblue",  linewidth=1.5, linestyle="--", label=f"Mean {mu:.2%}")
+                    ax_ret.axvline(mu - sigma,   color="darkorange", linewidth=1.2, linestyle=":",  label=f"−1σ {mu-sigma:.2%}")
+                    ax_ret.axvline(mu + sigma,   color="darkorange", linewidth=1.2, linestyle=":",  label=f"+1σ {mu+sigma:.2%}")
+
+                    # Skew / kurtosis annotation
+                    ax_ret.text(
+                        0.98, 0.97,
+                        f"skew = {skewness:.3f}\nexcess kurt = {kurt_excess:.3f}",
+                        transform=ax_ret.transAxes,
+                        ha="right", va="top", fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+                    )
+
+                    ax_ret.xaxis.set_major_formatter(
+                        mticker.PercentFormatter(xmax=1, decimals=0)
+                    )
+                    ax_ret.set_xlabel("Trade return (winsorised −100 % / +500 %)")
+                    ax_ret.set_ylabel("Density")
+                    ax_ret.set_title("Trade Returns Distribution")
+                    ax_ret.legend(fontsize=8, ncol=2)
+                    plt.tight_layout()
+                    plt.show()
+
         return final_report
