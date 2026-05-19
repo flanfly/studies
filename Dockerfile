@@ -9,6 +9,8 @@ run apt-get update && apt-get install -y --no-install-recommends \
     git-crypt \
     parallel \
     r-base \
+    r-base-dev \
+    libicu-dev \
     libpcre2-dev \
     && rm -rf /var/lib/apt/lists/*
 
