@@ -9,6 +9,7 @@ run apt-get update && apt-get install -y --no-install-recommends \
     git-crypt \
     parallel \
     r-base \
+    libpcre2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 copy --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /bin/
