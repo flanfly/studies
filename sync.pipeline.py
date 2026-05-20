@@ -56,7 +56,7 @@ def synchronize_1m_archives(today: str, status: dsl.OutputPath(str)):
     """Makes sure 1-minute kline data is in sync with Binance."""
 
     return dsl.ContainerSpec(
-        image=DATA_PIPELINE_IMAGE,
+        image=IMAGE,
         command=["bash", "-c"],
         args=[
             """
@@ -86,7 +86,7 @@ def derive_daily_klines(
     """Resample 1m klines into 1d klines."""
 
     return dsl.ContainerSpec(
-        image=DATA_PIPELINE_IMAGE,
+        image=IMAGE,
         command=["bash", "-c"],
         args=[
             """
@@ -119,7 +119,7 @@ uv run sync-datastore.py -d \
 )
 def pipeline():
     sync = (
-        synchronize_1m_archives(today=dsl.PIPELINE_JOB_ID_PLACEHOLDER)
+        synchronize_1m_archives(today=datetime.now().strftime("%Y-%m-%d"))
         .set_cpu_limit("8")
         .set_memory_limit("16G")
     )
