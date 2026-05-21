@@ -964,7 +964,7 @@ import polars as pl
 
 
 # %%
-pl.read_csv('cmc_listings.csv')
+pl.read_parquet('cmc-usd-1d-2020-2026.parquet')
 
 
 # %%
@@ -1475,3 +1475,116 @@ dtype = pl.Struct([
     .sort('sortino')
     
 ).write_csv('res.csv')
+
+# %%
+# performance based on cross-sectional volatility. Expected Returns, Figure 19.5 (a) documents
+# the consistent outperformance of low-volatility stocks over high-volatility stocks in the
+# Ang et al. (2006 ) study, based on a broad cross-section of U.S. stocks from 1963 to 2000.
+# Figure 19.5 ( b ) shows the returns of high-volatility and low-volatility quintiles separately
+# and adds more recent evidence from Robeco's David Blitz and UBS's Giuliano De Rossi. Blitz's
+# data are on the large-cap universe since 1986; the results are weaker but low-volatility
+# stocks still outperform. De Rossi's data are for a broad universe ( Russell 3000 stocks )
+# and cover the period from 2000 through 2009; over this period, high-volatility stocks
+# outperform ( especially high-volatility small caps, which rallied during the 2003 and 2009
+# recoveries ). The inferences appear sensitive to research design issues; high-volatility
+# stocks ' relative performance in the 2000s would be clearly worse if we exclude small caps,
+# use value-weighted rather than equal-weighted quintile portfolios, or control for other
+# factors including size. As noted, trading costs and other limits to arbitrage may make
+# this regularity hard to exploit in practice. 
+
+import polars as pl
+
+(
+    pl.read_parquet('stables-1d.parquet')
+    .rename({"quote_volume":"volume",})
+    .sort(['symbol','ts'])
+    .with_columns(
+        ho = (pl.col('high') / pl.col('open')).log(),
+        hc = (pl.col('high') / pl.col('close')).log(),
+        lo = (pl.col('low') / pl.col('open')).log(),
+        lc = (pl.col('low') / pl.col('close')).log(),
+    )
+    .with_columns(
+        var=(pl.col('ho') * pl.col('hc')) + (pl.col('lo') * pl.col('lc'))
+    )
+    .select([
+        pl.col('ts'),
+        pl.col('symbol'),
+        pl.col('close'),
+        pl.col('volume'),
+        pl.col('var').rolling_mean(window_size=7).over('symbol').mul(365).sqrt().alias('vol'),
+        pl.col('var'),
+    ])
+        
+    .drop_nulls(subset=['vol']) 
+        
+    # $1M volume coins since 2023 only
+    .filter((pl.col('ts').dt.year() >= 2020) & (pl.col('volume') > 1_000_000))
+
+    .with_columns(
+        bucket=pl.col('vol').qcut(5, labels=[str(i) for i in range(5)], allow_duplicates=True).over('ts'),
+        fwd=(pl.col('close').shift(-1).over('symbol') / pl.col('close')) - 1,
+    )
+    
+    .group_by(['ts','bucket'])
+    .agg(pl.col('fwd').mean())
+    .filter(pl.col('bucket').is_in(['0','4']))
+    .pivot(
+        index='ts', 
+        on='bucket', 
+        values='fwd'
+    )
+    .sort('ts')
+    
+    # 3. Calculate the Long Q0 / Short Q4 spread
+    .select(
+        pl.col('ts'),
+        equity=(pl.col('0') - pl.col('4') - 0.0005 + 1).cum_prod(),
+    )
+    
+    # 4. Sort chronologically
+).to_pandas().plot(x='ts',y='equity')
+
+# %%
+import polars as pl
+
+(
+    pl.read_parquet('stables-1d.parquet')
+    .rename({"quote_volume":"volume",})
+    .sort(['symbol','ts'])
+    .with_columns(
+        fwd=pl.col('close').shift(-1).over('symbol') / pl.col('close') - 1,
+        mom=pl.col('close') / pl.col('close').shift(14).over('symbol') - 1,
+        ret=pl.col('close') / pl.col('close').shift(1).over('symbol') - 1,
+    )
+    .with_columns(
+        ar=pl.rolling_corr(pl.col('ret'), pl.col('ret').shift(1), window_size=14).over('symbol'),
+    )
+    .select(['ts','symbol','ret','ar','mom','volume','fwd'])
+    .drop_nulls(subset=['mom','ar']) 
+        
+    # $1M volume coins since 2023 only
+    .filter((pl.col('ts').dt.year() >= 2020) & (pl.col('volume') > 1_000_000) & (pl.col('mom') > 0))
+
+    .with_columns(
+        bucket=pl.col('ar').qcut(5, labels=[str(i) for i in range(5)], allow_duplicates=True).over('ts'),
+    )
+    
+    .group_by(['ts','bucket'])
+    .agg(pl.col('fwd').mean())
+    .filter(pl.col('bucket').is_in(['0','4']))
+    .pivot(
+        index='ts', 
+        on='bucket', 
+        values='fwd'
+    )
+    .sort('ts')
+    
+    # 3. Calculate the Long Q0 / Short Q4 spread
+    .select(
+        pl.col('ts'),
+        equity=(-(pl.col('0') - pl.col('4')) - 0.0005 + 1).cum_prod(),
+    )
+    
+    # 4. Sort chronologically
+).to_pandas().plot(x='ts',y='equity')
