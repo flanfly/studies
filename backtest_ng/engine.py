@@ -65,7 +65,7 @@ class Backtest:
 
         assert universe.valid_period(self.period)
 
-    def run(self, initial_equity=1):
+    def run(self, initial_equity: float = 1.0) -> None:
         self.initial_equity = initial_equity
         self.history = []
 
@@ -75,7 +75,6 @@ class Backtest:
         last_rebalance = None
         history_frag = []
         trades_frag = []
-        # Initialise so non-rebalance iterations don't reference stale data
         signals: list = []
         targets: list = []
         orders: list = []
