@@ -1,6 +1,7 @@
 from . import ExecutionModel, Order, Target, Universe, Portfolio, Position
 from typing import Dict
 import logging as l
+import ulid
 
 eps = 1e-12
 
@@ -39,7 +40,16 @@ class Simple(ExecutionModel):
             else:
                 value = pos.shares * price
                 fee = self.fee_bps / 10_000.0 * abs(value)
-                orders.append(Order(symbol=pos.symbol, shares=-pos.shares, fee=fee))
+                orders.append(
+                    Order(
+                        type="market",
+                        id=str(ulid.new()),
+                        cancel=None,
+                        symbol=pos.symbol,
+                        shares=-pos.shares,
+                        fee=fee,
+                    )
+                )
 
         equity = portfolio.cash + sum(
             pos.shares * prices.get(pos.symbol, 0.0) for pos in portfolio.positions
@@ -63,6 +73,9 @@ class Simple(ExecutionModel):
 
             orders.append(
                 Order(
+                    type="market",
+                    id=str(ulid.new()),
+                    cancel=None,
                     symbol=symbol,
                     shares=notw / price,
                     fee=self.fee_bps / 10_000.0 * abs(notw),

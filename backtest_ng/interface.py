@@ -12,7 +12,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from copy import copy
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Literal
 
 import logging as l
 
@@ -115,6 +115,11 @@ class Trade:
 class Order:
     """Orders send by the execution model."""
 
+    type: Literal["market", "limit", "stop-loss", "trailing-stop", "cancel"]
+    id: str
+    """random, unique order id"""
+    cancel: str | None
+    """order id to cancel, only valid for type == 'cancel'"""
     symbol: str
     shares: float
     """negative for sell orders."""
@@ -176,7 +181,7 @@ class Portfolio:
 
             # --- FIFO matching against existing opposite-side positions ---
             for p in positions[:]:
-                if abs(shares) < eps:          # order fully matched — stop early
+                if abs(shares) < eps:  # order fully matched — stop early
                     break
                 if np.sign(p.shares) == np.sign(shares):  # same direction — skip
                     continue
@@ -189,7 +194,7 @@ class Portfolio:
                 # Fee is split proportionally between the closed batch and any
                 # residual that remains open, so neither side double-counts.
                 batch_fee_ratio = batch / abs(o.shares)
-                batch_fee    = o.fee * batch_fee_ratio       # fee for this batch
+                batch_fee = o.fee * batch_fee_ratio  # fee for this batch
                 residual_fee = o.fee * (1.0 - batch_fee_ratio)  # fee for remainder
 
                 pshares = p.shares + np.sign(shares) * batch
@@ -219,7 +224,7 @@ class Portfolio:
                         shares=pshares,
                         entry=p.entry,
                         price=p.price,
-                        fee=p.fee,          # do NOT accumulate the exit fee here
+                        fee=p.fee,  # do NOT accumulate the exit fee here
                     )
 
                 # Cash settlement for the closed batch (proceeds or cost)
@@ -249,123 +254,6 @@ class Portfolio:
             cash -= shares * price + open_fee
 
         return Portfolio(positions=positions, cash=cash, working=[]), closed
-
-
-# def _execute_orders(
-#    orders: list[Order], prices: dict, ts: dt.datetime
-# ) -> Tuple[Portfolio, float, float, float]:
-#    new_folio_dict = {pos.symbol: pos for pos in folio}
-#    total_fees = 0.0
-#
-#    # Sort orders to prioritize liquidations/reductions to free up cash
-#    # Orders that reduce exposure (opposite sign of current position)
-#    def order_priority(order):
-#        pos = new_folio_dict.get(order.symbol)
-#        if pos is None:
-#            return 1  # Opening new position
-#        # If same sign, we are increasing
-#        if (pos.shares > 0 and order.shares > 0) or (
-#            pos.shares < 0 and order.shares < 0
-#        ):
-#            return 2
-#        return 0  # Reducing or closing
-#
-#    sorted_orders = sorted(orders, key=order_priority)
-#
-#    for order in sorted_orders:
-#        price = prices.get(order.symbol)
-#        if price is None:
-#            continue
-#
-#        fee = abs(order.shares * price) * self.fee
-#        total_fees += fee
-#        self.cash -= order.shares * price + fee
-#
-#        if order.symbol in new_folio_dict:
-#            pos = new_folio_dict[order.symbol]
-#            new_shares = pos.shares + order.shares
-#
-#            # Check if position is closed or direction reversed
-#            if abs(new_shares) < EPSILON:
-#                # closed
-#                self.trades.append(
-#                    Trade(
-#                        symbol=pos.symbol,
-#                        entry_ts=pos.ts,
-#                        exit_ts=ts,
-#                        entry_price=pos.open,
-#                        exit_price=price,
-#                        shares=pos.shares,
-#                        high=pos.high,
-#                        low=pos.low,
-#                    )
-#                )
-#                del new_folio_dict[order.symbol]
-#            elif (pos.shares > 0 and new_shares < 0) or (
-#                pos.shares < 0 and new_shares > 0
-#            ):
-#                # reversed
-#                self.trades.append(
-#                    Trade(
-#                        symbol=pos.symbol,
-#                        entry_ts=pos.ts,
-#                        exit_ts=ts,
-#                        entry_price=pos.open,
-#                        exit_price=price,
-#                        shares=pos.shares,
-#                        high=pos.high,
-#                        low=pos.low,
-#                    )
-#                )
-#                new_folio_dict[order.symbol] = Position(
-#                    order.symbol, new_shares, price, ts, price, price
-#                )
-#            else:
-#                # scaling
-#                if (order.shares > 0 and pos.shares > 0) or (
-#                    order.shares < 0 and pos.shares < 0
-#                ):
-#                    # scaling in: update average price
-#                    total_shares = pos.shares + order.shares
-#                    avg_price = (
-#                        pos.shares * pos.open + order.shares * price
-#                    ) / total_shares
-#                    new_folio_dict[order.symbol] = Position(
-#                        order.symbol,
-#                        total_shares,
-#                        avg_price,
-#                        pos.ts,
-#                        max(pos.high, price),
-#                        min(pos.low, price),
-#                    )
-#                else:
-#                    # scaling out: keep original entry price and ts
-#                    self.trades.append(
-#                        Trade(
-#                            symbol=pos.symbol,
-#                            entry_ts=pos.ts,
-#                            exit_ts=ts,
-#                            entry_price=pos.open,
-#                            exit_price=price,
-#                            shares=-order.shares,
-#                            high=pos.high,
-#                            low=pos.low,
-#                        )
-#                    )
-#                    new_folio_dict[order.symbol] = Position(
-#                        order.symbol,
-#                        new_shares,
-#                        pos.open,
-#                        pos.ts,
-#                        pos.high,
-#                        pos.low,
-#                    )
-#        else:
-#            if abs(order.shares) > EPSILON:
-#                new_folio_dict[order.symbol] = Position(
-#                    order.symbol, order.shares, price, ts, price, price
-#                )
-#    return list(new_folio_dict.values()), total_fees
 
 
 @dataclass(frozen=True)
