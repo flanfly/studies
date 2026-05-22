@@ -337,6 +337,15 @@ def _trade_statistics(
         b_sharpe = b_sortino = b_cagr = b_mdd = float("nan")
         s_ir = float("nan")
 
+    # Half-Kelly criterion: μ / (2σ²) on daily returns
+    s_var = float(np.var(s_ret))
+    s_half_kelly = float(np.mean(s_ret) / (2 * s_var)) if s_var > 0 else 0.0
+    if has_bench:
+        b_var = float(np.var(b_ret))
+        b_half_kelly = float(np.mean(b_ret) / (2 * b_var)) if b_var > 0 else 0.0
+    else:
+        b_half_kelly = float("nan")
+
     if trades.height > 0:
         win_rate = float((trades["ret"] > 0).mean())
         avg_ret = float(trades["ret"].mean())
@@ -399,27 +408,27 @@ def _trade_statistics(
     rows = {
         "Metric": [
             "CAGR",
-            "Sharpe (ann.)",
-            "Sortino (ann.)",
-            "IR (vs bench.)",
-            "Max Drawdown",
-            "Total Fees %",
-            "Win Rate",
-            "Avg Return",
-            "Return Std",
-            "MAE mean",
-            "MAE std",
-            "MFE mean",
-            "MFE std",
+            "Sharpe",
+            "Sortino",
+            "IR",
+            "Half Kelly",
+            "Max DD",
+            "Fees",
+            "return_mean",
+            "return_stdev",
+            "mae_mean",
+            "mae_stdev",
+            "mfe_mean",
+            "mfe_stdev",
         ],
         "Strategy": [
             s_cagr,
             s_sharpe,
             s_sortino,
             s_ir,
+            s_half_kelly,
             s_mdd,
             fees_pct,
-            win_rate,
             avg_ret,
             ret_std,
             mae_mean,
@@ -432,8 +441,8 @@ def _trade_statistics(
             b_sharpe if has_bench else None,
             b_sortino if has_bench else None,
             None,
+            b_half_kelly if has_bench else None,
             b_mdd if has_bench else None,
-            None,
             None,
             None,
             None,
@@ -457,17 +466,16 @@ def _trade_statistics(
     # Columns that hold percentages vs ratios.
     pct_cols = [
         "CAGR",
-        "Max Drawdown",
-        "Total Fees %",
-        "Win Rate",
-        "Avg Return",
-        "Return Std",
-        "MAE mean",
-        "MAE std",
-        "MFE mean",
-        "MFE std",
+        "Max DD",
+        "Fees",
+        "return_mean",
+        "return_stdev",
+        "mae_mean",
+        "mae_stdev",
+        "mfe_mean",
+        "mfe_stdev",
     ]
-    ratio_cols = ["Sharpe (ann.)", "Sortino (ann.)", "IR (vs bench.)"]
+    ratio_cols = ["Sharpe", "Sortino", "IR", "Half Kelly"]
 
     tbl = (
         gt.GT(stats, rowname_col="Statistic")
@@ -495,15 +503,19 @@ def _trade_statistics(
             column_labels_border_bottom_color="#CCCCCC",
             table_body_hlines_color="#E0E0E0",
         )
-        .tab_spanner(
-            label="Risk", columns=["Sharpe (ann.)", "Sortino (ann.)", "IR (vs bench.)"]
+        .tab_spanner(label="Performance", columns=["CAGR", "Max DD", "Fees"])
+        .tab_spanner(label="Risk", columns=["Sharpe", "Sortino", "IR", "Half Kelly"])
+        .tab_spanner(label="Return", columns=["return_mean", "return_stdev"])
+        .tab_spanner(label="Adverse", columns=["mae_mean", "mae_stdev"])
+        .tab_spanner(label="Favorable", columns=["mfe_mean", "mfe_stdev"])
+        .cols_label(
+            return_mean="Mean",
+            return_stdev="St. dev.",
+            mae_mean="Mean",
+            mae_stdev="St. dev.",
+            mfe_mean="Mean",
+            mfe_stdev="St. dev.",
         )
-        .tab_spanner(
-            label="Performance", columns=["CAGR", "Max Drawdown", "Total Fees %"]
-        )
-        .tab_spanner(label="Return", columns=["Avg Return", "Return Std", "Win Rate"])
-        .tab_spanner(label="MAE", columns=["MAE mean", "MAE std"])
-        .tab_spanner(label="MFE", columns=["MFE mean", "MFE std"])
         .fmt_percent(
             columns=pct_cols,
             decimals=1,
@@ -524,8 +536,8 @@ def _trade_statistics(
 
     # Bold the better value in each column (higher-is-better unless noted).
     # Only CAGR, Sharpe, Sortino, and Max DD get the bold treatment.
-    higher_better = {"CAGR", "Sharpe (ann.)", "Sortino (ann.)"}
-    lower_better = {"Max Drawdown"}  # closer to zero = better → compare |v|
+    higher_better = {"CAGR", "Sharpe", "Sortino", "Half Kelly"}
+    lower_better = {"Max DD"}  # closer to zero = better → compare |v|
 
     strategy_vals = stats.row(0, named=True)
     benchmark_vals = stats.row(1, named=True)
@@ -557,7 +569,7 @@ def _trade_statistics(
         )
 
     # Green / red fill for positive / negative values in return / ratio columns.
-    green_cols = {"CAGR", "Sharpe (ann.)", "Sortino (ann.)", "Avg Return"}
+    green_cols = {"CAGR", "Sharpe", "Sortino", "Half Kelly"}
     for row_name in ("Strategy", "Benchmark"):
         vals = strategy_vals if row_name == "Strategy" else benchmark_vals
         for col in green_cols:
