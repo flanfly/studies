@@ -69,7 +69,7 @@ class Backtest:
         self.initial_equity = initial_equity
         self.history = []
 
-        folio = Portfolio(cash=float(initial_equity), positions=[])
+        folio = Portfolio(cash=float(initial_equity), positions=[], working=[])
         stamps = self.universe.timestamps()
 
         last_rebalance = None
@@ -201,7 +201,7 @@ class Backtest:
         df = self.universe.df().filter(pl.col(self.universe.timestamp_col()) == today)
         prices = self.universe.prices(today)
 
-        folio = Portfolio(cash=equity, positions=[])
+        folio = Portfolio(cash=equity, positions=[], working=[])
         signals = it.chain.from_iterable([a(self.universe) for a in self.alpha])
         targets = fc.reduce(
             lambda t, r: r(self.universe, t, folio),

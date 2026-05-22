@@ -126,6 +126,8 @@ class Portfolio:
     positions: list[Position]
     """symbol -> Position"""
     cash: float
+    working: list[Order]
+    """working orders (stops)"""
 
     def get_avg(self, symbol) -> Position | None:
         cost = 0.0
@@ -246,7 +248,7 @@ class Portfolio:
             # Using o.shares here double-charges the already-settled FIFO batches.
             cash -= shares * price + open_fee
 
-        return Portfolio(positions=positions, cash=cash), closed
+        return Portfolio(positions=positions, cash=cash, working=[]), closed
 
 
 # def _execute_orders(
