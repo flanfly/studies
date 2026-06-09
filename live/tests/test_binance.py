@@ -39,7 +39,7 @@ WANTED = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
 async def test_pairs(client: AsyncClient, binance: Binance) -> None:
-    pairs = await binance.pairs(client, quote_assets={"usdt", "usdc"})
+    pairs = await binance.pairs_with_retry(client, quote_assets={"usdt", "usdc"})
     assert_pairs_schema(pairs)
     assert pairs.height > 0, "no pairs returned"
 
@@ -74,7 +74,10 @@ async def test_klines(
     start, end = pairs_window
     klines = pl.concat(
         await asyncio.gather(
-            *(binance.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                binance.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     ).sort(["symbol", "open_ts"])
 
@@ -92,7 +95,7 @@ async def test_klines_empty_range(
     client: AsyncClient, binance: Binance, pairs_window: tuple
 ) -> None:
     start, _ = pairs_window
-    empty = await binance.klines(client, "BTCUSDT", start, start)
+    empty = await binance.klines_with_retry(client, "BTCUSDT", start, start)
     assert empty.height == 0
     assert_klines_schema(empty)
 
@@ -104,7 +107,7 @@ async def test_klines_paged(
     paged = await binance.klines_paged(
         client, "BTCUSDT", start_time=start, end_time=end
     )
-    capped = await binance.klines(
+    capped = await binance.klines_with_retry(
         client, "BTCUSDT", start_time=start, end_time=end
     )
 
@@ -121,10 +124,13 @@ async def test_pairs_joinable_to_klines(
     client: AsyncClient, binance: Binance, pairs_window: tuple
 ) -> None:
     start, end = pairs_window
-    pairs = await binance.pairs(client, quote_assets={"usdt", "usdc"})
+    pairs = await binance.pairs_with_retry(client, quote_assets={"usdt", "usdc"})
     klines = pl.concat(
         await asyncio.gather(
-            *(binance.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                binance.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     )
     assert_pairs_joinable_to_klines(binance, pairs, klines)

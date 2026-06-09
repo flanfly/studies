@@ -33,7 +33,7 @@ WANTED = ["XBTUSDT", "ETHUSDT", "SOLUSDT"]
 
 
 async def test_pairs(client: AsyncClient, kraken: Kraken) -> None:
-    pairs = await kraken.pairs(client, quote_assets={"usdt", "usdc"})
+    pairs = await kraken.pairs_with_retry(client, quote_assets={"usdt", "usdc"})
     assert_pairs_schema(pairs)
     assert pairs.height > 0, "no pairs returned"
 
@@ -68,7 +68,10 @@ async def test_klines(
     start, end = pairs_window
     klines = pl.concat(
         await asyncio.gather(
-            *(kraken.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                kraken.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     ).sort(["symbol", "open_ts"])
 
@@ -99,7 +102,7 @@ async def test_klines_empty_range(
     client: AsyncClient, kraken: Kraken, pairs_window: tuple
 ) -> None:
     start, _ = pairs_window
-    empty = await kraken.klines(client, "XBTUSDT", start, start)
+    empty = await kraken.klines_with_retry(client, "XBTUSDT", start, start)
     assert empty.height == 0
     assert_klines_schema(empty)
 
@@ -111,7 +114,7 @@ async def test_klines_paged(
     paged = await kraken.klines_paged(
         client, "XBTUSDT", start_time=start, end_time=end
     )
-    capped = await kraken.klines(
+    capped = await kraken.klines_with_retry(
         client, "XBTUSDT", start_time=start, end_time=end
     )
 
@@ -128,10 +131,52 @@ async def test_pairs_joinable_to_klines(
     client: AsyncClient, kraken: Kraken, pairs_window: tuple
 ) -> None:
     start, end = pairs_window
-    pairs = await kraken.pairs(client, quote_assets={"usdt", "usdc"})
+    pairs = await kraken.pairs_with_retry(client, quote_assets={"usdt", "usdc"})
     klines = pl.concat(
         await asyncio.gather(
-            *(kraken.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                kraken.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     )
     assert_pairs_joinable_to_klines(kraken, pairs, klines)
+
+
+async def test_bgb_usd_pair_and_klines(
+    client: AsyncClient, kraken: Kraken, pairs_window: tuple
+) -> None:
+    """Regression test: symbols like ``BGBUSD`` (3+3) and ``AUSDUSD``
+    (4+3) used to break the string-split heuristic in ``klines()``
+    because the base/quote can't be recovered by chopping a fixed
+    suffix. ``BGBUSD`` has base=``BGB`` and quote=``ZUSD`` on Kraken;
+    the adapter now looks the pair up in cached ``/AssetPairs``
+    data instead of splitting the symbol.
+    """
+    start, end = pairs_window
+    pairs = await kraken.pairs_with_retry(
+        client, quote_assets={"usd", "usdt", "usdc"}
+    )
+
+    # BGBUSD must be present in the pairs() output with conventional
+    # tickers in base/quote (``bgb``/``usd``), not the raw Kraken
+    # codes (``BGB``/``ZUSD``).
+    bgb = pairs.filter(pl.col("symbol") == "BGBUSD")
+    assert bgb.height == 1, (
+        f"BGBUSD not in Kraken pairs() output. "
+        f"Got {pairs.height} pairs total."
+    )
+    assert bgb["base"][0] == "bgb"
+    assert bgb["quote"][0] == "usd"
+
+    # klines() must not crash and must return a valid row.
+    klines = await kraken.klines_with_retry(client, "BGBUSD", start, end)
+    assert_klines_schema(klines)
+    if klines.height > 0:
+        # If data is available, base/quote must be the conventional
+        # tickers, matching ``pairs()``.
+        assert klines["base"][0] == "bgb"
+        assert klines["quote"][0] == "usd"
+        assert_open_ts_in_range(klines, start, end)
+        assert_close_ts_matches_open(klines, api_provided=False)
+

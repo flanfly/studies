@@ -33,7 +33,7 @@ WANTED = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
 
 
 async def test_pairs(client: AsyncClient, kucoin: KuCoin) -> None:
-    pairs = await kucoin.pairs(client, quote_assets={"usdt", "usdc"})
+    pairs = await kucoin.pairs_with_retry(client, quote_assets={"usdt", "usdc"})
     assert_pairs_schema(pairs)
     assert pairs.height > 0, "no pairs returned"
 
@@ -68,7 +68,10 @@ async def test_klines(
     start, end = pairs_window
     klines = pl.concat(
         await asyncio.gather(
-            *(kucoin.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                kucoin.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     ).sort(["symbol", "open_ts"])
 
@@ -83,7 +86,7 @@ async def test_klines_empty_range(
     client: AsyncClient, kucoin: KuCoin, pairs_window: tuple
 ) -> None:
     start, _ = pairs_window
-    empty = await kucoin.klines(client, "BTC-USDT", start, start)
+    empty = await kucoin.klines_with_retry(client, "BTC-USDT", start, start)
     assert empty.height == 0
     assert_klines_schema(empty)
 
@@ -95,7 +98,7 @@ async def test_klines_paged(
     paged = await kucoin.klines_paged(
         client, "BTC-USDT", start_time=start, end_time=end
     )
-    capped = await kucoin.klines(
+    capped = await kucoin.klines_with_retry(
         client, "BTC-USDT", start_time=start, end_time=end
     )
 
@@ -112,10 +115,13 @@ async def test_pairs_joinable_to_klines(
     client: AsyncClient, kucoin: KuCoin, pairs_window: tuple
 ) -> None:
     start, end = pairs_window
-    pairs = await kucoin.pairs(client, quote_assets={"usdt", "usdc"})
+    pairs = await kucoin.pairs_with_retry(client, quote_assets={"usdt", "usdc"})
     klines = pl.concat(
         await asyncio.gather(
-            *(kucoin.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                kucoin.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     )
     assert_pairs_joinable_to_klines(kucoin, pairs, klines)

@@ -13,10 +13,11 @@ then mapped to the conventional ticker (``BTC``) for the ``base`` column.
 import datetime as dt
 import logging as l
 
+import httpx
 import polars as pl
 from httpx import AsyncClient
 
-from . import _split_symbol, Exchange
+from . import Exchange, TransientError
 
 
 __all__ = ["Kraken"]
@@ -33,6 +34,17 @@ class Kraken(Exchange):
     # older data is not available on the public endpoint.
     MAX_KLINES = 720
 
+    # Kraken error strings that warrant a retry (rate limiting,
+    # temporary service errors). Other errors are propagated
+    # immediately.
+    TRANSIENT_ERRORS = frozenset({
+        "EGeneral:Temporary",
+        "EService:Temporary",
+        "EOrder:Rate limit exceeded",
+        "EDesk:Rate limit exceeded",
+        "Rate limit exceeded",
+    })
+
     # Kraken altname -> common ticker for the assets whose Kraken altname
     # still carries a leading letter. ``/Assets`` returns ``XBT`` for BTC,
     # ``XLM`` for XLM, etc. — the rest of the codebase uses ``btc``, so we
@@ -40,6 +52,12 @@ class Kraken(Exchange):
     _ALTNAME_OVERRIDES = {
         "XBT": "BTC",
         "XDG": "DOGE",
+        "ZUSD": "USD",
+        "ZEUR": "EUR",
+        "ZGBP": "GBP",
+        "ZJPY": "JPY",
+        "ZCAD": "CAD",
+        "ZAUD": "AUD",
     }
 
     def __init__(self) -> None:
@@ -54,6 +72,12 @@ class Kraken(Exchange):
         # reverse lookup ``altname -> kraken_code`` is lossless.
         self._altname_cache: dict[str, str] | None = None
         self._margin_cache: dict[str, float] | None = None
+        # Cache of ``/0/public/AssetPairs`` ``result`` dict, keyed by
+        # pair altname (``XBTUSDT``, ``BGBUSD``, ``AUSDUSD``, ...).
+        # ``klines()`` needs this to recover the (base, quote) of a
+        # symbol without relying on a string-split heuristic that
+        # breaks for short or ambiguous tickers.
+        self._pairs_cache: dict[str, dict] | None = None
 
     # ------------------------------------------------------------------
     # helpers
@@ -105,6 +129,38 @@ class Kraken(Exchange):
         upper = code_or_altname.upper()
         return self._ALTNAME_OVERRIDES.get(upper, upper).lower()
 
+    async def _load_pairs(self, client: AsyncClient) -> dict[str, dict]:
+        """``{pair_altname: pair_info}`` for all Kraken pairs.
+
+        The first call hits ``/0/public/AssetPairs``; subsequent calls
+        reuse the cache. ``pair_info`` is the raw dict from the
+        ``result`` field, which includes ``base`` (Kraken asset code)
+        and ``quote`` (Kraken asset code). ``klines()`` uses this to
+        recover the correct base/quote of a symbol without relying
+        on a string-split heuristic.
+        """
+        if self._pairs_cache is not None:
+            return self._pairs_cache
+        try:
+            resp = await client.get(
+                f"https://{self.HOST}/0/public/AssetPairs", timeout=30.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Kraken AssetPairs request failed: {e}") from e
+        errs = data.get("error") or []
+        if errs:
+            if any(e in self.TRANSIENT_ERRORS for e in errs):
+                raise TransientError(
+                    f"Kraken AssetPairs transient: {errs}"
+                )
+            raise RuntimeError(f"Kraken AssetPairs API error: {errs}")
+        self._pairs_cache = data.get("result", {}) or {}
+        return self._pairs_cache
+
     # ------------------------------------------------------------------
     # pairs
     # ------------------------------------------------------------------
@@ -120,38 +176,36 @@ class Kraken(Exchange):
         altnames = await self._load_altnames(client)
         # ``_load_altnames`` populates ``_margin_cache`` in the same call.
         margins = self._margin_cache or {}
+        pairs_map = await self._load_pairs(client)
 
-        try:
-            resp = await client.get(
-                f"https://{self.HOST}/0/public/AssetPairs", timeout=30.0
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            raise RuntimeError(f"Kraken AssetPairs request failed: {e}")
-        if data.get("error"):
-            raise RuntimeError(f"Kraken AssetPairs API error: {data['error']}")
-
-        quote_set = {q.upper() for q in quote_assets}
+        quote_set = {self._common_ticker(q).upper() for q in quote_assets}
         rows: list[dict] = []
-        for altname, info in data.get("result", {}).items():
+        for altname, info in pairs_map.items():
             if info.get("status") != "online":
                 continue
             base_raw = info.get("base", "")
             quote_raw = info.get("quote", "")
-            if not base_raw or quote_raw not in quote_set:
+            if not base_raw or not quote_raw:
                 continue
-            # The ``base`` from AssetPairs is the Kraken asset code (e.g.
-            # ``XXBT``); the altname map gives ``XBT``, which is then
-            # overridden to ``BTC`` for the common ticker.
+
+            # Map Kraken codes (e.g. ``XXBT``, ``ZUSD``) to common altnames
+            # (``XBT``, ``USD``) then to conventional tickers (``BTC``, ``USD``).
             base_altname = altnames.get(base_raw, base_raw)
+            quote_altname = altnames.get(quote_raw, quote_raw)
+
+            base_common = self._common_ticker(base_altname)
+            quote_common = self._common_ticker(quote_altname)
+
+            if quote_common.upper() not in quote_set:
+                continue
+
             rows.append(
                 {
                     "ts": now,
                     "symbol": altname,
                     "exchange": self.NAME,
-                    "base": self._common_ticker(base_altname),
-                    "quote": quote_raw.lower(),
+                    "base": base_common.lower(),
+                    "quote": quote_common.lower(),
                     # Kraken is cross-margin only: the borrow rate is a
                     # per-asset field on /Assets, not per-pair.
                     "cross_rate": margins.get(base_raw),
@@ -160,24 +214,20 @@ class Kraken(Exchange):
             )
 
         if not rows:
-            return pl.DataFrame(
-                schema={
-                    "ts": pl.Datetime("us", time_zone="UTC"),
-                    "symbol": pl.Utf8,
-                    "exchange": pl.Utf8,
-                    "base": pl.Utf8,
-                    "quote": pl.Utf8,
-                    "cross_rate": pl.Float64,
-                    "isolated_rate": pl.Float64,
-                }
-            )
+            return self.empty_pairs_df()
 
-        df = pl.DataFrame(rows).with_columns(
+        df = pl.DataFrame(rows)
+        df = df.select(
             pl.col("ts").cast(pl.Datetime("us", time_zone="UTC")),
+            "symbol",
+            "exchange",
+            "base",
+            "quote",
+            pl.col("cross_rate").cast(pl.Float64),
+            pl.col("isolated_rate").cast(pl.Float64),
         )
-        return df.select(
-            "ts", "symbol", "exchange", "base", "quote", "cross_rate", "isolated_rate"
-        )
+        self.validate_pairs_df(df)
+        return df
 
     # ------------------------------------------------------------------
     # klines
@@ -207,18 +257,32 @@ class Kraken(Exchange):
         if end_time.tzinfo is None:
             end_time = end_time.replace(tzinfo=dt.timezone.utc)
 
-        # Kraken OHLC takes the pair altname (e.g. XBTUSDT, ADAUSDT).
+        # Kraken OHLC takes the pair altname (e.g. XBTUSDT, BGBUSD).
         symbol = symbol.upper()
-        # Apply the same base-asset normalization as ``pairs()`` so the
-        # ``base`` column matches (XBT -> BTC, XDG -> DOGE, etc.).
+        # Look the pair up in the cached ``/AssetPairs`` data so we
+        # get the canonical ``base``/``quote`` Kraken codes instead
+        # of relying on a string-split heuristic that breaks for
+        # short or ambiguous tickers (e.g. ``BGBUSD`` -> base=``BGB``
+        # not ``BGBU``, ``AUSDUSD`` -> base=``AUSD`` not ``AUSD``).
         altnames = await self._load_altnames(client)
-        base_raw, quote = _split_symbol(symbol)
-        # The altname map is keyed on the Kraken code (e.g. ``XXBT``); the
-        # ``base_raw`` we got from splitting the symbol is the altname
-        # (``XBT``). Build a reverse lookup to translate back to the code.
-        reverse = {v.upper(): k for k, v in altnames.items()}
-        kraken_code = reverse.get(base_raw.upper(), base_raw.upper())
-        base = self._common_ticker(altnames.get(kraken_code, base_raw))
+        pairs_map = await self._load_pairs(client)
+        pair_info = pairs_map.get(symbol)
+        if pair_info is None:
+            # Symbol not in /AssetPairs: keep the same failure mode
+            # the caller would see on the OHLC endpoint, but with a
+            # clearer message.
+            raise RuntimeError(
+                f"Kraken unknown symbol {symbol!r}: not in /AssetPairs"
+            )
+        base_raw = pair_info.get("base", "")
+        quote_raw = pair_info.get("quote", "")
+        # Translate Kraken codes (e.g. ``XXBT``, ``ZUSD``) to the
+        # common altname (``XBT``, ``USD``) and then to the
+        # conventional ticker (``BTC``, ``USD``) so the result
+        # matches the ``base``/``quote`` columns emitted by
+        # ``pairs()``.
+        base = self._common_ticker(altnames.get(base_raw, base_raw))
+        quote = self._common_ticker(altnames.get(quote_raw, quote_raw))
 
         # Kraken returns at most ``MAX_KLINES`` (720) candles with
         # ``ts >= since``. Set ``since = start_time`` and filter the
@@ -235,10 +299,17 @@ class Kraken(Exchange):
             resp = await client.get(url, params=params, timeout=30.0)
             resp.raise_for_status()
             payload = resp.json()
+        except httpx.HTTPStatusError:
+            raise
         except Exception as e:
-            raise RuntimeError(f"Kraken OHLC request failed: {e}")
-        if payload.get("error"):
-            raise RuntimeError(f"Kraken OHLC API error: {payload['error']}")
+            raise RuntimeError(f"Kraken OHLC request failed: {e}") from e
+        errs = payload.get("error") or []
+        if errs:
+            if any(e in self.TRANSIENT_ERRORS for e in errs):
+                raise TransientError(
+                    f"Kraken OHLC transient: {errs}"
+                )
+            raise RuntimeError(f"Kraken OHLC API error: {errs}")
 
         batch = payload.get("result", {}).get(symbol, []) or []
         # Cap at MAX_KLINES rows (the API may return a touch more on
@@ -277,44 +348,26 @@ class Kraken(Exchange):
             )
 
         if not rows:
-            return pl.DataFrame(
-                schema={
-                    "open_ts": pl.Datetime("us", time_zone="UTC"),
-                    "close_ts": pl.Datetime("us", time_zone="UTC"),
-                    "symbol": pl.Utf8,
-                    "exchange": pl.Utf8,
-                    "base": pl.Utf8,
-                    "quote": pl.Utf8,
-                    "open": pl.Float64,
-                    "high": pl.Float64,
-                    "low": pl.Float64,
-                    "close": pl.Float64,
-                    "base_volume": pl.Float64,
-                    "quote_volume": pl.Float64,
-                }
-            )
+            return self.empty_klines_df()
 
         df = (
             pl.DataFrame(rows)
             .unique(subset=["open_ts", "symbol"], keep="last")
             .sort("open_ts")
-            .with_columns(
+            .select(
                 pl.col("open_ts").cast(pl.Datetime("us", time_zone="UTC")),
                 pl.col("close_ts").cast(pl.Datetime("us", time_zone="UTC")),
+                "symbol",
                 pl.lit(self.NAME).alias("exchange"),
+                "base",
+                "quote",
+                pl.col("open").cast(pl.Float64),
+                pl.col("high").cast(pl.Float64),
+                pl.col("low").cast(pl.Float64),
+                pl.col("close").cast(pl.Float64),
+                pl.col("base_volume").cast(pl.Float64),
+                pl.col("quote_volume").cast(pl.Float64),
             )
         )
-        return df.select(
-            "open_ts",
-            "close_ts",
-            "symbol",
-            "exchange",
-            "base",
-            "quote",
-            "open",
-            "high",
-            "low",
-            "close",
-            "base_volume",
-            "quote_volume",
-        )
+        self.validate_klines_df(df)
+        return df

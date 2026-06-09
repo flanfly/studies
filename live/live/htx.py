@@ -13,10 +13,11 @@ import logging as l
 from typing import Optional
 from urllib.parse import urlencode
 
+import httpx
 import polars as pl
 from httpx import AsyncClient
 
-from . import _split_symbol, Exchange
+from . import _split_symbol, Exchange, TransientError
 
 
 __all__ = ["HTX"]
@@ -33,6 +34,8 @@ class HTX(Exchange):
     # result, so the historical depth accessible through ``klines()``
     # is also 2000 days. Use ``klines_paged()`` for wider ranges.
     MAX_KLINES = 2000
+    # HTX daily candles are aligned to 16:00 UTC, not midnight.
+    DAILY_ALIGN_HOUR_UTC = 16
 
     def __init__(self, access_key: str, secret_key: str):
         self._access_key = access_key
@@ -155,6 +158,9 @@ class HTX(Exchange):
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") != "ok":
+            err_msg = (data.get("err-msg") or "").lower()
+            if "request limit" in err_msg or "rate limit" in err_msg:
+                raise TransientError(f"HTX symbols rate limited: {data}")
             raise RuntimeError(f"HTX symbols error: {data}")
 
         rows: list[dict] = []
@@ -176,17 +182,7 @@ class HTX(Exchange):
             )
 
         if not rows:
-            return pl.DataFrame(
-                schema={
-                    "ts": pl.Datetime("us", time_zone="UTC"),
-                    "symbol": pl.Utf8,
-                    "exchange": pl.Utf8,
-                    "base": pl.Utf8,
-                    "quote": pl.Utf8,
-                    "cross_rate": pl.Float64,
-                    "isolated_rate": pl.Float64,
-                }
-            )
+            return self.empty_pairs_df()
 
         cross_rates, isolated_rates = await asyncio.gather(
             self._fetch_cross_rates(client),
@@ -198,12 +194,20 @@ class HTX(Exchange):
             r["cross_rate"] = cross_rates.get(base)
             r["isolated_rate"] = isolated_rates.get(base)
 
-        df = pl.DataFrame(rows).with_columns(
+        df = pl.DataFrame(rows)
+        # Project onto the canonical schema (this also fixes the order
+        # and triggers the dtypes we declared in ``PAIRS_SCHEMA``).
+        df = df.select(
             pl.col("ts").cast(pl.Datetime("us", time_zone="UTC")),
+            "symbol",
+            "exchange",
+            "base",
+            "quote",
+            pl.col("cross_rate").cast(pl.Float64),
+            pl.col("isolated_rate").cast(pl.Float64),
         )
-        return df.select(
-            "ts", "symbol", "exchange", "base", "quote", "cross_rate", "isolated_rate"
-        )
+        self.validate_pairs_df(df)
+        return df
 
     # ------------------------------------------------------------------
     # klines
@@ -247,9 +251,21 @@ class HTX(Exchange):
             resp = await client.get(url, params=params, timeout=30.0)
             resp.raise_for_status()
             payload = resp.json()
+        except httpx.HTTPStatusError:
+            # 4xx/5xx; let ``is_transient_error`` see the status code.
+            raise
         except Exception as e:
-            raise RuntimeError(f"HTX klines request failed: {e}")
+            # Wrap with ``raise from`` so the retry layer's
+            # ``is_transient_error`` can still see ``httpx`` transport
+            # errors (PoolTimeout, ConnectError, ReadError, ...) via
+            # ``__cause__``.
+            raise RuntimeError(f"HTX klines request failed: {e}") from e
         if payload.get("status") != "ok":
+            err_msg = (payload.get("err-msg") or "").lower()
+            if "request limit" in err_msg or "rate limit" in err_msg:
+                raise TransientError(
+                    f"HTX klines rate limited: {payload}"
+                )
             raise RuntimeError(f"HTX klines error: {payload}")
         batch = payload.get("data", []) or []
 
@@ -282,44 +298,26 @@ class HTX(Exchange):
             )
 
         if not rows:
-            return pl.DataFrame(
-                schema={
-                    "open_ts": pl.Datetime("us", time_zone="UTC"),
-                    "close_ts": pl.Datetime("us", time_zone="UTC"),
-                    "symbol": pl.Utf8,
-                    "exchange": pl.Utf8,
-                    "base": pl.Utf8,
-                    "quote": pl.Utf8,
-                    "open": pl.Float64,
-                    "high": pl.Float64,
-                    "low": pl.Float64,
-                    "close": pl.Float64,
-                    "base_volume": pl.Float64,
-                    "quote_volume": pl.Float64,
-                }
-            )
+            return self.empty_klines_df()
 
         df = (
             pl.DataFrame(rows)
             .unique(subset=["open_ts", "symbol"], keep="last")
             .sort("open_ts")
-            .with_columns(
+            .select(
                 pl.col("open_ts").cast(pl.Datetime("us", time_zone="UTC")),
                 pl.col("close_ts").cast(pl.Datetime("us", time_zone="UTC")),
+                "symbol",
                 pl.lit(self.NAME).alias("exchange"),
+                "base",
+                "quote",
+                pl.col("open").cast(pl.Float64),
+                pl.col("high").cast(pl.Float64),
+                pl.col("low").cast(pl.Float64),
+                pl.col("close").cast(pl.Float64),
+                pl.col("base_volume").cast(pl.Float64),
+                pl.col("quote_volume").cast(pl.Float64),
             )
         )
-        return df.select(
-            "open_ts",
-            "close_ts",
-            "symbol",
-            "exchange",
-            "base",
-            "quote",
-            "open",
-            "high",
-            "low",
-            "close",
-            "base_volume",
-            "quote_volume",
-        )
+        self.validate_klines_df(df)
+        return df

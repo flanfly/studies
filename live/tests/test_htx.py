@@ -75,7 +75,10 @@ async def test_klines(
     start, end = pairs_window
     klines = pl.concat(
         await asyncio.gather(
-            *(htx.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                htx.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     ).sort(["symbol", "open_ts"])
 
@@ -90,7 +93,7 @@ async def test_klines_empty_range(
     client: AsyncClient, htx: HTX, pairs_window: tuple
 ) -> None:
     start, _ = pairs_window
-    empty = await htx.klines(client, "btcusdt", start, start)
+    empty = await htx.klines_with_retry(client, "btcusdt", start, start)
     assert empty.height == 0
     assert_klines_schema(empty)
 
@@ -102,7 +105,7 @@ async def test_klines_paged(
     paged = await htx.klines_paged(
         client, "btcusdt", start_time=start, end_time=end
     )
-    capped = await htx.klines(
+    capped = await htx.klines_with_retry(
         client, "btcusdt", start_time=start, end_time=end
     )
 
@@ -119,10 +122,13 @@ async def test_pairs_joinable_to_klines(
     client: AsyncClient, htx: HTX, pairs_window: tuple
 ) -> None:
     start, end = pairs_window
-    pairs = await htx.pairs(client, quote_assets={"usdt", "usdc"})
+    pairs = await htx.pairs_with_retry(client, quote_assets={"usdt", "usdc"})
     klines = pl.concat(
         await asyncio.gather(
-            *(htx.klines(client, sym, start, end) for sym in WANTED)
+            *(
+                htx.klines_with_retry(client, sym, start, end)
+                for sym in WANTED
+            )
         )
     )
     assert_pairs_joinable_to_klines(htx, pairs, klines)

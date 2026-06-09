@@ -22,31 +22,38 @@ import datetime as dt
 import polars as pl
 import pytest
 
-from live import Exchange
+from live import (
+    Exchange,
+    KLINES_SCHEMA,
+    PAIRS_SCHEMA,
+    empty_klines_df,
+    empty_pairs_df,
+    validate_klines_df,
+    validate_pairs_df,
+)
 
 
-KLINES_COLUMNS = {
-    "open_ts", "close_ts", "symbol", "exchange", "base", "quote",
-    "open", "high", "low", "close", "base_volume", "quote_volume",
-}
-PAIRS_COLUMNS = {
-    "ts", "symbol", "exchange", "base", "quote", "cross_rate", "isolated_rate",
-}
+# ``KLINES_SCHEMA`` / ``PAIRS_SCHEMA`` are dicts of ``{col: dtype}``;
+# pulling just the column names is enough for the schema-shape checks
+# below.
+KLINES_COLUMNS = set(KLINES_SCHEMA)
+PAIRS_COLUMNS = set(PAIRS_SCHEMA)
 
 
 def assert_klines_schema(df: pl.DataFrame) -> None:
-    assert set(df.columns) == KLINES_COLUMNS, (
-        f"unexpected columns: got {set(df.columns)}, want {KLINES_COLUMNS}"
-    )
-    assert df.schema["open_ts"] == pl.Datetime("us", time_zone="UTC")
-    assert df.schema["close_ts"] == pl.Datetime("us", time_zone="UTC")
+    # ``validate_klines_df`` raises ``ValueError`` on schema mismatch;
+    # surface it through pytest's assertion machinery instead.
+    try:
+        validate_klines_df(df)
+    except ValueError as e:
+        pytest.fail(str(e))
 
 
 def assert_pairs_schema(df: pl.DataFrame) -> None:
-    assert set(df.columns) == PAIRS_COLUMNS, (
-        f"unexpected columns: got {set(df.columns)}, want {PAIRS_COLUMNS}"
-    )
-    assert df.schema["ts"] == pl.Datetime("us", time_zone="UTC")
+    try:
+        validate_pairs_df(df)
+    except ValueError as e:
+        pytest.fail(str(e))
 
 
 def assert_open_ts_in_range(

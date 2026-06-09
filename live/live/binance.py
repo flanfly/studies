@@ -27,9 +27,10 @@ from typing import Iterable
 from urllib.parse import urlencode
 
 import polars as pl
+import httpx
 from httpx import AsyncClient
 
-from . import _split_symbol, Exchange
+from . import _split_symbol, Exchange, TransientError
 
 
 __all__ = ["Binance"]
@@ -47,6 +48,16 @@ class Binance(Exchange):
     # pairs (e.g. BTCUSDT) goes back to 2017-08-17 -- about 8.75
     # years. Use ``klines_paged()`` to fetch a wider range.
     MAX_KLINES = 1000
+
+    # Binance error codes that warrant a retry (rate limiting,
+    # service-side throttling). Other error codes are propagated
+    # immediately.
+    TRANSIENT_CODES = frozenset({
+        -1003,  # TOO_MANY_REQUESTS
+        -1015,  # too many new orders / rate limit
+        -1007,  # timeout waiting for response from backend
+        -1021,  # timestamp outside recvWindow (transient clock issues)
+    })
 
     def __init__(self, api_key: str, api_secret: str):
         self._api_key = api_key
@@ -147,8 +158,10 @@ class Binance(Exchange):
             )
             resp.raise_for_status()
             data = resp.json()
+        except httpx.HTTPStatusError:
+            raise
         except Exception as e:
-            raise RuntimeError(f"Binance exchangeInfo request failed: {e}")
+            raise RuntimeError(f"Binance exchangeInfo request failed: {e}") from e
 
         quote_set = {q.upper() for q in quote_assets}
         active_bases: set[str] = set()
@@ -181,24 +194,20 @@ class Binance(Exchange):
                 r["isolated_rate"] = rate
 
         if not rows:
-            return pl.DataFrame(
-                schema={
-                    "ts": pl.Datetime("us", time_zone="UTC"),
-                    "symbol": pl.Utf8,
-                    "exchange": pl.Utf8,
-                    "base": pl.Utf8,
-                    "quote": pl.Utf8,
-                    "cross_rate": pl.Float64,
-                    "isolated_rate": pl.Float64,
-                }
-            )
+            return self.empty_pairs_df()
 
-        df = pl.DataFrame(rows).with_columns(
+        df = pl.DataFrame(rows)
+        df = df.select(
             pl.col("ts").cast(pl.Datetime("us", time_zone="UTC")),
+            "symbol",
+            "exchange",
+            "base",
+            "quote",
+            pl.col("cross_rate").cast(pl.Float64),
+            pl.col("isolated_rate").cast(pl.Float64),
         )
-        return df.select(
-            "ts", "symbol", "exchange", "base", "quote", "cross_rate", "isolated_rate"
-        )
+        self.validate_pairs_df(df)
+        return df
 
     # ------------------------------------------------------------------
     # klines
@@ -253,9 +262,18 @@ class Binance(Exchange):
             resp = await client.get(url, params=params, timeout=30.0)
             resp.raise_for_status()
             batch = resp.json()
+        except httpx.HTTPStatusError:
+            raise
         except Exception as e:
-            raise RuntimeError(f"Binance klines request failed: {e}")
+            raise RuntimeError(f"Binance klines request failed: {e}") from e
         if not isinstance(batch, list):
+            # Binance returns a ``{"code": ..., "msg": ...}`` envelope on
+            # application errors. Classify the well-known transient
+            # codes; everything else is a permanent failure.
+            if isinstance(batch, dict) and batch.get("code") in self.TRANSIENT_CODES:
+                raise TransientError(
+                    f"Binance klines transient: {batch}"
+                )
             raise RuntimeError(f"Binance klines error: {batch}")
 
         # Cap at MAX_KLINES rows (the API may return a touch more on the
@@ -290,44 +308,26 @@ class Binance(Exchange):
             )
 
         if not rows:
-            return pl.DataFrame(
-                schema={
-                    "open_ts": pl.Datetime("us", time_zone="UTC"),
-                    "close_ts": pl.Datetime("us", time_zone="UTC"),
-                    "symbol": pl.Utf8,
-                    "exchange": pl.Utf8,
-                    "base": pl.Utf8,
-                    "quote": pl.Utf8,
-                    "open": pl.Float64,
-                    "high": pl.Float64,
-                    "low": pl.Float64,
-                    "close": pl.Float64,
-                    "base_volume": pl.Float64,
-                    "quote_volume": pl.Float64,
-                }
-            )
+            return self.empty_klines_df()
 
         df = (
             pl.DataFrame(rows)
             .unique(subset=["open_ts", "symbol"], keep="last")
             .sort("open_ts")
-            .with_columns(
+            .select(
                 pl.col("open_ts").cast(pl.Datetime("us", time_zone="UTC")),
                 pl.col("close_ts").cast(pl.Datetime("us", time_zone="UTC")),
+                "symbol",
                 pl.lit(self.NAME).alias("exchange"),
+                "base",
+                "quote",
+                pl.col("open").cast(pl.Float64),
+                pl.col("high").cast(pl.Float64),
+                pl.col("low").cast(pl.Float64),
+                pl.col("close").cast(pl.Float64),
+                pl.col("base_volume").cast(pl.Float64),
+                pl.col("quote_volume").cast(pl.Float64),
             )
         )
-        return df.select(
-            "open_ts",
-            "close_ts",
-            "symbol",
-            "exchange",
-            "base",
-            "quote",
-            "open",
-            "high",
-            "low",
-            "close",
-            "base_volume",
-            "quote_volume",
-        )
+        self.validate_klines_df(df)
+        return df
