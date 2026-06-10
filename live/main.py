@@ -58,6 +58,69 @@ def _require_env(*keys: str) -> dict[str, str]:
     return values
 
 
+def _validate_timestamps_utc(df: pl.DataFrame, *, name: str) -> None:
+    """Sanity-check that timestamp columns in ``df`` are timezone-aware
+    (UTC) and that daily klines open at the expected exchange
+    alignment hour.
+
+    For ``klines`` dataframes, every row's ``open_ts`` is checked
+    against the row's exchange-specific ``DAILY_ALIGN_HOUR_UTC``:
+    the non-HTX exchanges open daily candles at 00:00 UTC, HTX at
+    16:00 UTC. A row whose ``open_ts`` falls on any other hour
+    indicates a bug in the adapter's time conversion.
+
+    For ``pairs`` dataframes, only the UTC-tz check is performed
+    (the ``ts`` column is the wall-clock time of the snapshot, not
+    a candle open).
+
+    Raises ``ValueError`` with a representative sample of bad rows
+    on the first violation found.
+    """
+    if df.height == 0:
+        return
+    if name == "klines":
+        ts_cols = ("open_ts", "close_ts")
+    else:
+        ts_cols = ("ts",)
+    for col in ts_cols:
+        if col not in df.columns:
+            continue
+        dtype = df.schema[col]
+        if not (isinstance(dtype, pl.Datetime) and dtype.time_zone == "UTC"):
+            raise ValueError(
+                f"{name}: column {col!r} has dtype {dtype!r}, "
+                f"expected Datetime(time_zone='UTC')"
+            )
+    if name != "klines":
+        return
+    # All exchanges use daily candles whose open_ts is an exact
+    # hour boundary (HH:00:00.000000 UTC) at the exchange's
+    # DAILY_ALIGN_HOUR_UTC. Verify hour-of-day matches by exchange.
+    bad = df.with_columns(
+        # ``dt.hour()`` is timezone-aware on Datetime(time_zone=...) so
+        # this always reports the UTC hour, regardless of how the
+        # dataframe is later displayed.
+        open_hour=pl.col("open_ts").dt.hour()
+    ).filter(
+        # expected: 0 for midnight-aligned, 16 for HTX
+        ~pl.col("open_hour").is_in([0, 16])
+    )
+    if bad.height == 0:
+        return
+    # Group by exchange to surface the violating hour per exchange.
+    summary = (
+        bad.group_by(["exchange", "open_hour"])
+        .len()
+        .sort("len", descending=True)
+        .head(10)
+    )
+    raise ValueError(
+        f"klines: {bad.height} rows have open_ts not at a daily "
+        f"alignment boundary (00:00 or 16:00 UTC). "
+        f"Top offenders: {summary.to_dicts()!r}"
+    )
+
+
 def _build_exchanges() -> list[Exchange]:
     """Construct one instance of each exchange, pulling credentials
     from the environment. The .env file in the project root is loaded
@@ -251,6 +314,13 @@ async def amain() -> int:
 
     klines_df = pl.concat(klines_parts) if klines_parts else empty_klines_df()
     pairs_df = pl.concat(pairs_parts) if pairs_parts else pl.DataFrame()
+
+    # Sanity-check timestamps before writing: columns must be
+    # timezone-aware (UTC) and ``open_ts`` must open at the
+    # exchange's daily alignment boundary. Fails fast with a clear
+    # message rather than writing a corrupt parquet to disk.
+    _validate_timestamps_utc(klines_df, name="klines")
+    _validate_timestamps_utc(pairs_df, name="pairs")
 
     logger.info(
         "writing %d kline rows to %s, %d pair rows to %s",

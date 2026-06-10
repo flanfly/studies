@@ -37,16 +37,17 @@ async def test_pairs(client: AsyncClient, kraken: Kraken) -> None:
     assert_pairs_schema(pairs)
     assert pairs.height > 0, "no pairs returned"
 
-    # Kraken is cross-margin only: every active USDT/USDC pair has a
-    # ``cross_rate`` and ``isolated_rate`` is always null.
-    n_with_cross = pairs.filter(pl.col("cross_rate").is_not_null()).height
-    n_with_iso = pairs.filter(pl.col("isolated_rate").is_not_null()).height
-    assert n_with_cross == pairs.height, (
-        f"{pairs.height - n_with_cross} pairs missing cross_rate"
+    # Kraken is cross-margin only: ``isolated_rate`` is always null.
+    # ``cross_rate`` may be null for pairs whose base asset is not
+    # actually margin-enabled (no online pair with non-empty
+    # ``leverage_buy``), even if /Assets reports a non-null rate for
+    # the asset -- the per-asset field is informational and doesn't
+    # imply the pair is marginable.
+    assert pairs.filter(pl.col("isolated_rate").is_not_null()).height == 0, (
+        "isolated_rate is set, expected all-null (Kraken is cross-margin only)"
     )
-    assert n_with_iso == 0, (
-        f"{n_with_iso} pairs have isolated_rate, expected 0 "
-        f"(Kraken is cross-margin only)"
+    assert pairs.filter(pl.col("cross_rate") < 0).height == 0, (
+        "negative cross_rate (sanity check)"
     )
 
     # ``base`` must be the common ticker (XBT -> BTC, XDG -> DOGE, etc.).
@@ -179,4 +180,45 @@ async def test_bgb_usd_pair_and_klines(
         assert klines["quote"][0] == "usd"
         assert_open_ts_in_range(klines, start, end)
         assert_close_ts_matches_open(klines, api_provided=False)
+
+
+async def test_bgb_usd_cross_rate_is_null(
+    client: AsyncClient, kraken: Kraken
+) -> None:
+    """Regression test: Kraken's ``/Assets`` endpoint reports a
+    ``margin_rate`` for ``BGB`` (``0``), but the ``BGBUSD`` pair has
+    empty ``leverage_buy``/``leverage_sell`` on ``/AssetPairs`` --
+    meaning the pair is not actually margin-tradeable. The previous
+    implementation emitted ``cross_rate=0.0`` for BGBUSD, conflating
+    "asset has zero margin rate" with "asset has no margin trading".
+    The correct value is ``null``.
+    """
+    pairs = await kraken.pairs_with_retry(
+        client, quote_assets={"usd", "usdt", "usdc"}
+    )
+    bgb = pairs.filter(pl.col("symbol") == "BGBUSD")
+    assert bgb.height == 1
+    assert bgb["cross_rate"][0] is None, (
+        f"BGBUSD cross_rate={bgb['cross_rate'][0]!r}, expected null "
+        f"(BGBUSD has empty leverage_buy/leverage_sell on Kraken)"
+    )
+
+    # Sanity check: pairs that ARE marginable (XBTUSDT) must still
+    # have a non-null ``cross_rate``.
+    xbt = pairs.filter(pl.col("symbol") == "XBTUSDT")
+    assert xbt.height == 1
+    assert xbt["cross_rate"][0] is not None, (
+        "XBTUSDT cross_rate is null, expected a non-null annual rate"
+    )
+
+    # Cross-check: for the non-null cross_rate pairs, every distinct
+    # base must have the same cross_rate (Kraken's rate is per-asset,
+    # not per-pair) -- the value comes from /Assets.
+    rates = pairs.filter(pl.col("cross_rate").is_not_null())
+    by_base = rates.group_by("base").agg(pl.col("cross_rate").n_unique())
+    inconsistent = by_base.filter(pl.col("cross_rate") > 1)
+    assert inconsistent.height == 0, (
+        f"per-asset rate not stable across pairs: "
+        f"{inconsistent.select('base', 'cross_rate')}"
+    )
 

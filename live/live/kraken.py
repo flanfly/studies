@@ -78,6 +78,17 @@ class Kraken(Exchange):
         # symbol without relying on a string-split heuristic that
         # breaks for short or ambiguous tickers.
         self._pairs_cache: dict[str, dict] | None = None
+        # Set of Kraken asset codes that are **actually** margin-enabled
+        # for at least one online USDT/USDC/USD pair. Derived from
+        # ``/AssetPairs`` by collecting the ``base`` of any online pair
+        # with non-empty ``leverage_buy`` (Kraken uses cross margin
+        # only, so isolated marginability is irrelevant). An asset that
+        # has a non-null ``margin_rate`` on ``/Assets`` but no marginable
+        # pair is **not** included -- the per-asset field exists for
+        # informational purposes but the asset cannot actually be
+        # borrowed against, so we emit ``cross_rate=null`` for those
+        # pairs.
+        self._marginable_bases: set[str] | None = None
 
     # ------------------------------------------------------------------
     # helpers
@@ -102,11 +113,13 @@ class Kraken(Exchange):
             l.warning(f"Kraken assets request failed: {e}")
             self._altname_cache = {}
             self._margin_cache = {}
+            self._marginable_bases = set()
             return self._altname_cache
         if data.get("error"):
             l.warning(f"Kraken assets API error: {data['error']}")
             self._altname_cache = {}
             self._margin_cache = {}
+            self._marginable_bases = set()
             return self._altname_cache
         altnames: dict[str, str] = {}
         margins: dict[str, float] = {}
@@ -159,6 +172,23 @@ class Kraken(Exchange):
                 )
             raise RuntimeError(f"Kraken AssetPairs API error: {errs}")
         self._pairs_cache = data.get("result", {}) or {}
+        # Derive the set of margin-enabled base assets from
+        # ``/AssetPairs``. A pair is marginable if it has at least one
+        # buy-side leverage level (``leverage_buy`` non-empty).
+        # ``leverage_sell`` is a redundant signal for cross-margin
+        # only pairs (Kraken has no isolated margin), so we just
+        # check ``leverage_buy``. We restrict to online pairs so a
+        # recently delisted pair doesn't leak into the set.
+        marginable: set[str] = set()
+        for info in self._pairs_cache.values():
+            if info.get("status") != "online":
+                continue
+            lev_buy = info.get("leverage_buy") or []
+            if lev_buy:
+                base_code = info.get("base", "")
+                if base_code:
+                    marginable.add(base_code)
+        self._marginable_bases = marginable
         return self._pairs_cache
 
     # ------------------------------------------------------------------
@@ -171,12 +201,23 @@ class Kraken(Exchange):
         ``cross_rate`` is the per-asset annual borrow rate from
         ``/0/public/Assets`` (Kraken only supports cross margin).
         ``isolated_rate`` is always null.
+
+        A pair's ``cross_rate`` is ``null`` if the base asset is not
+        actually margin-enabled, even if ``/Assets`` reports a
+        non-null ``margin_rate`` for that asset. We use the
+        ``/AssetPairs`` ``leverage_buy`` field (non-empty means at
+        least one leverage level is offered) as the authoritative
+        signal that the pair can actually be margin-traded.
         """
         now = dt.datetime.now(dt.timezone.utc)
         altnames = await self._load_altnames(client)
-        # ``_load_altnames`` populates ``_margin_cache`` in the same call.
+        # ``_load_altnames`` populates ``_margin_cache`` and
+        # ``_load_pairs`` populates ``_marginable_bases`` -- snapshot
+        # the value **after** awaiting ``_load_pairs`` so we read the
+        # freshly-populated cache rather than the pre-call ``None``.
         margins = self._margin_cache or {}
         pairs_map = await self._load_pairs(client)
+        marginable_bases = self._marginable_bases or set()
 
         quote_set = {self._common_ticker(q).upper() for q in quote_assets}
         rows: list[dict] = []
@@ -199,6 +240,13 @@ class Kraken(Exchange):
             if quote_common.upper() not in quote_set:
                 continue
 
+            # Kraken is cross-margin only: the borrow rate is a
+            # per-asset field on /Assets, not per-pair. Emit ``null``
+            # if the base asset is not actually margin-enabled for any
+            # online pair, even if /Assets reports a rate for it.
+            cross_rate = (
+                margins.get(base_raw) if base_raw in marginable_bases else None
+            )
             rows.append(
                 {
                     "ts": now,
@@ -206,9 +254,7 @@ class Kraken(Exchange):
                     "exchange": self.NAME,
                     "base": base_common.lower(),
                     "quote": quote_common.lower(),
-                    # Kraken is cross-margin only: the borrow rate is a
-                    # per-asset field on /Assets, not per-pair.
-                    "cross_rate": margins.get(base_raw),
+                    "cross_rate": cross_rate,
                     "isolated_rate": None,
                 }
             )

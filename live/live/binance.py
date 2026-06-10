@@ -22,6 +22,7 @@ import datetime as dt
 import hashlib
 import hmac
 import logging as l
+import random
 import time
 from typing import Iterable
 from urllib.parse import urlencode
@@ -34,6 +35,80 @@ from . import _split_symbol, Exchange, TransientError
 
 
 __all__ = ["Binance"]
+
+
+# Binance sapi error codes that mean "this asset doesn't have margin
+# trading enabled" rather than "this request was malformed / your
+# credentials are bad". ``-11027`` is the canonical one. We treat
+# 400 / 404 responses with this code as expected and silent.
+_BINANCE_ASSET_NOT_SUPPORTED_CODES = frozenset({-11027})
+
+
+def _parse_binance_error_code(response: httpx.Response) -> int | None:
+    """Return the ``code`` field from a Binance JSON error envelope,
+    or ``None`` if the body isn't a valid ``{"code": ..., "msg": ...}``
+    dict.
+
+    Used by both the silent-skip path (``-11027``) and the
+    transient-retry path (``-1003``/``-1015``/``-1021``) to classify
+    responses without re-parsing them.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    code = body.get("code")
+    return code if isinstance(code, int) else None
+
+
+def _is_asset_not_supported(response: httpx.Response, asset: str) -> bool:
+    """Return ``True`` if ``response`` is Binance's "asset not
+    supported for margin" envelope.
+
+    Binance returns a JSON body of the form
+    ``{"code": -11027, "msg": "asset X is not supported"}`` for any
+    asset that doesn't have margin trading enabled. The status
+    code is 400 in practice, but we also accept 404 to be defensive
+    against future API changes (and to silence the test-suite
+    "asset not found" response the user reported).
+
+    Malformed / non-JSON bodies return ``False``; we err on the
+    side of letting the warning fire for those, since they
+    indicate a real failure mode (auth, network, etc.) rather
+    than a per-asset not-supported case.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    if not isinstance(body, dict):
+        return False
+    code = body.get("code")
+    msg = body.get("msg", "")
+    if code not in _BINANCE_ASSET_NOT_SUPPORTED_CODES:
+        return False
+    # The ``msg`` always mentions the asset name; check the asset
+    # so we don't accidentally silence a different ``-11027`` error
+    # that happens to share the code.
+    return asset.upper() in str(msg).upper()
+
+
+async def _fetch_with_semaphore(
+    sem: asyncio.Semaphore,
+    adapter: "Binance",
+    client: AsyncClient,
+    asset: str,
+) -> float | None:
+    """Wrap ``adapter._fetch_borrow_rate(client, asset)`` with
+    ``sem`` so ``_load_borrow_rates`` can cap in-flight requests.
+
+    Module-level (not a method) so ``asyncio.gather`` can be called
+    with it as a free coroutine.
+    """
+    async with sem:
+        return await adapter._fetch_borrow_rate(client, asset)
 
 
 class Binance(Exchange):
@@ -59,6 +134,13 @@ class Binance(Exchange):
         -1021,  # timestamp outside recvWindow (transient clock issues)
     })
 
+    # Max in-flight borrow-rate fetches. The sapi endpoint is much
+    # more rate-limited than the public endpoints, and firing 400+
+    # concurrent requests causes a wave of ``-1021`` ("timestamp
+    # outside recvWindow") errors that swamp the log. 50 is well
+    # within sapi's per-minute budget and keeps the log clean.
+    BORROW_RATE_CONCURRENCY: int = 50
+
     def __init__(self, api_key: str, api_secret: str):
         self._api_key = api_key
         self._api_secret = api_secret
@@ -66,6 +148,9 @@ class Binance(Exchange):
         # ``{asset_upper: annualized_rate}``. None when credentials are
         # missing or the sapi call fails.
         self._borrow_rate_cache: dict[str, float] | None = None
+        # Cap on in-flight ``_fetch_borrow_rate`` calls. Created
+        # lazily so it binds to the running event loop on first use.
+        self._borrow_rate_sem: asyncio.Semaphore | None = None
 
     # ------------------------------------------------------------------
     # signing helpers
@@ -101,37 +186,137 @@ class Binance(Exchange):
         """Return the most recent daily interest rate for ``asset``,
         annualized as ``daily * 365``. Returns None on auth / parse
         failure so ``pairs()`` degrades to null rates gracefully.
+
+        Response classification:
+
+        * ``400`` / ``404`` with ``code == -11027`` ("asset X is not
+          supported") is the expected response for any asset that
+          doesn't have margin trading enabled. We return ``None``
+          silently -- it's not a real error, just noise in the log.
+
+        * 4xx / 5xx with a code in ``TRANSIENT_CODES`` (``-1003``
+          TOO_MANY_REQUESTS, ``-1015`` rate limit, ``-1007``
+          backend timeout, ``-1021`` "timestamp outside recvWindow")
+          is retried with exponential backoff + jitter. ``-1021`` in
+          particular fires sporadically when 50+ concurrent requests
+          get queued by httpx and the signed timestamp goes stale
+          by the time the server sees it -- a fresh sign + retry
+          fixes it.
+
+        * Any other 4xx / 5xx is a real failure (auth, signature,
+          programming error). We log a warning and return ``None``
+          so the rest of the batch can proceed.
         """
-        try:
-            data = await self._sapi_get(
-                client,
-                "/sapi/v1/margin/interestRateHistory",
-                {"asset": asset.upper()},
-            )
-        except Exception as e:
-            l.warning(f"Binance borrowRate({asset}) failed: {e}")
-            return None
-        if not isinstance(data, list) or not data:
-            return None
-        # Response is sorted newest-first; take the most recent rate.
-        try:
-            daily = float(data[0]["dailyInterestRate"])
-        except (KeyError, TypeError, ValueError):
-            return None
-        return daily * 365
+        last_exc: httpx.HTTPStatusError | None = None
+        for attempt in range(1, self.RETRY_ATTEMPTS + 1):
+            try:
+                data = await self._sapi_get(
+                    client,
+                    "/sapi/v1/margin/interestRateHistory",
+                    {"asset": asset.upper()},
+                )
+                # Success.
+                if not isinstance(data, list) or not data:
+                    return None
+                try:
+                    daily = float(data[0]["dailyInterestRate"])
+                except (KeyError, TypeError, ValueError):
+                    return None
+                return daily * 365
+            except httpx.HTTPStatusError as e:
+                resp = e.response
+                code = _parse_binance_error_code(resp)
+                # ``-11027`` "asset X is not supported" is the expected
+                # response for any asset that isn't marginable. Silent.
+                if (
+                    resp.status_code in (400, 404)
+                    and code in _BINANCE_ASSET_NOT_SUPPORTED_CODES
+                    and asset.upper() in str(resp.json().get("msg", "")).upper()
+                ):
+                    return None
+                # Transient: rate limit, recvWindow, backend timeout.
+                if resp.status_code in (400, 429) and code in self.TRANSIENT_CODES:
+                    last_exc = e
+                    if attempt == self.RETRY_ATTEMPTS:
+                        break
+                    delay = min(
+                        self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                        self.RETRY_MAX_DELAY,
+                    )
+                    delay = delay * (0.75 + random.random() * 0.5)
+                    l.warning(
+                        "Binance borrowRate(%s) transient error "
+                        "(attempt %d/%d): %s; retrying in %.1fs",
+                        asset,
+                        attempt,
+                        self.RETRY_ATTEMPTS,
+                        e,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Real failure: log once, return None.
+                l.warning(f"Binance borrowRate({asset}) failed: {e}")
+                return None
+            except Exception as e:
+                # Transport / DNS / TLS / etc. The base ``is_transient_error``
+                # recognises the common httpx types.
+                if not self.is_transient_error(e):
+                    l.warning(f"Binance borrowRate({asset}) failed: {e}")
+                    return None
+                last_exc = e  # type: ignore[assignment]
+                if attempt == self.RETRY_ATTEMPTS:
+                    break
+                delay = min(
+                    self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                    self.RETRY_MAX_DELAY,
+                )
+                delay = delay * (0.75 + random.random() * 0.5)
+                l.warning(
+                    "Binance borrowRate(%s) transient error "
+                    "(attempt %d/%d): %s; retrying in %.1fs",
+                    asset,
+                    attempt,
+                    self.RETRY_ATTEMPTS,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        # Retries exhausted on a transient error. Log a final warning
+        # so we don't lose it entirely -- but the surrounding batch
+        # is unaffected (this just means one asset has no rate).
+        l.warning(
+            "Binance borrowRate(%s) gave up after %d attempts: %s",
+            asset,
+            self.RETRY_ATTEMPTS,
+            last_exc,
+        )
+        return None
 
     async def _load_borrow_rates(
         self, client: AsyncClient, bases: Iterable[str]
     ) -> dict[str, float]:
         """``{base_lower: annual_rate}`` for each base asset, fetched
         concurrently and cached on the instance.
+
+        Concurrency is capped at ``BORROW_RATE_CONCURRENCY`` via an
+        ``asyncio.Semaphore`` so we don't trip Binance's sapi rate
+        limit (which manifests as ``-1021`` "timestamp outside
+        recvWindow" -- a side effect of the signed timestamp on a
+        request going stale while hundreds of them are queued). The
+        actual fetch count for ``quote_assets=USDT`` is ~430.
         """
         if self._borrow_rate_cache is not None:
             return self._borrow_rate_cache
         bases = sorted({b for b in bases})
         rates: dict[str, float] = {}
+        if self._borrow_rate_sem is None:
+            self._borrow_rate_sem = asyncio.Semaphore(
+                self.BORROW_RATE_CONCURRENCY
+            )
+        sem = self._borrow_rate_sem
         results = await asyncio.gather(
-            *(self._fetch_borrow_rate(client, b) for b in bases)
+            *(_fetch_with_semaphore(sem, self, client, b) for b in bases)
         )
         for b, r in zip(bases, results):
             if r is not None:
