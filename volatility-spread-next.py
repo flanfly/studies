@@ -34,10 +34,10 @@
 
 # %% editable=true slideshow={"slide_type": ""} tags=["parameters"]
 days_holding = "2"
-min_volume = "5_000_000"
+min_volume = "1_000_000"
 start_year = "2025"
 num_buckets = "10"
-days_volatility_sma = "30"
+days_volatility_sma = "14"
 
 # %%
 days_holding_P = int(days_holding)
@@ -69,39 +69,47 @@ stables = [c.lower() for c in [
     "FDUSD", "USD1", "XUSD", "USD", "EURC", "EURI", "AEUR", "EUR", "GBP",
     "JPY", "AUD", "CAD", "CHF", "NZD", "KRW", "RLUSD"
 ]]
+cutoff = dt.datetime(2026,4,16)
 
 df = (
     # select exchanges as source
     pl.read_parquet('live/symbols.parquet')
 
     # select by lowest borrow rate
-    #.filter(pl.col('exchange') != 'binance')
+    .filter((pl.col('exchange').is_in(['kucoin','htx'])))
     .rename({
         "cross_rate": "cross",
         "isolated_rate": "isolated",
         # comment out the following line
-        "funding_rate":"perp",
+        #"funding_rate":"perp",
     })
     .unpivot(
         on=[
             "cross",
             "isolated",
             # comment out the following line
-            "perp",
+            #"perp",
         ],
         index=["symbol",'exchange','base'],
-        variable_name="type", 
+        variable_name="type",
         value_name="rate"
     )
     .filter(pl.col('rate').is_not_null())
     .sort('rate', descending=True)
     .group_by('base')
     .last()
- 
-    # join ohlcv data
-    .join(pl.read_parquet('live/klines.parquet'),on=['exchange','symbol'])
+
+    # join ohlcv data — restrict to USDT pairs (matches production's stables-1d.parquet)
+    .join(
+        pl.read_parquet('live/klines.parquet').filter(
+            (pl.col('exchange') == 'binance') & (pl.col('quote') == 'usdt')
+        ),
+        on=['base']
+    )
     .with_columns(
-        symbol=pl.col('exchange') + ":" + pl.col('symbol'),
+        # use the binance kline symbol directly (e.g. "BTCUSDT") so the universe
+        # and benchmark names line up with the production implementation
+        symbol=pl.col('symbol_right'),
         ts=pl.col('open_ts'),
         volume=pl.col("quote_volume"),
     )
@@ -133,21 +141,35 @@ df = (
     ])
         
     .drop_nulls(subset=['vol']) 
-    .filter(pl.col('ts').dt.year() >= start_year_P)
+    .filter((pl.col('ts').dt.year() >= start_year_P) & (pl.col('ts') <= cutoff))
+    #.with_columns(
+    #    bucket=pl.when(
+    #        (pl.col('volume') > min_volume_P)
+    #    )
+    #    .then(pl.col("vol"))
+    #    .qcut(num_buckets_P, labels=[str(i) for i in range(num_buckets_P)], allow_duplicates=True).over('ts'),
+    #)
     .with_columns(
-        bucket=pl.when(
-            (pl.col('volume') > min_volume_P)
-        )
-        .then(pl.col("vol"))
-        .qcut(num_buckets_P, labels=[str(i) for i in range(num_buckets_P)], allow_duplicates=True).over('ts'),
+        bucket=pl.col('vol').qcut(num_buckets_P, labels=[str(i) for i in range(num_buckets_P)], allow_duplicates=True).over('ts'),
     )
+)
+
+print(
+    df
+    .filter(
+        (pl.col('ts') == cutoff)# &
+        #(pl.col("bucket") == str(num_buckets_P - 1)) &
+        #(pl.col('volume') > min_volume_P)
+    )
+    #.sort('symbol')
+    #.write_csv()
 )
 
 class Alpha(bt.AlphaModel):
     def __call__(self, history: pl.DataFrame, u: bt.Universe) -> list[bt.Signal]:
         df = u.df()
         today = df["ts"].max()
-        s = df.filter((pl.col('ts') == today) & (pl.col("bucket") == str(num_buckets_P - 1)))
+        s = df.filter((pl.col('ts') == today) & (pl.col("bucket") == str(num_buckets_P - 1)) & (pl.col('volume') > min_volume_P))
         return [
             bt.Signal(r['symbol'], False, -1.0)
             for r in s.iter_rows(named=True)
@@ -157,7 +179,7 @@ test = bt.Backtest(
     bt.Manual(df,high_col='high',low_col='low'),
     title='vol spread',
     alpha=Alpha(),
-    risk=bt.MaxRisk(.4),
+    #risk=bt.MaxRisk(.4),
     benchmark="BTCUSDT",
     period=days_holding_P,
 )
