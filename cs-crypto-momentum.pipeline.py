@@ -17,9 +17,11 @@ l.basicConfig(
 
 load_dotenv()
 
+NAME = "cs-crypto-momentum"
+
 PROJECT_ID = "prj-vertexai-test"
 REGION = "asia-southeast1"
-PIPELINE_ROOT = "gs://kai-vertex-ai-test-data/cr2"
+PIPELINE_ROOT = f"gs://kai-vertex-ai-test-data/${NAME}"
 SERVICE_ACCOUNT = "batch-job-sa@prj-vertexai-test.iam.gserviceaccount.com"
 REPOSITORY = "flanfly/studies"
 
@@ -46,93 +48,46 @@ def latest_image_tag():
     return tag
 
 
-# 2026-03-13
-DATA_PIPELINE_IMAGE = "asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies@sha256:a5e43e4a01f9e861ce1e15fbd6cf7126a28cec9a3c07e2357aa3fb9c0d2c9497"
 IMAGE = f"asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies{latest_image_tag()}"
 
 
 @dsl.container_component
-def synchronize_1m_archives(today: str, status: dsl.OutputPath(str)):
-    """Makes sure 1-minute kline data is in sync with Binance."""
-
-    return dsl.ContainerSpec(
-        image=IMAGE,
-        command=["bash", "-c"],
-        args=[
-            """
-set -euo pipefail
-
-export CLOUDSDK_CORE_PROJECT=$1
-export GIT_KEY_SECRET=git-key
-
-mkdir -p "$(dirname "$0")"
-./run.sh
-
-uv run sync-datastore.py | tee "$0"
-            """,
-            status,
-            PROJECT_ID,
-        ],
-    )
-
-
-@dsl.container_component
-def derive_daily_klines(
-    status_1m_sync: str,
-    jobs: int,
-    spot_1d: dsl.Output[dsl.Dataset],
-    stables_1d: dsl.Output[dsl.Dataset],
+def hpo(
+    results: dsl.Output[dsl.Artifact],
 ):
-    """Resample 1m klines into 1d klines."""
+    """Run hyperparameter optimization."""
 
     return dsl.ContainerSpec(
         image=IMAGE,
-        command=["bash", "-c"],
+        command=["sh", "-c"],
         args=[
             """
-set -euo pipefail
-
-export CLOUDSDK_CORE_PROJECT="$4"
-export GIT_KEY_SECRET=git-key
-
-./run.sh
-
-uv run sync-datastore.py -d \
-        --output-daily-file "$3" \
-        --output-stables-file "$2" \
-        --stable-coin USDT \
-        -j $1
+            mkdir -p "$0"
+            sh ./cs-crypto-momentum.trail.sh "$0"
             """,
-            status_1m_sync,  # 0
-            jobs,  # 1
-            stables_1d.uri,  # 2
-            spot_1d.uri,  # 3
-            PROJECT_ID,  # 4
+            results.path,  # 0
         ],
     )
 
 
 @dsl.pipeline(
-    name="binance-pipeline",
-    description="Binance data synchronization",
+    name=NAME,
+    description=f"Run hyperparameter optimization for {NAME}",
 )
 def pipeline():
-    sync = (
-        synchronize_1m_archives(today=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        .set_cpu_limit("8")
-        .set_memory_limit("16G")
-    )
-
-    daily = (
-        derive_daily_klines(status_1m_sync=sync.output, jobs=32)
-        .set_cpu_limit("8")
-        .set_memory_limit("16G")
-    )
+    hpo().set_cpu_limit("32").set_memory_limit("32G")
 
 
 if __name__ == "__main__":
     from google.cloud import aiplatform
     from tempfile import NamedTemporaryFile
+    from sys import argv
+
+    name = (
+        argv[1]
+        if len(argv) > 1
+        else f"{NAME}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
 
     with NamedTemporaryFile(suffix=".yaml") as f:
         kfp.compiler.Compiler().compile(pipeline, f.name)
@@ -140,10 +95,12 @@ if __name__ == "__main__":
         aiplatform.init(project=PROJECT_ID, location=REGION)
 
         job = aiplatform.PipelineJob(
-            display_name="binance",
+            job_id=name,
+            display_name=NAME,
             template_path=f.name,
             pipeline_root=PIPELINE_ROOT,
             enable_caching=True,
+            labels={},
         )
 
         job.submit(service_account=SERVICE_ACCOUNT)

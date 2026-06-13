@@ -30,7 +30,7 @@ daily_exit = "False"
 show_figs = "True"
 use_live_data = "True"
 
-# %% jupyter={"source_hidden": true}
+# %%
 import polars as pl
 import numpy as np
 import pandas as pd

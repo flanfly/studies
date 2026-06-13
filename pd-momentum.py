@@ -55,7 +55,7 @@ import backtest as bt
 # Load the daily OHLCV klines for USDT-quoted coins.
 # We alias 'quote_volume' to 'mcap' to serve as our liquidity/market cap filter.
 df = (
-    pl.read_parquet("polarity/latest-data/*.parquet", missing_columns='insert')
+    pl.read_parquet("polarity/latest-data.parquet", missing_columns='insert')
     .sort(["asset", "ts"])
     .filter(
         ~pl.col("asset").is_in(

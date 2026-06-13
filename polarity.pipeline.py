@@ -46,93 +46,74 @@ def latest_image_tag():
     return tag
 
 
-# 2026-03-13
-DATA_PIPELINE_IMAGE = "asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies@sha256:a5e43e4a01f9e861ce1e15fbd6cf7126a28cec9a3c07e2357aa3fb9c0d2c9497"
 IMAGE = f"asia-southeast1-docker.pkg.dev/prj-vertexai-test/default/studies{latest_image_tag()}"
 
 
 @dsl.container_component
-def synchronize_1m_archives(today: str, status: dsl.OutputPath(str)):
-    """Makes sure 1-minute kline data is in sync with Binance."""
-
-    return dsl.ContainerSpec(
-        image=IMAGE,
-        command=["bash", "-c"],
-        args=[
-            """
-set -euo pipefail
-
-export CLOUDSDK_CORE_PROJECT=$1
-export GIT_KEY_SECRET=git-key
-
-mkdir -p "$(dirname "$0")"
-./run.sh
-
-uv run sync-datastore.py | tee "$0"
-            """,
-            status,
-            PROJECT_ID,
-        ],
-    )
-
-
-@dsl.container_component
-def derive_daily_klines(
-    status_1m_sync: str,
-    jobs: int,
-    spot_1d: dsl.Output[dsl.Dataset],
-    stables_1d: dsl.Output[dsl.Dataset],
+def train(
+    concurrency: int,
+    zscore_win: int,
+    gbt_type: str,
+    gbt_min_leafs: int,
+    gbt_max_depth: int,
+    gbt_lr: float,
+    report: dsl.Output[dsl.HTML],
 ):
-    """Resample 1m klines into 1d klines."""
+    """Forecast using Polarity Digital sourced signals"""
 
     return dsl.ContainerSpec(
         image=IMAGE,
-        command=["bash", "-c"],
+        command=["sh", "-c"],
         args=[
             """
-set -euo pipefail
-
-export CLOUDSDK_CORE_PROJECT="$4"
-export GIT_KEY_SECRET=git-key
-
-./run.sh
-
-uv run sync-datastore.py -d \
-        --output-daily-file "$3" \
-        --output-stables-file "$2" \
-        --stable-coin USDT \
-        -j $1
+            uv run vertex-ai-main.py "polarity.ipynb=$0" \
+                    --concurrency="$1" \
+                    --zscore_win="$2" \
+                    --gbt_type="$3" \
+                    --gbt_min_leafs="$4" \
+                    --gbt_max_depth="$5" \
+                    --gbt_lr="$6" \
             """,
-            status_1m_sync,  # 0
-            jobs,  # 1
-            stables_1d.uri,  # 2
-            spot_1d.uri,  # 3
-            PROJECT_ID,  # 4
+            report.uri,  # 0
+            concurrency,  # 1
+            zscore_win,  # 2
+            gbt_type,  # 3
+            gbt_min_leafs,  # 4
+            gbt_max_depth,  # 5
+            gbt_lr,  # 6
         ],
     )
 
 
 @dsl.pipeline(
-    name="binance-pipeline",
-    description="Binance data synchronization",
+    name="polarity",
+    description="Forecast using Polarity Digital sourced signals",
 )
 def pipeline():
-    sync = (
-        synchronize_1m_archives(today=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        .set_cpu_limit("8")
-        .set_memory_limit("16G")
-    )
-
-    daily = (
-        derive_daily_klines(status_1m_sync=sync.output, jobs=32)
-        .set_cpu_limit("8")
-        .set_memory_limit("16G")
+    run = (
+        train(
+            concurrency=32,
+            zscore_win=365,
+            gbt_type="gbt",
+            gbt_min_leafs=20,
+            gbt_max_depth=2,
+            gbt_lr=0.01,
+        )
+        .set_cpu_limit("32")
+        .set_memory_limit("32G")
     )
 
 
 if __name__ == "__main__":
     from google.cloud import aiplatform
     from tempfile import NamedTemporaryFile
+    from sys import argv
+
+    name = (
+        argv[1]
+        if len(argv) > 1
+        else f"polarity-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
 
     with NamedTemporaryFile(suffix=".yaml") as f:
         kfp.compiler.Compiler().compile(pipeline, f.name)
@@ -140,10 +121,12 @@ if __name__ == "__main__":
         aiplatform.init(project=PROJECT_ID, location=REGION)
 
         job = aiplatform.PipelineJob(
-            display_name="binance",
+            job_id=name,
+            display_name="polarity",
             template_path=f.name,
             pipeline_root=PIPELINE_ROOT,
             enable_caching=True,
+            labels={},
         )
 
         job.submit(service_account=SERVICE_ACCOUNT)

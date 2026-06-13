@@ -51,11 +51,12 @@ import functools as fc
 import operator
 
 df = (
-    pl.read_parquet("polarity/latest-data/*parquet")
+    pl.read_parquet("polarity/latest-data.parquet")
     .rename(
         {
             "asset": "symbol",
             "price": "close",
+            'ts':'ts',
         }
     )
     .with_columns(ts=pl.col("ts").dt.cast_time_unit("us"))
@@ -72,7 +73,7 @@ df = (
         volume=pl.col('total_volume').rolling_mean(days_holding_P).over('symbol'),
     )
     .sort("ts")
-    .filter(pl.col("ts").dt.year() >= 2026)
+    .filter(pl.col("ts") .dt.year() >= 2025)
     .drop_nulls(['volume'])
 )
 
@@ -115,7 +116,7 @@ test = bt.Backtest(
     ),
     benchmark="btc",
     period=days_holding_P,
-    eager_rebalance=True,
+    eager_rebalance=False,
 )
 
 test.run()
