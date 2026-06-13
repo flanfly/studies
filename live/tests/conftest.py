@@ -11,8 +11,9 @@ provide:
     are independent).
   * ``htx``/``kucoin``/``binance`` – concrete adapter instances; the
     test is skipped if the corresponding ``.env`` credentials are
-    missing. ``kraken`` is always available because its public
-    endpoints are unauthenticated.
+    missing. ``kraken``, ``hyperliquid``, and ``asterdex`` are
+    always available because their public endpoints are
+    unauthenticated.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import pytest
 from dotenv import load_dotenv
 from httpx import AsyncClient
 
-from live import Binance, HTX, Kraken, KuCoin
+from live import AsterDex, Binance, HTX, Hyperliquid, Kraken, KuCoin
 
 
 def _find_env(start: Path) -> Path | None:
@@ -131,3 +132,15 @@ def kraken() -> Kraken:
 def binance() -> Binance:
     creds = _require_env("BINANCE_API_KEY", "BINANCE_API_SECRET")
     return Binance(api_key=creds["BINANCE_API_KEY"], api_secret=creds["BINANCE_API_SECRET"])
+
+
+@pytest.fixture
+def hyperliquid() -> Hyperliquid:
+    # Public endpoints only; no credentials needed.
+    return Hyperliquid()
+
+
+@pytest.fixture
+def asterdex() -> AsterDex:
+    # Public endpoints only; no credentials needed.
+    return AsterDex()

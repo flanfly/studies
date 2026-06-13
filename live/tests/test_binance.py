@@ -355,12 +355,19 @@ async def test_fetch_borrow_rate_retries_transient_code(
     assert not gave_up, f"unexpected gave-up warning: {[r.message for r in gave_up]}"
 
 
-async def test_fetch_borrow_rate_gives_up_after_max_attempts(
-    client: AsyncClient, binance: Binance, caplog
+async def test_fetch_borrow_rate_retries_infinitely_on_persistent_transient(
+    client: AsyncClient, binance: Binance
 ) -> None:
-    """If all ``RETRY_ATTEMPTS`` attempts return a transient code,
-    we log a final ``gave up`` warning and return ``None``. The
-    surrounding batch is unaffected.
+    """With the new infinite-retry policy, a borrow-rate request
+    that always returns a transient code keeps being retried.
+
+    We bound the test by counting calls up to a ceiling and
+    cancelling the task. The test asserts:
+
+      * The call was retried at least K times (proving the
+        infinite-retry policy is in effect).
+      * The call never propagated the transient error to the
+        caller (it was still trying when we cancelled).
     """
     import json as _json
 
@@ -379,16 +386,29 @@ async def test_fetch_borrow_rate_gives_up_after_max_attempts(
             response=resp,
         )
 
-    binance.RETRY_BASE_DELAY = 0.001
-    binance.RETRY_MAX_DELAY = 0.001
+    # Near-zero delay so the test runs in <1s.
+    binance.RETRY_BASE_DELAY = 0.0
+    binance.RETRY_MAX_DELAY = 0.0
     orig = binance._sapi_get
     binance._sapi_get = fake_sapi
     try:
-        with caplog.at_level("WARNING"):
-            result = await binance._fetch_borrow_rate(client, "BTC")
+
+        async def run_until_cancelled() -> None:
+            await binance._fetch_borrow_rate(client, "BTC")
+
+        task = asyncio.create_task(run_until_cancelled())
+        # Spin until the stub has been called 200 times, then cancel.
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while call_count < 200 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, BaseException):
+            pass
     finally:
         binance._sapi_get = orig
-    assert call_count == Binance.RETRY_ATTEMPTS
-    assert result is None
-    gave_up = [r for r in caplog.records if "gave up" in r.message and "BTC" in r.message]
-    assert len(gave_up) == 1, f"expected 1 gave-up warning, got {len(gave_up)}"
+    assert call_count >= 200, (
+        f"expected >= 200 attempts, got {call_count} -- "
+        f"infinite-retry policy is not in effect for borrowRate"
+    )

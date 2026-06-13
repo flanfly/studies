@@ -116,6 +116,10 @@ class Binance(Exchange):
 
     HOST = "api.binance.com"
     SAPI_HOST = "api.binance.com"  # no separate demo sapi
+    # USDⓈ-M futures (USDT- and USDC-margined perpetuals) live on a
+    # separate host. The public funding endpoint here is used for
+    # the ``funding_rate`` column on ``pairs()``.
+    FAPI_HOST = "fapi.binance.com"
     NAME = "binance"
     # Max daily candles returned by a single ``klines()`` call. The
     # ``/api/v3/klines`` endpoint caps the response at 1000 candles
@@ -133,6 +137,27 @@ class Binance(Exchange):
         -1007,  # timeout waiting for response from backend
         -1021,  # timestamp outside recvWindow (transient clock issues)
     })
+
+    # Error code returned by the futures premiumIndex endpoint when
+    # the symbol doesn't exist. We treat this as a silent per-asset
+    # "null" rather than a failure (most spot pairs simply have no
+    # perpetual contract on Binance).
+    _BINANCE_INVALID_SYMBOL_CODE = -1121
+
+    # All Binance USDⓈ-M perpetuals use an 8h funding interval. The
+    # ``fundingInfo`` endpoint confirms this for every contract.
+    _FUNDING_INTERVAL_HOURS: float = 8.0
+    # Cap on in-flight ``_fetch_funding_rate`` calls. The public
+    # ``/fapi/v1/premiumIndex`` endpoint is rate-limited at 2400
+    # calls/min/IP, but each call is also gated by the order-book
+    # weight (typically 1-2), so 30-wide is a safe default that
+    # finishes ~430 bases in <5s.
+    _FUNDING_CONCURRENCY: int = 30
+    # Backoff schedule for per-call retries on transient errors
+    # (429, 5xx, transport). Inherits the base-class default
+    # (100ms → 10s, infinite attempts); the per-adapter constants
+    # are gone -- ``_funding_request`` uses ``self.RETRY_BASE_DELAY``
+    # and ``self.RETRY_MAX_DELAY`` directly.
 
     # Max in-flight borrow-rate fetches. The sapi endpoint is much
     # more rate-limited than the public endpoints, and firing 400+
@@ -207,8 +232,9 @@ class Binance(Exchange):
           programming error). We log a warning and return ``None``
           so the rest of the batch can proceed.
         """
-        last_exc: httpx.HTTPStatusError | None = None
-        for attempt in range(1, self.RETRY_ATTEMPTS + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 data = await self._sapi_get(
                     client,
@@ -236,9 +262,6 @@ class Binance(Exchange):
                     return None
                 # Transient: rate limit, recvWindow, backend timeout.
                 if resp.status_code in (400, 429) and code in self.TRANSIENT_CODES:
-                    last_exc = e
-                    if attempt == self.RETRY_ATTEMPTS:
-                        break
                     delay = min(
                         self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
                         self.RETRY_MAX_DELAY,
@@ -246,10 +269,10 @@ class Binance(Exchange):
                     delay = delay * (0.75 + random.random() * 0.5)
                     l.warning(
                         "Binance borrowRate(%s) transient error "
-                        "(attempt %d/%d): %s; retrying in %.1fs",
+                        "(attempt %d): %s; retrying in %.1fs "
+                        "(infinite retries)",
                         asset,
                         attempt,
-                        self.RETRY_ATTEMPTS,
                         e,
                         delay,
                     )
@@ -264,9 +287,6 @@ class Binance(Exchange):
                 if not self.is_transient_error(e):
                     l.warning(f"Binance borrowRate({asset}) failed: {e}")
                     return None
-                last_exc = e  # type: ignore[assignment]
-                if attempt == self.RETRY_ATTEMPTS:
-                    break
                 delay = min(
                     self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
                     self.RETRY_MAX_DELAY,
@@ -274,24 +294,14 @@ class Binance(Exchange):
                 delay = delay * (0.75 + random.random() * 0.5)
                 l.warning(
                     "Binance borrowRate(%s) transient error "
-                    "(attempt %d/%d): %s; retrying in %.1fs",
+                    "(attempt %d): %s; retrying in %.1fs "
+                    "(infinite retries)",
                     asset,
                     attempt,
-                    self.RETRY_ATTEMPTS,
                     e,
                     delay,
                 )
                 await asyncio.sleep(delay)
-        # Retries exhausted on a transient error. Log a final warning
-        # so we don't lose it entirely -- but the surrounding batch
-        # is unaffected (this just means one asset has no rate).
-        l.warning(
-            "Binance borrowRate(%s) gave up after %d attempts: %s",
-            asset,
-            self.RETRY_ATTEMPTS,
-            last_exc,
-        )
-        return None
 
     async def _load_borrow_rates(
         self, client: AsyncClient, bases: Iterable[str]
@@ -325,15 +335,186 @@ class Binance(Exchange):
         return rates
 
     # ------------------------------------------------------------------
+    # funding rate fetcher
+    # ------------------------------------------------------------------
+    async def _funding_request(
+        self, client: AsyncClient, symbol: str
+    ) -> dict | None:
+        """Make a single Binance funding-rate HTTP request with
+        infinite per-call retry on transient errors (429, 5xx,
+        transport). Returns the parsed JSON payload on success,
+        ``None`` on a permanent failure.
+        """
+        url = (
+            f"https://{self.FAPI_HOST}/fapi/v1/premiumIndex"
+            f"?symbol={symbol}"
+        )
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = await client.get(url, timeout=30.0)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429 or e.response.status_code >= 500:
+                    delay = min(
+                        self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                        self.RETRY_MAX_DELAY,
+                    )
+                    delay = delay * (0.75 + random.random() * 0.5)
+                    l.warning(
+                        "Binance funding_rate(%s) transient error "
+                        "(attempt %d): %s; retrying in %.1fs "
+                        "(infinite retries)",
+                        symbol,
+                        attempt,
+                        e,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Non-transient HTTP error: log once, return None.
+                l.warning(f"Binance funding_rate({symbol}) HTTP error: {e}")
+                return None
+            except Exception as e:
+                if not self.is_transient_error(e):
+                    raise RuntimeError(
+                        f"Binance funding_rate request failed: {e}"
+                    ) from e
+                delay = min(
+                    self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                    self.RETRY_MAX_DELAY,
+                )
+                delay = delay * (0.75 + random.random() * 0.5)
+                l.warning(
+                    "Binance funding_rate(%s) transient error "
+                    "(attempt %d): %s; retrying in %.1fs "
+                    "(infinite retries)",
+                    symbol,
+                    attempt,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+    async def _fetch_funding_rate(
+        self, client: AsyncClient, base: str, quote: str
+    ) -> float | None:
+        """Return the most recent funding rate (annualised APR) for the
+        Binance USDⓈ-M perpetual on ``base`` / ``quote``, or ``None``
+        if no such contract exists or the request fails for a
+        non-transient reason.
+
+        Endpoint: ``GET /fapi/v1/premiumIndex?symbol={base}{quote}``
+        on ``fapi.binance.com`` (unauthenticated, public). Response
+        shape::
+
+            {
+              "symbol": "BTCUSDT",
+              "markPrice": "...",
+              "lastFundingRate": "-0.00003376",
+              "nextFundingTime": ...,
+              "time": ...
+            }
+
+        We probe USDT-settled perps first; if Binance returns
+        ``-1121`` ("Invalid symbol"), we fall back to USDC-
+        settled (``BTCUSDC``) and accept whatever the response
+        reports. We deliberately skip the COIN-M (inverse-
+        margined) endpoint on ``dapi.binance.com`` -- the user
+        wants stablecoin-settled perpetuals only.
+
+        A response with ``code == -1121`` for both USDT and USDC
+        means the base has no perpetual contract at all; we
+        return ``None`` silently. Transient errors (429, 5xx,
+        transport) are retried with per-call backoff in
+        :meth:`_funding_request`.
+        """
+        for settle in (quote.upper(), "USDC" if quote.upper() == "USDT" else "USDT"):
+            symbol = f"{base.upper()}{settle}"
+            payload = await self._funding_request(client, symbol)
+            if payload is None:
+                return None
+
+            if not isinstance(payload, dict):
+                continue
+            code = payload.get("code")
+            # ``code`` is absent on success. If present and an int,
+            # it follows the Binance error envelope convention.
+            if isinstance(code, int) and code == self._BINANCE_INVALID_SYMBOL_CODE:
+                continue
+            if isinstance(code, int) and code in self.TRANSIENT_CODES:
+                # ``_funding_request`` would have retried these
+                # already; if we still get one, give up on this
+                # settle-currency.
+                return None
+            if isinstance(code, int) and code != 0:
+                # Real error: log once, move on.
+                l.warning(
+                    f"Binance funding_rate({symbol}) error: {payload}"
+                )
+                return None
+            try:
+                rate = float(payload["lastFundingRate"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            return self.annualize_funding_rate(
+                rate, self._FUNDING_INTERVAL_HOURS
+            )
+
+        # All settle currencies tried returned -1121: no perpetual
+        # contract for this base on Binance.
+        return None
+
+    async def _fetch_funding_rates(
+        self, client: AsyncClient, bases: Iterable[str]
+    ) -> dict[str, float]:
+        """``{base_lower: annual_funding_rate}`` for each base asset
+        that has a Binance USDⓈ-M perpetual. Concurrent fetch via
+        ``asyncio.gather``, bounded by ``_FUNDING_CONCURRENCY`` to
+        stay under the per-IP rate limit on the public
+        ``/fapi/v1/premiumIndex`` endpoint.
+        """
+        bases = sorted({b.lower() for b in bases})
+        if not bases:
+            return {}
+
+        semaphore = asyncio.Semaphore(self._FUNDING_CONCURRENCY)
+
+        async def _one(b: str) -> tuple[str, float | None]:
+            async with semaphore:
+                try:
+                    rate = await self._fetch_funding_rate(
+                        client, base=b, quote="USDT"
+                    )
+                except Exception as e:
+                    l.warning(f"Binance funding_rate({b}) failed: {e}")
+                    return b, None
+            return b, rate
+
+        results = await asyncio.gather(*(_one(b) for b in bases))
+        return {b: r for b, r in results if r is not None}
+
+    # ------------------------------------------------------------------
     # pairs
     # ------------------------------------------------------------------
     async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
-        """Returns active USDT/USDC spot pairs.
+        """Returns active USDT/USDC spot pairs with cross/isolated
+        margin borrow rates and the current perpetual-futures
+        funding rate APR.
 
-        Columns: ts, symbol, exchange, base, quote, cross_rate, isolated_rate
-        ``cross_rate`` and ``isolated_rate`` are populated from the per-asset
-        ``interestRateHistory`` endpoint (the same rate applies to both
-        cross and isolated margin on Binance).
+        Columns: ts, symbol, exchange, base, quote, cross_rate,
+        isolated_rate, funding_rate
+
+        ``cross_rate`` and ``isolated_rate`` are populated from the
+        per-asset ``interestRateHistory`` endpoint (the same rate
+        applies to both cross and isolated margin on Binance).
+        ``funding_rate`` is the most recent Binance USDⓈ-M
+        perpetual funding payment, annualised as
+        ``rate * 3 * 365`` (Binance pays funding every 8h on the
+        standard linear perp). It's ``None`` for bases that have
+        no USDT- or USDC-margined perpetual on Binance.
         """
         now = dt.datetime.now(dt.timezone.utc)
         try:
@@ -373,10 +554,14 @@ class Binance(Exchange):
 
         if rows:
             rates = await self._load_borrow_rates(client, active_bases)
+            funding_rates = await self._fetch_funding_rates(
+                client, active_bases
+            )
             for r in rows:
                 rate = rates.get(r["base"])
                 r["cross_rate"] = rate
                 r["isolated_rate"] = rate
+                r["funding_rate"] = funding_rates.get(r["base"])
 
         if not rows:
             return self.empty_pairs_df()
@@ -390,6 +575,7 @@ class Binance(Exchange):
             "quote",
             pl.col("cross_rate").cast(pl.Float64),
             pl.col("isolated_rate").cast(pl.Float64),
+            pl.col("funding_rate").cast(pl.Float64),
         )
         self.validate_pairs_df(df)
         return df

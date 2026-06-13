@@ -10,7 +10,8 @@ import datetime as dt
 import hashlib
 import hmac
 import logging as l
-from typing import Optional
+import random
+from typing import Iterable, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -27,6 +28,12 @@ class HTX(Exchange):
     """HTX spot exchange adapter."""
 
     HOST = "api.huobi.pro"
+    # Linear swap (USDT-margined perpetual) endpoint. The funding-
+    # rate endpoint is unauthenticated and lives on a different host
+    # than the spot ``HOST`` -- it's the same brand, just a different
+    # product. We declare it as a class constant so it's overridable
+    # in tests.
+    LINEAR_SWAP_HOST = "api.hbdm.com"
     NAME = "htx"
     # HTX native daily candles are aligned to 16:00 UTC. To produce
     # midnight-UTC 1d candles (matching Binance / KuCoin / Kraken), we
@@ -42,6 +49,22 @@ class HTX(Exchange):
     # Number of 4h candles that make up a calendar day. Each 1d
     # candle (00:00 to 00:00 next) is the union of 6 of these.
     _FOURH_PER_DAY = 6
+    # HTX linear swaps pay funding every 8h (00:00, 08:00, 16:00 UTC).
+    # The funding rate returned by the API is per-payment; the APR
+    # is ``rate * 3 * 365``.
+    _FUNDING_INTERVAL_HOURS: float = 8.0
+    # Cap on in-flight ``_fetch_funding_rate`` calls. The HTX
+    # funding endpoint enforces a per-IP rate limit (err_code 1032
+    # "Maximum number of access attempts exceeded."), so we keep
+    # concurrency well under it. The borrow-rate call doesn't need
+    # this because there are far fewer borrow-rate currencies than
+    # there are bases to probe for funding.
+    _FUNDING_CONCURRENCY: int = 30
+    # Backoff schedule for per-call retries on transient errors
+    # (err_code 1032, transport). Inherits the base-class default
+    # (100ms → 10s, infinite attempts); the per-adapter constants
+    # are gone -- ``_funding_request`` uses ``self.RETRY_BASE_DELAY``
+    # and ``self.RETRY_MAX_DELAY`` directly.
 
     def __init__(self, access_key: str, secret_key: str):
         self._access_key = access_key
@@ -151,12 +174,208 @@ class HTX(Exchange):
         return rates
 
     # ------------------------------------------------------------------
+    # funding rate fetcher
+    # ------------------------------------------------------------------
+    # HTX error code for "the perpetual contract does not exist" --
+    # returned when we probe a base/quote that has no USDT-margined
+    # linear swap. We treat that as a silent "null" rather than a
+    # failure.
+    _HTX_NO_CONTRACT_CODE = 1332
+    # HTX error codes that indicate a transient failure (rate limit,
+    # access throttling). We surface them as ``TransientError`` so
+    # the base-class retry loop can pick them up.
+    _HTX_TRANSIENT_CODES: frozenset[int] = frozenset({
+        1032,  # "Maximum number of access attempts exceeded."
+    })
+
+    async def _funding_request(
+        self, client: AsyncClient, contract: str
+    ) -> dict | None:
+        """Make a single HTX funding-rate HTTP request with
+        infinite per-call retry on transient errors (err_code
+        1032, transport). Returns the parsed JSON payload on
+        success, ``None`` on a permanent failure (non-transient
+        HTTP error, or a successful response we cannot parse).
+        """
+        url = (
+            f"https://{self.LINEAR_SWAP_HOST}/linear-swap-api/v1/"
+            f"swap_funding_rate?contract_code={contract}"
+        )
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = await client.get(url, timeout=30.0)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                # HTX's funding endpoint returns 200 OK even on a
+                # missing contract, but a 429 / 5xx lands here.
+                if e.response.status_code == 429 or e.response.status_code >= 500:
+                    delay = min(
+                        self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                        self.RETRY_MAX_DELAY,
+                    )
+                    delay = delay * (0.75 + random.random() * 0.5)
+                    l.warning(
+                        "HTX funding_rate(%s) transient error "
+                        "(attempt %d): %s; retrying in %.1fs "
+                        "(infinite retries)",
+                        contract,
+                        attempt,
+                        e,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Non-transient HTTP error: log once, return None.
+                l.warning(f"HTX funding_rate({contract}) HTTP error: {e}")
+                return None
+            except Exception as e:
+                # Transport / DNS / TLS / etc. Defer to the
+                # base-class transient classifier.
+                if not self.is_transient_error(e):
+                    raise RuntimeError(
+                        f"HTX funding_rate request failed: {e}"
+                    ) from e
+                delay = min(
+                    self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                    self.RETRY_MAX_DELAY,
+                )
+                delay = delay * (0.75 + random.random() * 0.5)
+                l.warning(
+                    "HTX funding_rate(%s) transient error "
+                    "(attempt %d): %s; retrying in %.1fs "
+                    "(infinite retries)",
+                    contract,
+                    attempt,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+    async def _fetch_funding_rate(
+        self, client: AsyncClient, base: str, quote: str
+    ) -> float | None:
+        """Return the most recent funding rate (annualised APR) for the
+        HTX USDT-margined linear swap on ``base``/``quote``, or
+        ``None`` if no contract exists for this base/quote or the
+        request fails for a non-transient reason.
+
+        Endpoint: ``GET /linear-swap-api/v1/swap_funding_rate``
+        (unauthenticated, public; reachable only on
+        ``api.hbdm.com`` -- the same brand, different product
+        from spot). Response shape::
+
+            {
+              "status": "ok",
+              "data": {  // SINGLE dict, not a list
+                  "contract_code": "BTC-USDT",
+                  "funding_rate": "-0.0000578...",
+                  "fee_asset": "USDT",
+                  "trade_partition": "USDT",
+                  "funding_time": "...",
+                  "next_funding_time": "...",
+              },
+              "ts": ...
+            }
+
+        ``trade_partition == "USDT"`` confirms it's the USDT-
+        margined contract (HTX also has USDC- and inverse-margined
+        swaps, which we deliberately skip -- we only want the
+        stablecoin-settled USDT contract for consistency across
+        exchanges).
+
+        An ``err_code == 1332`` "The perpetual contract does not
+        exist" envelope is the expected response for any
+        base/quote that has no USDT-margined perpetual; we return
+        ``None`` silently.
+
+        Transient errors (err_code 1032, transport) are retried
+        with per-call backoff in :meth:`_funding_request`.
+        """
+        contract = f"{base.upper()}-{quote.upper()}"
+        payload = await self._funding_request(client, contract)
+        if payload is None:
+            return None
+
+        if not isinstance(payload, dict) or payload.get("status") != "ok":
+            err_code = payload.get("err_code") if isinstance(payload, dict) else None
+            err_msg = (payload.get("err_msg") if isinstance(payload, dict) else "") or ""
+            if err_code == self._HTX_NO_CONTRACT_CODE or "does not exist" in err_msg.lower():
+                return None
+            if err_code in self._HTX_TRANSIENT_CODES or "request limit" in err_msg.lower() or "rate limit" in err_msg.lower() or "access attempts" in err_msg.lower():
+                # ``_funding_request`` would have retried these;
+                # if we still get one here, give up silently.
+                return None
+            l.warning(f"HTX funding_rate({contract}) error: {payload}")
+            return None
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return None
+        # Defensive: skip non-USDT-margined contracts even if HTX
+        # ever returns them through this endpoint. We only want
+        # stablecoin-settled perpetuals, matching the convention
+        # used on Binance / KuCoin.
+        if data.get("trade_partition", "").upper() not in ("", "USDT"):
+            return None
+        try:
+            rate = float(data["funding_rate"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return self.annualize_funding_rate(rate, self._FUNDING_INTERVAL_HOURS)
+
+    async def _fetch_funding_rates(
+        self, client: AsyncClient, bases: Iterable[str]
+    ) -> dict[str, float]:
+        """``{base_lower: annual_funding_rate}`` for each base asset
+        that has an HTX USDT-margined linear swap. Concurrent fetch
+        via ``asyncio.gather``, bounded by ``_FUNDING_CONCURRENCY``
+        to stay under the per-IP rate limit (err_code 1032).
+
+        We probe USDT-settled contracts only (HTX also lists
+        USDC- and inverse-margined perps; we skip those to match
+        the stablecoin-settled-perp convention used across all
+        exchanges in this codebase).
+        """
+        bases = sorted({b.lower() for b in bases})
+        if not bases:
+            return {}
+
+        semaphore = asyncio.Semaphore(self._FUNDING_CONCURRENCY)
+
+        async def _one(b: str) -> tuple[str, float | None]:
+            async with semaphore:
+                try:
+                    rate = await self._fetch_funding_rate(
+                        client, base=b, quote="usdt"
+                    )
+                except Exception as e:
+                    # ``_fetch_funding_rate`` already classifies; any
+                    # exception that escaped is treated as a per-asset
+                    # miss and we move on.
+                    l.warning(f"HTX funding_rate({b}) failed: {e}")
+                    return b, None
+            return b, rate
+
+        results = await asyncio.gather(*(_one(b) for b in bases))
+        return {b: r for b, r in results if r is not None}
+
+    # ------------------------------------------------------------------
     # pairs
     # ------------------------------------------------------------------
     async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
-        """Returns active spot pairs with cross/isolated margin borrow rates.
+        """Returns active spot pairs with cross/isolated margin borrow
+        rates and the current perpetual-futures funding rate APR.
 
-        Columns: ts, symbol, exchange, base, quote, cross_rate, isolated_rate
+        Columns: ts, symbol, exchange, base, quote, cross_rate,
+        isolated_rate, funding_rate
+
+        ``funding_rate`` is the most recent HTX linear-swap funding
+        payment, annualised as ``rate * 3 * 365`` (HTX pays funding
+        every 8h). It's ``None`` for bases that have no USDT
+        perpetual contract on HTX.
         """
         now = dt.datetime.now(dt.timezone.utc)
         url = f"https://{self.HOST}/v1/common/symbols"
@@ -190,15 +409,21 @@ class HTX(Exchange):
         if not rows:
             return self.empty_pairs_df()
 
-        cross_rates, isolated_rates = await asyncio.gather(
+        # Borrow rates and funding rates are independent and both
+        # hit public-ish endpoints. Fetch them concurrently.
+        cross_rates, isolated_rates, funding_rates = await asyncio.gather(
             self._fetch_cross_rates(client),
             self._fetch_isolated_rates(client),
+            self._fetch_funding_rates(
+                client, {r["base"] for r in rows}
+            ),
         )
 
         for r in rows:
             base = r["base"]
             r["cross_rate"] = cross_rates.get(base)
             r["isolated_rate"] = isolated_rates.get(base)
+            r["funding_rate"] = funding_rates.get(base)
 
         df = pl.DataFrame(rows)
         # Project onto the canonical schema (this also fixes the order
@@ -211,6 +436,7 @@ class HTX(Exchange):
             "quote",
             pl.col("cross_rate").cast(pl.Float64),
             pl.col("isolated_rate").cast(pl.Float64),
+            pl.col("funding_rate").cast(pl.Float64),
         )
         self.validate_pairs_df(df)
         return df

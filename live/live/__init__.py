@@ -1,13 +1,24 @@
 """Exchange adapters for spot pairs, borrow rates, and daily klines.
 
-This package exposes four concrete exchange adapters (HTX, KuCoin,
-Kraken, Binance) and the abstract ``Exchange`` base class. Each
-adapter implements:
+This package exposes six concrete exchange adapters (HTX, KuCoin,
+Kraken, Binance, Hyperliquid, AsterDex) and the abstract ``Exchange``
+base class. Each adapter implements:
 
   * ``pairs(client, quote_assets)``
         Returns active spot pairs with cross/isolated margin borrow
-        rates. Schema: ``ts, symbol, exchange, base, quote,
-        cross_rate, isolated_rate``.
+        rates and (where the exchange supports it) the current
+        perpetual-futures funding rate annualised as APR. Schema:
+        ``ts, symbol, exchange, base, quote, cross_rate,
+        isolated_rate, funding_rate``. ``funding_rate`` is ``None``
+        for exchanges with no native perpetuals (Kraken) or for
+        coins that don't have a perpetual contract. Hyperliquid
+        is a perpetuals-only DEX, so ``pairs()`` emits one row
+        per perp contract (no spot pairs exist) with ``quote =
+        "usd"``; ``klines()`` returns the perp's OHLCV rather
+        than spot. AsterDex is a Binance-compatible perps DEX
+        on BNB Chain, so ``pairs()`` emits one row per perp
+        contract with ``quote = "usdt"`` and ``klines()``
+        returns perp OHLCV.
 
   * ``klines(client, symbol, start_time, end_time)``
         Returns at most ``MAX_KLINES`` daily ohlcv klines in the
@@ -35,6 +46,7 @@ import asyncio
 import datetime as dt
 import logging
 import random
+from typing import Iterable
 
 import httpx
 import polars as pl
@@ -50,6 +62,8 @@ __all__ = [
     "KuCoin",
     "Kraken",
     "Binance",
+    "Hyperliquid",
+    "AsterDex",
     # Schema dicts and helpers shared across adapters and tests.
     "PAIRS_SCHEMA",
     "KLINES_SCHEMA",
@@ -84,6 +98,7 @@ PAIRS_SCHEMA: dict[str, pl.DataType] = {
     "quote": pl.Utf8,
     "cross_rate": pl.Float64,
     "isolated_rate": pl.Float64,
+    "funding_rate": pl.Float64,
 }
 
 
@@ -159,11 +174,25 @@ def is_transient_http_status(status: int) -> bool:
 
 
 # Default retry policy used by ``Exchange._retry`` and applied uniformly
-# to ``klines()`` and ``pairs()`` calls. Tuned for "walk away for a few
-# minutes" rather than "retry in a tight loop".
-RETRY_ATTEMPTS = 5
-RETRY_BASE_DELAY = 1.0   # seconds; first backoff is ``base * 2**0``
-RETRY_MAX_DELAY = 30.0   # cap on the backoff interval (before jitter)
+# to ``klines()`` and ``pairs()`` calls.
+#
+# Backoff is exponential starting at 100ms and capped at 10s. With ±25%
+# jitter, the per-attempt delay sequence (before jitter) is:
+#   100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s, 10s, 10s, 10s, ...
+# (8 doublings from 100ms to 12.8s get capped to 10s at attempt 8).
+#
+# Attempts are **infinite** (``_retry`` runs ``while True``). This is a
+# deliberate "never give up on a transient failure" choice: a sustained
+# outage or a misconfigured host will keep retrying every ~10s forever
+# rather than propagating an error after a fixed N. Callers that need
+# a hard upper bound should cancel the surrounding ``asyncio.Task``.
+RETRY_BASE_DELAY = 0.1   # seconds; first backoff is ``base * 2**0``
+RETRY_MAX_DELAY = 10.0   # cap on the backoff interval (before jitter)
+# ``RETRY_ATTEMPTS`` is kept as a module-level symbol for backward
+# compatibility with code that referenced it, but is no longer used
+# by ``_retry`` (which now loops ``while True``). Setting it has no
+# effect on retry behaviour.
+RETRY_ATTEMPTS = None
 
 
 def _split_symbol(symbol: str) -> tuple[str, str]:
@@ -222,7 +251,13 @@ class Exchange(ABC):
     # ``RETRY_ATTEMPTS`` times, sleeping ``RETRY_BASE_DELAY * 2**(n-1)``
     # seconds (capped at ``RETRY_MAX_DELAY``) between attempts, with
     # ±25% jitter to avoid thundering-herd retries.
-    RETRY_ATTEMPTS: int = RETRY_ATTEMPTS
+    # ``RETRY_ATTEMPTS`` is kept as an ``int | None`` symbol for
+    # backward compatibility with code (and tests) that referenced
+    # it. The current ``_retry`` implementation is infinite (``while
+    # True``), so this attribute is informational only: setting it
+    # has no effect on retry behaviour. The active knobs are
+    # ``RETRY_BASE_DELAY`` and ``RETRY_MAX_DELAY``.
+    RETRY_ATTEMPTS: int | None = RETRY_ATTEMPTS
     RETRY_BASE_DELAY: float = RETRY_BASE_DELAY
     RETRY_MAX_DELAY: float = RETRY_MAX_DELAY
 
@@ -255,6 +290,44 @@ class Exchange(ABC):
     @classmethod
     def validate_klines_df(cls, df: pl.DataFrame) -> None:
         validate_klines_df(df)
+
+    async def _fetch_funding_rates(
+        self, client: AsyncClient, bases: Iterable[str]
+    ) -> dict[str, float]:
+        """``{base_lower: annualised_funding_rate}`` for each base asset
+        that has a perpetual-futures contract on this exchange.
+
+        The default implementation returns an empty dict: the base
+        class is exchange-agnostic and exchanges that don't support
+        perpetuals (Kraken) don't override this. Adapters that do
+        support perpetuals (Binance, HTX, KuCoin) override this to
+        hit their public funding-rate endpoint.
+
+        ``funding_rate`` in the pairs DataFrame is ``None`` for
+        coins whose key is missing from the returned dict.
+        """
+        return {}
+
+    def annualize_funding_rate(
+        self, per_interval_rate: float, interval_hours: float
+    ) -> float:
+        """Convert a single funding payment (paid every
+        ``interval_hours`` hours) into an annualised rate (APR).
+
+        ``per_interval_rate`` is the funding rate as reported by
+        the exchange for the most recent interval, e.g. ``0.0001``
+        (= 1 bp per 8h interval). The result is
+
+            per_interval_rate * (24 / interval_hours) * 365
+
+        For an 8h funding schedule (Binance, HTX, KuCoin) this is
+        ``per_interval_rate * 3 * 365 = per_interval_rate * 1095``.
+        """
+        if interval_hours <= 0:
+            raise ValueError(
+                f"interval_hours must be > 0, got {interval_hours}"
+            )
+        return per_interval_rate * (24.0 / interval_hours) * 365.0
 
     def is_transient_error(self, exc: BaseException) -> bool:
         """Return ``True`` if ``exc`` describes a failure that's likely
@@ -296,54 +369,78 @@ class Exchange(ABC):
         return False
 
     async def _retry(self, method_name: str, /, *args, **kwargs):
-        """Call ``self.<method_name>(*args, **kwargs)`` with exponential
-        backoff and jitter while ``self.is_transient_error(exc)`` is
-        true.
+        """Call ``self.<method_name>(*args, **kwargs)`` with
+        exponential backoff and ±25% jitter while
+        ``self.is_transient_error(exc)`` is true.
 
-        Re-raises the final exception if all attempts fail. Non-
-        transient exceptions are propagated immediately without further
-        attempts.
+        **Attempts are infinite.** The loop runs ``while True``
+        and only stops on a successful return. Non-transient
+        exceptions are propagated immediately without further
+        attempts; transient exceptions (429, 5xx, transport
+        errors, ``TransientError``) trigger an exponential
+        backoff starting at ``RETRY_BASE_DELAY`` (100ms by
+        default) and capped at ``RETRY_MAX_DELAY`` (10s by
+        default).
+
+        This means a sustained outage or a misconfigured host
+        (typo in ``HOST``, expired API key, etc.) will keep
+        retrying every ~10s forever. Callers that need a hard
+        upper bound on retry duration should run the call
+        inside an ``asyncio.wait_for`` / task-cancel wrapper.
+
+        Per-attempt delay sequence (before jitter, with
+        defaults): 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s,
+        6.4s, **10s**, 10s, 10s, ... (8 doublings from 100ms
+        reach 12.8s, which is then capped to 10s on attempt 8
+        and beyond).
+
+        ``method_name`` must name an ``async`` method on
+        ``self``. The first positional argument is the method
+        name; ``*args`` and ``**kwargs`` are forwarded verbatim.
         """
         method = getattr(self, method_name)
-        last_exc: BaseException | None = None
-        for attempt in range(1, self.RETRY_ATTEMPTS + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 return await method(*args, **kwargs)
             except BaseException as exc:
                 if not self.is_transient_error(exc):
                     raise
-                last_exc = exc
-                if attempt == self.RETRY_ATTEMPTS:
-                    break
-                # Exponential backoff with ±25% jitter.
+                # Exponential backoff with ±25% jitter, capped at
+                # ``RETRY_MAX_DELAY``. ``2 ** (attempt - 1)`` doubles
+                # on every retry; the cap is reached on the 8th
+                # retry at the defaults (100ms → 12.8s → 10s).
                 delay = min(
                     self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
                     self.RETRY_MAX_DELAY,
                 )
                 delay = delay * (0.75 + random.random() * 0.5)
                 logger.warning(
-                    "%s.%s transient error (attempt %d/%d): %s; "
-                    "retrying in %.1fs",
+                    "%s.%s transient error (attempt %d): %s; "
+                    "retrying in %.1fs (infinite retries)",
                     type(self).__name__,
                     method_name,
                     attempt,
-                    self.RETRY_ATTEMPTS,
                     exc,
                     delay,
                 )
                 await asyncio.sleep(delay)
-        assert last_exc is not None  # only reachable after a failed attempt
-        raise last_exc
 
     @abstractmethod
     async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
-        """Return active spot pairs for ``quote_assets`` with margin rates.
+        """Return active spot pairs for ``quote_assets`` with margin rates
+        and (where applicable) the current perpetual-futures funding
+        rate annualised as APR.
 
         Schema: ``ts`` (fetch time), ``symbol`` (per-exchange proprietary),
         ``exchange``, ``base`` (lower case), ``quote`` (lower case),
         ``cross_rate`` (annual borrow rate for cross margin, ``None`` if
         the asset isn't margin-tradeable), ``isolated_rate`` (same, for
-        isolated margin).
+        isolated margin), ``funding_rate`` (annualised current funding
+        rate for the perpetual contract on the same base/quote, ``None``
+        if the exchange has no native perpetuals -- currently Kraken --
+        or if the coin has no perpetual contract).
         """
         pass
 
@@ -499,3 +596,5 @@ from .htx import HTX  # noqa: E402
 from .kucoin import KuCoin  # noqa: E402
 from .kraken import Kraken  # noqa: E402
 from .binance import Binance  # noqa: E402
+from .hyperliquid import Hyperliquid  # noqa: E402
+from .asterdex import AsterDex  # noqa: E402

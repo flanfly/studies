@@ -1,5 +1,6 @@
 """CLI: fetch spot pairs, borrow rates, and daily klines for active
-USDT/USDC pairs from HTX, KuCoin, Kraken, and Binance.
+USDT/USDC pairs from HTX, KuCoin, Kraken, Binance, Hyperliquid
+(perpetual contracts only), and AsterDex (perpetual contracts only).
 
 Examples::
 
@@ -27,7 +28,16 @@ from dotenv import load_dotenv
 from httpx import AsyncClient
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from live import Binance, Exchange, HTX, Kraken, KuCoin, empty_klines_df
+from live import (
+    AsterDex,
+    Binance,
+    Exchange,
+    HTX,
+    Hyperliquid,
+    Kraken,
+    KuCoin,
+    empty_klines_df,
+)
 
 logger = logging.getLogger("live")
 
@@ -125,6 +135,9 @@ def _build_exchanges() -> list[Exchange]:
     """Construct one instance of each exchange, pulling credentials
     from the environment. The .env file in the project root is loaded
     on import of this module.
+
+    Hyperliquid's public endpoints are unauthenticated, so it
+    doesn't need any env-var credentials; we always include it.
     """
     load_dotenv()
     htx_creds = _require_env("HTX_ACCESS_KEY", "HTX_SECRET_KEY")
@@ -147,6 +160,15 @@ def _build_exchanges() -> list[Exchange]:
             api_key=bn_creds["BINANCE_API_KEY"],
             api_secret=bn_creds["BINANCE_API_SECRET"],
         ),
+        # No credentials required: Hyperliquid's /info endpoint
+        # is public. We emit perp contracts as "pairs" (no spot
+        # market exists) and perp OHLCV from klines() -- see
+        # live/hyperliquid.py for the design notes.
+        Hyperliquid(),
+        # No credentials required: AsterDex's fapi endpoint is
+        # public. Binance-compatible perps DEX on BNB Chain;
+        # same perp-as-pair convention as Hyperliquid.
+        AsterDex(),
     ]
 
 
@@ -239,7 +261,8 @@ async def amain() -> int:
     p = argparse.ArgumentParser(
         description=(
             "Fetch spot pairs, borrow rates, and daily klines for "
-            "HTX, KuCoin, Kraken, and Binance."
+            "HTX, KuCoin, Kraken, Binance, Hyperliquid, and "
+            "AsterDex (Hyperliquid and AsterDex: perpetuals only)."
         )
     )
     p.add_argument(

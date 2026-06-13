@@ -8,6 +8,7 @@ fails a controllable number of times before succeeding.
 
 from __future__ import annotations
 
+import asyncio
 import httpx
 import pytest
 from httpx import AsyncClient
@@ -47,7 +48,6 @@ async def test_retry_succeeds_after_two_transient_failures() -> None:
         return "ok"
 
     ex.pairs = stub  # type: ignore[assignment]
-    # Speed the test up by tightening the retry policy.
     ex.RETRY_BASE_DELAY = 0.0
     ex.RETRY_MAX_DELAY = 0.0
     result = await ex._retry("pairs", client=None, quote_assets=set())  # type: ignore[arg-type]
@@ -69,7 +69,15 @@ async def test_retry_propagates_non_transient_immediately() -> None:
     assert calls["n"] == 1, "non-transient error should not be retried"
 
 
-async def test_retry_exhausts_attempts_then_raises() -> None:
+async def test_retry_runs_forever_on_persistent_transient() -> None:
+    """The new ``while True`` policy: a method that always raises
+    a transient error keeps being retried. We pin a ``call_count``
+    ceiling and cancel the task after K attempts to bound the
+    test runtime, then assert (a) the call was retried at least
+    K times, and (b) the call didn't propagate the transient
+    error to the caller -- it was still trying when we
+    cancelled.
+    """
     ex = Kraken()
 
     calls = {"n": 0}
@@ -79,13 +87,27 @@ async def test_retry_exhausts_attempts_then_raises() -> None:
         raise TransientError("permanent transient")
 
     ex.pairs = stub  # type: ignore[assignment]
-    # Tighten policy so the test runs fast.
+    # Near-zero delay so the test runs in <1s.
     ex.RETRY_BASE_DELAY = 0.0
     ex.RETRY_MAX_DELAY = 0.0
-    ex.RETRY_ATTEMPTS = 3
-    with pytest.raises(TransientError, match="permanent transient"):
+
+    async def run_until_cancelled() -> None:
         await ex._retry("pairs", client=None, quote_assets=set())  # type: ignore[arg-type]
-    assert calls["n"] == 3, f"expected 3 attempts, got {calls['n']}"
+
+    task = asyncio.create_task(run_until_cancelled())
+    # Spin until the stub has been called 200 times, then cancel.
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while calls["n"] < 200 and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, BaseException):
+        pass
+    assert calls["n"] >= 200, (
+        f"expected >= 200 attempts, got {calls['n']} -- "
+        f"infinite-retry policy is not in effect"
+    )
 
 
 def test_default_is_transient_error_recognises_common_cases() -> None:
@@ -146,7 +168,9 @@ async def test_retry_recovers_via_wrapped_httpx_error() -> None:
     ex.pairs = stub  # type: ignore[assignment]
     ex.RETRY_BASE_DELAY = 0.0
     ex.RETRY_MAX_DELAY = 0.0
-    ex.RETRY_ATTEMPTS = 5
+    # ``RETRY_ATTEMPTS`` is informational only under the new
+    # infinite-retry policy; we still set it for back-compat
+    # coverage but the actual loop runs ``while True``.
     result = await ex._retry("pairs", client=None, quote_assets=set())  # type: ignore[arg-type]
     assert result == "ok"
     assert calls["n"] == 3, f"expected 3 attempts (2 fails + 1 success), got {calls['n']}"

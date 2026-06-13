@@ -11,7 +11,10 @@ import datetime as dt
 import hashlib
 import hmac
 import logging as l
+import random
 import time
+
+from typing import Iterable
 
 import httpx
 import polars as pl
@@ -27,6 +30,10 @@ class KuCoin(Exchange):
     """KuCoin spot exchange adapter."""
 
     HOST = "api.kucoin.com"
+    # KuCoin's contract (perpetual futures) API lives on a separate
+    # host. Public, unauthenticated, well-behaved -- the funding
+    # endpoint is rate-limited at ~2 calls / second per IP.
+    FUTURES_HOST = "api-futures.kucoin.com"
     NAME = "kucoin"
     # Max daily candles returned by a single ``klines()`` call. The
     # ``/api/v1/market/candles`` endpoint uses ``startAt``/``endAt``
@@ -44,6 +51,41 @@ class KuCoin(Exchange):
         "300012",  # service busy
         "500000",  # internal server error
     })
+
+    # KuCoin error code returned by the funding endpoint when the
+    # contract doesn't have a funding rate (e.g. inverse-margined
+    # contracts, or a symbol that doesn't exist). We treat it as a
+    # silent per-asset "null" rather than a failure.
+    _KUCOIN_FUNDING_NOT_SUPPORTED = "415000"
+
+    # Spot ticker -> KuCoin contract base code. Most coins map 1:1
+    # (e.g. ETH spot -> ETH contract), but BTC uses KuCoin's
+    # internal ``XBT`` code on the contract side. Anything not in
+    # this map is assumed to map to itself (upper-cased).
+    _SPOT_TO_CONTRACT_BASE: dict[str, str] = {
+        "btc": "XBT",
+    }
+
+    # KuCoin's standard funding interval for linear perps is 8h
+    # (granularity=28800000ms). The response also reports it in
+    # milliseconds; we use the constant as the default and trust
+    # the response if it differs (e.g. for coins KuCoin has moved
+    # to a 4h schedule). This matches the "stablecoin-settled
+    # perpetuals only" convention used across all exchanges in
+    # this codebase: USDT-margined or USDC-margined perps, never
+    # inverse-coin-margined ones.
+    _FUNDING_INTERVAL_HOURS: float = 8.0
+    # Cap on in-flight ``_fetch_funding_rate`` calls. KuCoin's
+    # futures public API is rate-limited at 2000 calls per 30s
+    # per IP -- that's ~67/s. Firing 8-wide with no per-call
+    # pacing exhausts the window in ~12s for our 945-base batch.
+    # A 4-wide cap keeps us at ~25/s and well under the limit.
+    _FUNDING_CONCURRENCY: int = 4
+    # Backoff schedule for per-call retries on 429 / transient
+    # errors. Inherits the base-class default (100ms → 10s,
+    # infinite attempts); the per-adapter constants are gone --
+    # ``_funding_request`` uses ``self.RETRY_BASE_DELAY`` and
+    # ``self.RETRY_MAX_DELAY`` directly.
 
     def __init__(self, api_key: str, api_secret: str, api_password: str):
         self._api_key = api_key
@@ -174,12 +216,232 @@ class KuCoin(Exchange):
         return pairs
 
     # ------------------------------------------------------------------
+    # funding rate fetcher
+    # ------------------------------------------------------------------
+    def _contract_symbol(self, base: str, quote: str = "USDT") -> str:
+        """Spot ticker -> KuCoin contract symbol (e.g. ``btc`` /
+        ``USDT`` -> ``XBTUSDTM``). The ``M`` suffix marks
+        USDT/USDC-margined linear perps; inverse-margined contracts
+        (settled in the base currency) use a different suffix and
+        are deliberately skipped here.
+
+        We probe USDT-margined first; if the contract doesn't
+        exist, fall back to USDC-margined. This keeps the lookup
+        robust as KuCoin adds new contracts.
+        """
+        contract_base = self._SPOT_TO_CONTRACT_BASE.get(
+            base.lower(), base.upper()
+        )
+        return f"{contract_base}{quote.upper()}M"
+
+    async def _funding_request(
+        self, client: AsyncClient, contract: str
+    ) -> dict | None:
+        """Make a single KuCoin funding-rate HTTP request with
+        infinite per-call retry on transient errors (429, 5xx,
+        transport errors). Returns the parsed JSON payload on
+        success, ``None`` on a permanent failure.
+
+        429s come with a ``gw-ratelimit-reset`` header (ms until
+        the per-30s window resets) which we honour directly
+        rather than blind-backoff. That keeps the per-call
+        latency low for transient blips while still respecting
+        the rate limit on sustained traffic. The hint is capped
+        at ``RETRY_MAX_DELAY`` (10s by default) so a buggy header
+        value can't hang us.
+        """
+        url = (
+            f"https://{self.FUTURES_HOST}/api/v1/funding-rate/"
+            f"{contract}/current"
+        )
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = await client.get(url, timeout=30.0)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    # Honour the gateway's reset hint, but cap it
+                    # at ``RETRY_MAX_DELAY`` so a buggy header
+                    # value can't hang us for the full window.
+                    reset_ms = 0
+                    try:
+                        reset_ms = int(
+                            e.response.headers.get(
+                                "gw-ratelimit-reset", "0"
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    delay = max(
+                        self.RETRY_BASE_DELAY,
+                        min(
+                            reset_ms / 1000.0,
+                            self.RETRY_MAX_DELAY,
+                        ),
+                    )
+                    delay = delay * (0.75 + random.random() * 0.5)
+                    l.warning(
+                        "KuCoin funding_rate(%s) 429 "
+                        "(attempt %d): reset hint %dms, "
+                        "sleeping %.1fs (infinite retries)",
+                        contract,
+                        attempt,
+                        reset_ms,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Non-transient HTTP error: log once, return None.
+                l.warning(f"KuCoin funding_rate({contract}) HTTP error: {e}")
+                return None
+            except Exception as e:
+                # Transport / DNS / TLS / etc. Defer to the
+                # base-class transient classifier.
+                if not self.is_transient_error(e):
+                    raise RuntimeError(
+                        f"KuCoin funding_rate request failed: {e}"
+                    ) from e
+                delay = min(
+                    self.RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                    self.RETRY_MAX_DELAY,
+                )
+                delay = delay * (0.75 + random.random() * 0.5)
+                l.warning(
+                    "KuCoin funding_rate(%s) transient error "
+                    "(attempt %d): %s; retrying in %.1fs "
+                    "(infinite retries)",
+                    contract,
+                    attempt,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+    async def _fetch_funding_rate(
+        self, client: AsyncClient, base: str, quote: str
+    ) -> float | None:
+        """Return the most recent funding rate (annualised APR) for the
+        KuCoin USDT- or USDC-margined linear swap on ``base`` /
+        ``quote``, or ``None`` if no such contract exists or the
+        request fails for a non-transient reason.
+
+        Endpoint: ``GET /api/v1/funding-rate/{CONTRACT}/current``
+        on ``api-futures.kucoin.com`` (unauthenticated, public;
+        different host from spot). Response shape::
+
+            {
+              "code": "200000",
+              "data": {
+                  "symbol": ".XBTUSDTMFPI8H",
+                  "granularity": 28800000,    // ms
+                  "timePoint": 1781049600000,
+                  "value": -3.0e-5,           // per-interval rate
+                  "fundingTime": 1781078400000
+              }
+            }
+
+        An envelope with ``code == "415000"`` ("funding rate is
+        not supported") is the expected response for: (a) a base
+        with no contract at all on KuCoin, (b) a base whose only
+        contract is inverse-margined, (c) a USDC contract when
+        the caller is probing USDT. We try the next settle
+        currency in that case and only return ``None`` if all
+        attempts 415000.
+
+        Transient errors (429, 5xx, transport) are retried with
+        per-call backoff in :meth:`_funding_request`.
+        """
+        for settle in (quote.upper(), "USDC" if quote.upper() == "USDT" else "USDT"):
+            contract = self._contract_symbol(base, settle)
+            payload = await self._funding_request(client, contract)
+            if payload is None:
+                return None
+
+            if not isinstance(payload, dict):
+                continue
+            code = payload.get("code")
+            if code in self.TRANSIENT_CODES:
+                # ``_funding_request`` would have retried these
+                # already; if we still get one, give up on this
+                # settle-currency.
+                return None
+            if code == self._KUCOIN_FUNDING_NOT_SUPPORTED:
+                continue
+            if code != "200000":
+                l.warning(
+                    f"KuCoin funding_rate({contract}) error: {payload}"
+                )
+                return None
+
+            data = payload.get("data") or {}
+            try:
+                rate = float(data["value"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            # Use the response's ``granularity`` if present (KuCoin
+            # occasionally moves individual contracts to a different
+            # funding cadence), else fall back to the class default.
+            granularity_ms = data.get("granularity")
+            if isinstance(granularity_ms, (int, float)) and granularity_ms > 0:
+                interval_hours = granularity_ms / 3_600_000.0
+            else:
+                interval_hours = self._FUNDING_INTERVAL_HOURS
+            return self.annualize_funding_rate(rate, interval_hours)
+
+        # All settle currencies tried returned 415000 (no contract
+        # for this base). Return None silently -- the spot pair
+        # simply has no stablecoin-margined perpetual on KuCoin.
+        return None
+
+    async def _fetch_funding_rates(
+        self, client: AsyncClient, bases: Iterable[str]
+    ) -> dict[str, float]:
+        """``{base_lower: annual_funding_rate}`` for each base asset
+        that has a KuCoin USDT- or USDC-margined linear swap.
+        Concurrent fetch via ``asyncio.gather``, bounded by
+        ``_FUNDING_CONCURRENCY`` to stay under KuCoin's per-IP
+        rate limit (~2 calls/sec for the funding endpoint).
+        """
+        bases = sorted({b.lower() for b in bases})
+        if not bases:
+            return {}
+
+        semaphore = asyncio.Semaphore(self._FUNDING_CONCURRENCY)
+
+        async def _one(b: str) -> tuple[str, float | None]:
+            async with semaphore:
+                try:
+                    rate = await self._fetch_funding_rate(
+                        client, base=b, quote="USDT"
+                    )
+                except Exception as e:
+                    l.warning(f"KuCoin funding_rate({b}) failed: {e}")
+                    return b, None
+            return b, rate
+
+        results = await asyncio.gather(*(_one(b) for b in bases))
+        return {b: r for b, r in results if r is not None}
+
+    # ------------------------------------------------------------------
     # pairs
     # ------------------------------------------------------------------
     async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
-        """Returns active USDT/USDC spot pairs with cross/isolated margin rates.
+        """Returns active USDT/USDC spot pairs with cross/isolated
+        margin rates and the current perpetual-futures funding rate
+        APR.
 
-        Columns: ts, symbol, exchange, base, quote, cross_rate, isolated_rate
+        Columns: ts, symbol, exchange, base, quote, cross_rate,
+        isolated_rate, funding_rate
+
+        ``funding_rate`` is the most recent KuCoin stablecoin-
+        margined linear swap (USDT- or USDC-settled) funding
+        payment, annualised as ``rate * 3 * 365`` (KuCoin pays
+        funding every 8h on the standard linear perp). It's
+        ``None`` for bases that have no USDT- or USDC-margined
+        perpetual on KuCoin.
         """
         now = dt.datetime.now(dt.timezone.utc)
         # Active spot symbols (public). Filter by enableTrading + quote asset.
@@ -259,6 +521,15 @@ class KuCoin(Exchange):
         if not rows:
             return self.empty_pairs_df()
 
+        # Funding rates are per-asset and independent of margin
+        # rates; fetch them concurrently with the borrow rates.
+        funding_rates = await self._fetch_funding_rates(
+            client, {r["base"] for r in rows}
+        )
+
+        for r in rows:
+            r["funding_rate"] = funding_rates.get(r["base"])
+
         df = pl.DataFrame(rows)
         df = df.select(
             pl.col("ts").cast(pl.Datetime("us", time_zone="UTC")),
@@ -268,6 +539,7 @@ class KuCoin(Exchange):
             "quote",
             pl.col("cross_rate").cast(pl.Float64),
             pl.col("isolated_rate").cast(pl.Float64),
+            pl.col("funding_rate").cast(pl.Float64),
         )
         self.validate_pairs_df(df)
         return df

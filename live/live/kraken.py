@@ -197,10 +197,14 @@ class Kraken(Exchange):
     async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
         """Returns active USDT/USDC spot pairs.
 
-        Columns: ts, symbol, exchange, base, quote, cross_rate, isolated_rate
+        Columns: ts, symbol, exchange, base, quote, cross_rate,
+        isolated_rate, funding_rate
         ``cross_rate`` is the per-asset annual borrow rate from
         ``/0/public/Assets`` (Kraken only supports cross margin).
-        ``isolated_rate`` is always null.
+        ``isolated_rate`` is always null. ``funding_rate`` is
+        always null because Kraken has no native perpetuals --
+        only dated futures, which settle and don't have a
+        funding rate.
 
         A pair's ``cross_rate`` is ``null`` if the base asset is not
         actually margin-enabled, even if ``/Assets`` reports a
@@ -256,6 +260,13 @@ class Kraken(Exchange):
                     "quote": quote_common.lower(),
                     "cross_rate": cross_rate,
                     "isolated_rate": None,
+                    # Kraken has no native perpetuals (only dated
+                    # futures, which settle and don't have a
+                    # funding rate). The base-class default
+                    # ``_fetch_funding_rates`` returns ``{}``,
+                    # so this column is ``null`` for every Kraken
+                    # row.
+                    "funding_rate": None,
                 }
             )
 
@@ -271,6 +282,7 @@ class Kraken(Exchange):
             "quote",
             pl.col("cross_rate").cast(pl.Float64),
             pl.col("isolated_rate").cast(pl.Float64),
+            pl.col("funding_rate").cast(pl.Float64),
         )
         self.validate_pairs_df(df)
         return df
