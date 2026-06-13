@@ -34,7 +34,7 @@
 
 # %% editable=true slideshow={"slide_type": ""} tags=["parameters"]
 days_holding = "2"
-min_volume = "1_000_000"
+min_volume = "5_000_000"
 start_year = "2025"
 num_buckets = "10"
 days_volatility_sma = "14"
@@ -63,31 +63,61 @@ import backtest_ng as bt
 import functools as fc
 import json
 
-stables = [f'{c}USDT' for c in [
+
+stables = [c.lower() for c in [
     "USDT", "BUSD", "USDC", "PAX", "PAXG", "TUSD", "DAI", "USDP", "UST",
     "FDUSD", "USD1", "XUSD", "USD", "EURC", "EURI", "AEUR", "EUR", "GBP",
     "JPY", "AUD", "CAD", "CHF", "NZD", "KRW", "RLUSD"
 ]]
 
-with open('kucoin-margin.json') as fd:
-    kucoin_margin = [s.replace("-","") for s in json.load(fd)]
-
-with open('htx-margin.json') as fd:
-    htx_margin = [s.replace("-","") for s in json.load(fd)]
-
 df = (
-    pl.read_parquet('stables-1d.parquet')
-    .rename({"quote_volume":"volume",})
-    .filter(pl.col('symbol').is_in(stables).not_())
+    # (cd live; uv run main.py)
+    pl.read_parquet('live/symbols.parquet')
 
-    # limit to KuCoin and HTX marginable coins. remove to see the pure performance
-    .filter((pl.col('symbol').is_in(kucoin_margin)) | (pl.col('symbol').str.to_lowercase().is_in(htx_margin)))
-    
+    # no margin or futures trading on binance
+    .filter((pl.col('exchange') != 'binance'))
+        
+    # select by lowest borrow rate
+    .rename({
+        "cross_rate": "cross",
+        "isolated_rate": "isolated",
+        "funding_rate":"perp",
+    })
+    .unpivot(
+        on=[
+            "cross",
+            "isolated",
+            "perp",
+        ],
+        index=["symbol",'exchange','base'],
+        variable_name="type",
+        value_name="rate"
+    )
+    .filter(pl.col('rate').is_not_null())
+    .sort('rate', descending=True)
+    .group_by('base')
+    .last()
+
+    # join ohlcv data — restrict to USDT pairs
+    .join(
+        pl.read_parquet('live/klines.parquet')
+        .filter(
+            (pl.col('exchange') == 'binance') & (pl.col('quote') == 'usdt')
+        ),
+        on=['base']
+    )
+    .with_columns(
+        # use the binance kline symbols to make reference below work
+        symbol=pl.col('symbol_right'),
+        ts=pl.col('open_ts'),
+        volume=pl.col("quote_volume"),
+    )
+    .filter(pl.col('base').is_in(stables).not_())
+
+    # compute variance
     .sort(['symbol','ts'])
-    .join(pl.read_parquet('stables-1d.parquet').filter(pl.col('symbol') == 'BTCUSDT').select(ts=pl.col('ts'), btc=pl.col('close')), on=['ts'])
     .with_columns(
         ts=pl.col('ts').cast(pl.Datetime("us")),
-        sma=pl.col('btc').rolling_mean(60).over('symbol'),
         ho = (pl.col('high') / pl.col('open')).log(),
         hc = (pl.col('high') / pl.col('close')).log(),
         lo = (pl.col('low') / pl.col('open')).log(),
@@ -100,46 +130,43 @@ df = (
         pl.col('ts'),
         pl.col('symbol'),
         pl.col('close'),
+        pl.col('high'),
+        pl.col('low'),
         pl.col('volume'),
         pl.col('var').rolling_mean(window_size=days_volatility_sma_P).over('symbol').mul(365).sqrt().alias('vol'),
-        pl.col('btc'),
-        pl.col('sma'),
+        pl.col('exchange'),
+        pl.col('rate'),
+        pl.col('type'),
     ])
         
     .drop_nulls(subset=['vol']) 
-    .filter(pl.col('ts').dt.year() >= start_year_P)
+    .filter((pl.col('ts').dt.year() >= start_year_P))
+
+    # bucket by volatility, ensure minimal volume
     .with_columns(
-        bucket=pl.col('vol').qcut(num_buckets_P, labels=[str(i) for i in range(num_buckets_P)], allow_duplicates=True).over('ts'),
+        bucket=pl.when(
+            (pl.col('volume') > min_volume_P)
+        )
+        .then(pl.col("vol"))
+        .qcut(num_buckets_P, labels=[str(i) for i in range(num_buckets_P)], allow_duplicates=True).over('ts'),
     )
 )
 
 class Alpha(bt.AlphaModel):
-    def __init__(self, long_expr: pl.Expr, short_expr: pl.Expr):
-        self.long_expr = long_expr
-        self.short_expr = short_expr
-
-    def __call__(self, u: bt.Universe) -> list[bt.Signal]:
+    def __call__(self, history: pl.DataFrame, u: bt.Universe) -> list[bt.Signal]:
         df = u.df()
         today = df["ts"].max()
-        dfnow = df.filter(pl.col("ts") == today)
-        l = dfnow.filter(self.long_expr)
-        s = dfnow.filter(self.short_expr)
-
+        s = df.filter((pl.col('ts') == today) & (pl.col("bucket") == str(num_buckets_P - 1)))# & (pl.col('volume') > min_volume_P))
         return [
-            bt.Signal(r['symbol'], True, 1.0)
-            for r in l.iter_rows(named=True)
-        ] + [
             bt.Signal(r['symbol'], False, -1.0)
             for r in s.iter_rows(named=True)
         ]
 
 test = bt.Backtest(
-    bt.Manual(df),
+    bt.Manual(df,high_col='high',low_col='low'),
     title='vol spread',
-    alpha=Alpha(
-        long_expr=pl.lit(False),#(pl.col("bucket") == '0') & (pl.col('volume') > min_volume_P),# & (pl.col('btc') > pl.col('sma')),
-        short_expr=(pl.col("bucket") == str(num_buckets_P - 1)) & (pl.col('volume') > min_volume_P),# & (pl.col('btc') / pl.col('sma') <= .95),
-    ),
+    alpha=Alpha(),
+    risk=bt.MaxRisk(.40),
     benchmark="BTCUSDT",
     period=days_holding_P,
 )
@@ -147,25 +174,27 @@ test = bt.Backtest(
 test.run()
 res = test.report(plot=True)
 
-#for col in sorted([c for c in res.columns if c not in ['year', 'src']]):
-#    s = res.filter(pl.col('src') == 'Strategy')
-#    b = res.filter(pl.col('src') == 'Benchmark')
-#
-#    print(f"{col}: {s[col].mean()} ({b[col].mean()})")
-#    sb.glue(col,s[col].mean())
-
 # %%
 print(
     test.live(equity=10_000)
+    .join(df.select(
+        entry_ts=pl.col('ts'),
+        symbol=pl.col('symbol'), 
+        exchange=pl.col('exchange'),
+        rate=pl.col('rate'),
+        margin=pl.col('type'),
+    ), on=['entry_ts','symbol'])
     .select(
         pl.col('entry_ts').dt.strftime('%Y-%m-%d'),
-        pl.col('symbol').str.to_uppercase(),
-        pl.lit(''),
+        pl.col('exchange'),
+        pl.col('margin'),
+        pl.col('symbol'),
         pl.col('entry_price'),
-        pl.col('shares'),
-        (pl.col('entry_price') * pl.col('shares')).alias('cost'),
+        pl.col('rate'),
+        (pl.col('entry_price') * pl.col('shares')).abs().alias('cost'),
     )
     .sort('symbol')
+
     .write_csv()
 )
 
