@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import functools as fc
 import itertools as it
 
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any
 
 from . import (
     AlphaModel,
@@ -29,6 +29,7 @@ from . import (
     EqualWeight,
     Simple,
     Portfolio,
+    Kline,
 )
 
 eps = sys.float_info.epsilon
@@ -65,23 +66,140 @@ class Backtest:
 
         assert universe.valid_period(self.period)
 
-    def run(self, initial_equity: float = 1.0) -> None:
+        # Capture the universe's datetime type (timezone / resolution) so
+        # all DataFrames created by the backtest inherit the same type.
+        self._ts_dtype = self.universe.df()[self.universe.timestamp_col()].dtype
+
+        # Initialise empty history / positions DataFrames so that ``live()``
+        # — which calls every model with ``self.history`` — works without
+        # requiring ``run()`` to have been called first.  ``run()``
+        # overwrites these on the first bar.
+        self.history: pl.DataFrame = pl.DataFrame(
+            schema={
+                "ts": self._ts_dtype,
+                "cash": pl.Float64,
+                "long_notational": pl.Float64,
+                "short_notational": pl.Float64,
+                "long_positions": pl.Float64,
+                "short_positions": pl.Float64,
+                "fees": pl.Float64,
+                "rebalance": pl.Boolean,
+                "orders": pl.Int32,
+                "signals": pl.Int32,
+                "targets": pl.Int32,
+            },
+        )
+        self.positions: pl.DataFrame = pl.DataFrame(
+            schema={
+                "ts": self._ts_dtype,
+                "symbol": pl.String,
+                "weight": pl.Float64,
+                "price": pl.Float64,
+            },
+        )
+
+    def run(
+        self, start: dt.datetime | None = None, initial_equity: float = 1.0
+    ) -> None:
         self.initial_equity = initial_equity
-        self.history = []
+        # ``self.history`` and ``self.positions`` are pre-initialised in
+        # ``__init__`` as empty DataFrames with the correct schema; we
+        # just reset them to empty at the start of every ``run()``.
 
         folio = Portfolio(cash=float(initial_equity), positions=[], working=[])
         stamps = self.universe.timestamps()
+        if start is not None:
+            stamps = [s for s in stamps if s >= start]
 
         last_rebalance = None
-        history_frag = []
-        trades_frag = []
+        history_frag: list[dict[str, Any]] = []
+        trades_frag: list[dict[str, Any]] = []
+        positions_frag: list[dict[str, Any]] = []
         signals: list = []
         targets: list = []
         orders: list = []
 
         for now in tqdm(stamps):
             u = self.universe.until(now)
-            prices = u.prices(now)
+            klines = u.klines(now)
+
+            # update history
+            self.history = pl.DataFrame(
+                history_frag,
+                schema={
+                    "ts": self._ts_dtype,
+                    "cash": pl.Float64,
+                    "long_notational": pl.Float64,
+                    "short_notational": pl.Float64,
+                    "long_positions": pl.Float64,
+                    "short_positions": pl.Float64,
+                    "fees": pl.Float64,
+                    "rebalance": pl.Boolean,
+                    "orders": pl.Int32,
+                    "signals": pl.Int32,
+                    "targets": pl.Int32,
+                },
+            )
+            self.trades = pl.DataFrame(
+                trades_frag,
+                schema={
+                    "entry": self._ts_dtype,
+                    "exit": self._ts_dtype,
+                    "symbol": pl.String,
+                    "price": pl.Float64,
+                    "shares": pl.Float64,
+                    "pnl": pl.Float64,
+                    "ret": pl.Float64,
+                },
+            )
+            self.positions = pl.DataFrame(
+                positions_frag,
+                schema={
+                    "ts": self._ts_dtype,
+                    "symbol": pl.String,
+                    "weight": pl.Float64,
+                    "price": pl.Float64,
+                },
+            )
+
+            # --- check working stop-losses BEFORE the rebalance runs -------
+            # The user spec: "execute the stop loss before market orders".
+            # A stop triggers if the bar's high/low touched the trigger price;
+            # we assume the fill happens at the stop price (a stop is filled
+            # at the stop, not the close).
+            triggered_stops, folio = folio.check_working_against_klines(klines)
+            stop_closed: list[Trade] = []
+            if triggered_stops:
+                stop_overrides = {
+                    o.symbol: o.stop_loss
+                    for o in triggered_stops
+                    if o.stop_loss is not None
+                }
+                folio, stop_closed = folio.execute_orders(
+                    now, klines, triggered_stops, price_overrides=stop_overrides
+                )
+                for t in stop_closed:
+                    pnl = (
+                        (t.exit_price - t.entry_price) * t.shares
+                        - t.entry_fee
+                        - t.exit_fee
+                    )
+                    ret = (
+                        (t.exit_price - t.entry_price) / t.entry_price
+                        if t.shares > 0
+                        else (t.entry_price - t.exit_price) / t.entry_price
+                    )
+                    trades_frag.append(
+                        {
+                            "entry": t.entry_ts,
+                            "exit": t.exit_ts,
+                            "symbol": t.symbol,
+                            "price": t.entry_price,
+                            "shares": t.shares,
+                            "pnl": pnl,
+                            "ret": ret,
+                        }
+                    )
 
             rebalance = last_rebalance is None or now - last_rebalance >= self.period
             if rebalance:
@@ -94,19 +212,33 @@ class Backtest:
                 # universe.until(now) to the execution model.
 
                 # alpha generation
-                signals = list(it.chain.from_iterable([a(u) for a in self.alpha]))
+                signals = list(
+                    it.chain.from_iterable([a(self.history, u) for a in self.alpha])
+                )
 
                 # portfolio construction
-                targets = self.portfolio(u, signals, folio)
+                targets = self.portfolio(self.history, u, signals, folio)
 
                 # risk management
-                adj = fc.reduce(lambda t, r: r(u, t, folio), self.risk, targets)
+                adj = fc.reduce(
+                    lambda t, r: r(self.history, u, t, folio), self.risk, targets
+                )
 
                 # execution
-                orders = self.execution(u, adj, folio)
+                orders = self.execution(self.history, u, adj, folio)
+
+                # Split the execution model's output: market orders fill
+                # against the current bar's close, everything else becomes
+                # a working order.  The user spec says "ignore the other
+                # types for now" (i.e. limit, trailing-stop, cancel) so we
+                # bucket them all into ``working_orders`` — but the only
+                # working order type Simple actually emits today is
+                # ``stop-loss``.
+                market_orders = [o for o in orders if o.type == "market"]
+                working_orders = [o for o in orders if o.type != "market"]
 
                 # trade recording
-                folio, closed = folio.execute_orders(now, prices, orders)
+                folio, closed = folio.execute_orders(now, klines, market_orders)
                 for t in closed:
                     pnl = (
                         (t.exit_price - t.entry_price) * t.shares
@@ -129,11 +261,45 @@ class Backtest:
                             "ret": ret,
                         }
                     )
+
+                for pos in adj:
+                    positions_frag.append(
+                        {
+                            "ts": now,
+                            "symbol": pos.symbol,
+                            "weight": pos.weight,
+                            "price": klines.get(
+                                pos.symbol, Kline(price=0.0, high=None, low=None)
+                            ).price,
+                        }
+                    )
+
+                # The execution model is the source of truth for the next
+                # bar's working orders.  Replace whatever the previous
+                # rebalance left behind — any stop that no longer applies
+                # (target was removed, or position was closed) is dropped.
+                folio = Portfolio(
+                    positions=folio.positions, cash=folio.cash, working=working_orders
+                )
+
+                # ``orders`` (used for the history row's ``orders`` /
+                # ``fees`` counts) reflects the total work the execution
+                # model produced this bar — market fills plus new working
+                # orders.  Triggered stops from earlier in the same bar are
+                # already accounted for in ``triggered_stops``.
                 last_rebalance = now
 
             # mark portfolio to market
-            l = [prices.get(p.symbol, 0.0) * p.shares for p in folio.longs()]
-            s = [prices.get(p.symbol, 0.0) * p.shares for p in folio.shorts()]
+            l = [
+                klines.get(p.symbol, Kline(price=0.0, high=None, low=None)).price
+                * p.shares
+                for p in folio.longs()
+            ]
+            s = [
+                klines.get(p.symbol, Kline(price=0.0, high=None, low=None)).price
+                * p.shares
+                for p in folio.shorts()
+            ]
 
             history_frag.append(
                 {
@@ -156,10 +322,14 @@ class Backtest:
                 print(f"Broke at {now} due to low equity: {equity}")
                 break
 
+        # Final assignment: rebuild self.history / self.trades / self.positions
+        # from the (possibly fully-populated) fragment lists.  Inside the
+        # loop, these are rebuilt *before* appending the current bar's row,
+        # so the last bar would otherwise be missing from the final view.
         self.history = pl.DataFrame(
             history_frag,
             schema={
-                "ts": pl.Datetime,
+                "ts": self._ts_dtype,
                 "cash": pl.Float64,
                 "long_notational": pl.Float64,
                 "short_notational": pl.Float64,
@@ -175,13 +345,22 @@ class Backtest:
         self.trades = pl.DataFrame(
             trades_frag,
             schema={
-                "entry": pl.Datetime,
-                "exit": pl.Datetime,
+                "entry": self._ts_dtype,
+                "exit": self._ts_dtype,
                 "symbol": pl.String,
                 "price": pl.Float64,
                 "shares": pl.Float64,
                 "pnl": pl.Float64,
                 "ret": pl.Float64,
+            },
+        )
+        self.positions = pl.DataFrame(
+            positions_frag,
+            schema={
+                "ts": self._ts_dtype,
+                "symbol": pl.String,
+                "weight": pl.Float64,
+                "price": pl.Float64,
             },
         )
 
@@ -199,28 +378,30 @@ class Backtest:
 
         today = self.universe.df()[self.universe.timestamp_col()].max()
         df = self.universe.df().filter(pl.col(self.universe.timestamp_col()) == today)
-        prices = self.universe.prices(today)
+        klines = self.universe.klines(today)
 
         folio = Portfolio(cash=equity, positions=[], working=[])
-        signals = it.chain.from_iterable([a(self.universe) for a in self.alpha])
+        signals = it.chain.from_iterable(
+            [a(self.history, self.universe) for a in self.alpha]
+        )
         targets = fc.reduce(
-            lambda t, r: r(self.universe, t, folio),
+            lambda t, r: r(self.history, self.universe, t, folio),
             self.risk,
-            self.portfolio(self.universe, list(signals), folio),
+            self.portfolio(self.history, self.universe, list(signals), folio),
         )
 
         schema = {
             "symbol": pl.Utf8,
             "shares": pl.Float64,
             "position_value": pl.Float64,
-            "entry_ts": pl.Datetime,
-            "exit_ts": pl.Datetime,
+            "entry_ts": self._ts_dtype,
+            "exit_ts": self._ts_dtype,
             "entry_price": pl.Float64,
         }
         frag = []
         for target in targets:
-            price = prices.get(target.symbol)
-            if price is None or abs(target.weight) <= eps:
+            kline = klines.get(target.symbol)
+            if kline is None or abs(target.weight) <= eps:
                 continue
 
             exit_ts = today + self.period
@@ -228,11 +409,11 @@ class Backtest:
             frag.append(
                 {
                     "symbol": target.symbol,
-                    "shares": position_value / price,
+                    "shares": position_value / kline.price,
                     "position_value": position_value,
                     "entry_ts": today,
                     "exit_ts": exit_ts,
-                    "entry_price": price,
+                    "entry_price": kline.price,
                 }
             )
 
@@ -373,8 +554,8 @@ def _trade_statistics(
             if sym not in prices_by_sym:
                 continue
             tss, closes = prices_by_sym[sym]
-            entry_ts_ns = np.datetime64(t["entry"])
-            exit_ts_ns = np.datetime64(t["exit"])
+            entry_ts_ns = np.datetime64(t["entry"].replace(tzinfo=None))
+            exit_ts_ns = np.datetime64(t["exit"].replace(tzinfo=None))
             mask = (tss > entry_ts_ns) & (tss <= exit_ts_ns)
             path = closes[mask]
             if len(path) == 0:
@@ -661,6 +842,60 @@ def _plot_timeseries(df: pl.DataFrame, benchmark: pl.DataFrame, title: str):
             linewidth=1.0,
             label="Benchmark 60-day SMA",
         )
+
+    # --- Rebalancing markers on equity curve ---
+    reb_bool = df["rebalance"].to_list()
+    reb_idx = [i for i, r in enumerate(reb_bool) if r]
+    if reb_idx:
+        ts_list = df["ts"].to_list()
+        eq_list = df["equity"].to_list()
+        strat_color = ax_eq.get_lines()[0].get_color()
+        # Derive period for offset scaling (avoid hard-coding)
+        reb_period = (
+            ts_list[reb_idx[-1]] - ts_list[reb_idx[-2]]
+            if len(reb_idx) >= 2
+            else dt.timedelta(days=1)
+        )
+        # Last N rebalancing dots — nudged up 2 chars, half a baseline left
+        last_n = min(3, len(reb_idx))
+        for offset in range(1, last_n + 1):
+            idx = reb_idx[-offset]
+            t, e = ts_list[idx], eq_list[idx]
+            ax_eq.plot(t, e, marker="o", color=strat_color, markersize=7, zorder=5)
+            ax_eq.text(
+                t - reb_period * 0.02,  # half baseline left
+                e * 1.08,  # two chars up (log scale)
+                t.strftime("%Y-%m-%d"),
+                rotation=90,
+                ha="left",
+                va="bottom",
+                fontsize=7,
+                color=strat_color,
+            )
+        # Projected next rebalance if curve doesn't end on one
+        if not reb_bool[-1] and len(reb_idx) >= 2:
+            next_reb = ts_list[reb_idx[-1]] + reb_period
+            last_eq = eq_list[-1]
+            ax_eq.plot(
+                next_reb,
+                last_eq,
+                marker="D",
+                color=strat_color,
+                markersize=7,
+                zorder=5,
+                alpha=0.5,
+            )
+            ax_eq.text(
+                next_reb - reb_period * 0.02,
+                last_eq * 1.08,
+                next_reb.strftime("%Y-%m-%d"),
+                rotation=90,
+                ha="left",
+                va="bottom",
+                fontsize=7,
+                color=strat_color,
+                alpha=0.5,
+            )
 
     ax_eq.set_title(f"{title} — Performance & Symbol Details")
     ax_eq.legend(loc="upper left")

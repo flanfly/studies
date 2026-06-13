@@ -17,7 +17,7 @@ class Rank(AlphaModel):
         self.signal = signal
         self.gates = gates
 
-    def __call__(self, u: Universe) -> list[Signal]:
+    def __call__(self, history: pl.DataFrame, u: Universe) -> list[Signal]:
         today = u.df()[u.timestamp_col()].max()
         long = (
             u.df()

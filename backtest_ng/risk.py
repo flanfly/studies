@@ -1,11 +1,33 @@
 from . import RiskModel, Target, Universe, Portfolio
+import polars as pl
 
 
 class NoRisk(RiskModel):
     def __call__(
-        self, u: Universe, targets: list[Target], portfolio: Portfolio
+        self,
+        history: pl.DataFrame,
+        u: Universe,
+        targets: list[Target],
+        portfolio: Portfolio,
     ) -> list[Target]:
         return targets
+
+
+class MaxRisk(RiskModel):
+    def __init__(self, maxdd: float):
+        self.maxdd = maxdd
+
+    def __call__(
+        self,
+        history: pl.DataFrame,
+        u: Universe,
+        targets: list[Target],
+        portfolio: Portfolio,
+    ) -> list[Target]:
+        return [
+            Target(symbol=t.symbol, weight=t.weight, max_risk=self.maxdd)
+            for t in targets
+        ]
 
 
 # class MaxDrawdown(RiskModel):

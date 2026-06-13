@@ -10,13 +10,14 @@ from .interface import (
     Trade,
     Order,
     Universe,
+    Kline,
 )
 
 from .alpha import Rank
 from .execution import Simple
-from .risk import NoRisk
+from .risk import NoRisk, MaxRisk
 from .portfolio import EqualWeight
-from .universe import Manual
+from .universe import Manual, YFinance, Binance
 from .engine import Backtest
 
 __all__ = [
@@ -34,7 +35,11 @@ __all__ = [
     "Rank",
     "Simple",
     "NoRisk",
+    "MaxRisk",
     "Manual",
+    "YFinance",
+    "Binance",
     "EqualWeight",
     "Backtest",
+    "Kline",
 ]

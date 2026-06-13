@@ -15,12 +15,11 @@ class EqualWeight(PortfolioModel):
 
     def __call__(
         self,
+        history: pl.DataFrame,
         u: Universe,
         signals: list[Signal],
         portfolio: Portfolio,
     ) -> list[Target]:
-        prices = u.prices()
-
         if len(signals) == 0:
             return []
 
