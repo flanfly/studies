@@ -13,6 +13,9 @@
 #     name: python3
 # ---
 
+# %% [markdown]
+# # Momemtum trading with Polarity Digital Dataset
+
 # %% editable=true slideshow={"slide_type": ""} tags=["parameters"]
 start_year = "2020"
 holding_days = "7"
