@@ -1588,3 +1588,176 @@ import polars as pl
     
     # 4. Sort chronologically
 ).to_pandas().plot(x='ts',y='equity')
+
+# %%
+import polars as pl
+stables = [f'{c}USDT' for c in [
+    "USDT", "BUSD", "USDC", "PAX", "PAXG", "TUSD", "DAI", "USDP", "UST",
+    "FDUSD", "USD1", "XUSD", "USD", "EURC", "EURI", "AEUR", "EUR", "GBP",
+    "JPY", "AUD", "CAD", "CHF", "NZD", "KRW", "RLUSD", "USD0", "EURS",
+    "USDAI", "USDA", "USDM", "FRXUSD", "APYUSD", "A7A5", "NUSD", "FDIT",
+    "SATUSD", "YLDS", "GHO", "BFUSD", "CRVUSD", "GUSD", "USX", "AUSD",
+    "USDTB", "APXUSD", "RUSD",
+]]
+credit = [f'{c}USDT' for c in [
+    "REUSD", "FIGR_HELOC", "USDY", "JAAA", "SAFO", "USYC", "OUSG", "EURSAFO",
+    "JTRSY", "USTBL", "USTB", "THBILL", "BUIDL", "ONYC",
+]]
+cmc = pl.read_parquet('data/dataset/all.parquet')
+binance = pl.read_parquet('stables-1d.parquet')
+polarity = pl.read_parquet('polarity/latest-data').with_columns(pl.col('ts').dt.replace_time_zone("UTC"))
+
+today = min(binance['ts'].max(), polarity['ts'].max(), cmc['ts'].max())
+
+binance = binance.filter(pl.col('ts') == today)['symbol'].unique()
+cmc_binance = cmc.filter(pl.col('ts') == today)['binance'].unique()
+cmc_kucoin = cmc.filter(pl.col('ts') == today)['kucoin'].unique()
+cmc_kraken = cmc.filter(pl.col('ts') == today)['kraken'].unique()
+cmc_mexc = cmc.filter(pl.col('ts') == today)['mexc'].unique()
+cmc_htx = cmc.filter(pl.col('ts') == today)['htx'].unique()
+cmc_cake = cmc.filter(pl.col('ts') == today)['pancakeswap_v3'].unique()
+cmc_cakealpha = cmc.filter(pl.col('ts') == today)['pancakeswap_alpha_clamm'].unique()
+cmc_uniswap = cmc.filter(pl.col('ts') == today)['uniswap_v3'].unique()
+cmc_raydium = cmc.filter(pl.col('ts') == today)['raydium_clmm'].unique()
+polarity = polarity.filter(pl.col('ts') == today)['asset'].unique().str.to_uppercase() + "USDT"
+
+#print(binance)
+#print(polarity)
+#print("binance excl.", binance.filter(binance.is_in(cmc_binance).not_()))
+
+# usd pairs for kraken
+print("polarity excl.", polarity.filter(
+    polarity.is_in(cmc_binance).not_() &
+    polarity.is_in(cmc_mexc).not_() &
+    polarity.is_in(cmc_kucoin).not_() &
+    polarity.is_in(cmc_htx).not_() &
+    polarity.is_in(stables).not_() &
+    polarity.is_in(credit).not_() &
+    polarity.is_in(cmc_cake).not_() &
+    polarity.is_in(cmc_cakealpha).not_() &
+    polarity.is_in(cmc_uniswap).not_() &
+    polarity.is_in(cmc_raydium).not_() &
+    polarity.str.starts_with('PC000').not_()
+).to_list())
+
+# %%
+pl.read_parquet('data/dataset/all.parquet').max()
+
+
+# %%
+(
+    pl.read_parquet('/var/folders/tl/9yq9dyyj1sl6tn4r875nj5ym0000gn/T/tmpdj4eeed_')
+    .sort(['asset','metric','timestamp'])
+    .filter((pl.col('asset') == 'ada') & (pl.col('metric') == 'udpil'))
+)
+
+# %%
+pl.read_parquet('polarity/lala.parquet').sort(['asset','timestamp'])
+
+# %%
+(
+    pl.scan_parquet('/var/folders/tl/9yq9dyyj1sl6tn4r875nj5ym0000gn/T/tmpdj4eeed_')
+    .pivot(
+        on="metric",
+        index=["timestamp", "asset", "coingecko_slug"],
+        values="value",
+        on_columns=['udpil'],
+    )
+    .filter(pl.col('timestamp').dt.year() >= 2019)
+    .sort(['asset','timestamp'])
+    .collect()
+)
+
+
+# %%
+(
+    pl.read_parquet('metrics.parquet')
+    .join(
+        pl.read_parquet('polarity/lala.parquet')
+        .with_columns(ts=pl.col('timestamp')),
+        on=['coingecko_slug','ts']
+    )
+)
+
+# %%
+pl.read_parquet('metrics.parquet')
+
+
+# %%
+(
+    pl.read_parquet('metrics.parquet').filter(pl.col('coingecko_slug').is_in(
+        pl.read_parquet('markets.parquet')
+        .filter(pl.col('derivative') == 'spot')
+        .filter(pl.col('exchange').is_in([
+            'binance',
+            'kraken',
+            'mexc',
+            'kucoin',
+            'uniswap-v3-ethereum',
+            'raydium',
+            'raydium-clmm',
+            'htx',
+        ]))
+        ['coingecko_slug'].unique().to_list()
+    ).not_())
+    .sort('market_cap',descending=True)['coingecko_slug'].unique()
+)
+
+# %%
+import polars as pl
+
+pl.read_parquet('live/klines.parquet')
+
+stables = [f'{c}USDT' for c in [
+    "USDT", "BUSD", "USDC", "PAX", "PAXG", "TUSD", "DAI", "USDP", "UST",
+    "FDUSD", "USD1", "XUSD", "USD", "EURC", "EURI", "AEUR", "EUR", "GBP",
+    "JPY", "AUD", "CAD", "CHF", "NZD", "KRW", "RLUSD", "USD0", "EURS",
+    "USDAI", "USDA", "USDM", "FRXUSD", "APYUSD", "A7A5", "NUSD", "FDIT",
+    "SATUSD", "YLDS", "GHO", "BFUSD", "CRVUSD", "GUSD", "USX", "AUSD",
+    "USDTB", "APXUSD", "RUSD",
+]]
+credit = [f'{c}USDT' for c in [
+    "REUSD", "FIGR_HELOC", "USDY", "JAAA", "SAFO", "USYC", "OUSG", "EURSAFO",
+    "JTRSY", "USTBL", "USTB", "THBILL", "BUIDL", "ONYC",
+]]
+
+
+df = (
+    pl.read_parquet('live/symbols.parquet')
+    .rename({"cross_rate": "cross", "isolated_rate": "isolated"})
+    .unpivot(
+        on=["cross", "isolated"],
+        index=["symbol",'exchange','base'],
+        variable_name="type", 
+        value_name="rate"
+    )
+    .filter(pl.col('rate').is_not_null())
+    #.join(
+    #    pl.read_parquet('polarity/latest-data.parquet')
+    #    .select(base=pl.col('asset'))
+    #    .unique(),
+    #    on='base'
+    #)
+    .sort('rate', descending=True)
+    .group_by('base')
+    .last()
+    .sort('base')
+    .select('base','exchange','symbol','rate','type')
+)
+
+print(df)
+
+df = (
+    pl.read_parquet('live/klines.parquet')
+    .join(df.select('exchange','symbol'),on=['exchange','symbol'])
+)
+
+print(df)
+
+# %%
+import polars as pl
+pl.read_parquet('live/klines.parquet').filter(pl.col('exchange') == 'kucoin')
+
+# %%
+import polars as pl
+pl.read_parquet('live/symbols.parquet').filter(pl.col('exchange') == 'asterdex')
