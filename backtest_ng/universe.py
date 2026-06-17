@@ -80,10 +80,15 @@ class YFinance(Universe):
         else:
             raise TypeError(f"Unsupported type for start: {type(start)}")
 
+        # Hash includes the source file so any change to the download
+        # / filter logic invalidates stale cache files automatically.
+        src_hash = sha256(Path(__file__).read_bytes()).hexdigest()[:8]
         snowflake = sha256(
-            f"{'-'.join(sorted(self.tickers))}|{self.start.strftime('%Y-%m-%d')}".encode(
-                "utf-8"
-            )
+            (
+                f"{'-'.join(sorted(self.tickers))}|"
+                f"{self.start.strftime('%Y-%m-%d')}|"
+                f"{src_hash}"
+            ).encode("utf-8")
         ).hexdigest()
         cachdir = Path(user_cache_dir("backtest", "seu"))
         cachdir.mkdir(parents=True, exist_ok=True)
@@ -118,6 +123,7 @@ class YFinance(Universe):
                     symbol=pl.lit(t.upper()).cast(pl.Utf8),
                 )
                 .sort("ts")
+                .filter(pl.col("ts") >= self.start)
             )
 
             table = df.to_arrow()
@@ -145,6 +151,10 @@ class YFinance(Universe):
             if (dt.datetime.now(tz=dt.timezone.utc) - mt) < dt.timedelta(hours=24):
                 try:
                     self._df = pl.read_parquet(self.path)
+                    # Re-apply the start filter on read so cache files
+                    # downloaded before the filter existed don't leak
+                    # pre-start history into the universe.
+                    self._df = self._df.filter(pl.col("ts") >= self.start)
                     return self._df
                 except Exception as e:
                     l.error(e)
@@ -164,6 +174,12 @@ class YFinance(Universe):
 
     def price_col(self) -> str:
         return "close"
+
+    def low_col(self) -> str | None:
+        return "low"
+
+    def high_col(self) -> str | None:
+        return "high"
 
     def volume_col(self) -> str:
         return "volume"

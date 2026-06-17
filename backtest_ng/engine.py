@@ -294,11 +294,15 @@ class Backtest:
                 klines.get(p.symbol, Kline(price=0.0, high=None, low=None)).price
                 * p.shares
                 for p in folio.longs()
+                if klines.get(p.symbol) is not None
+                and klines[p.symbol].price is not None
             ]
             s = [
                 klines.get(p.symbol, Kline(price=0.0, high=None, low=None)).price
                 * p.shares
                 for p in folio.shorts()
+                if klines.get(p.symbol) is not None
+                and klines[p.symbol].price is not None
             ]
 
             history_frag.append(
@@ -401,7 +405,11 @@ class Backtest:
         frag = []
         for target in targets:
             kline = klines.get(target.symbol)
-            if kline is None or abs(target.weight) <= eps:
+            if (
+                kline is None
+                or kline.price is None
+                or abs(target.weight) <= eps
+            ):
                 continue
 
             exit_ts = today + self.period

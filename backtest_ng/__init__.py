@@ -16,7 +16,7 @@ from .interface import (
 from .alpha import Rank
 from .execution import Simple
 from .risk import NoRisk, MaxRisk
-from .portfolio import EqualWeight
+from .portfolio import EqualWeight, VolatilityWeighted
 from .universe import Manual, YFinance, Binance
 from .engine import Backtest
 
@@ -40,6 +40,7 @@ __all__ = [
     "YFinance",
     "Binance",
     "EqualWeight",
+    "VolatilityWeighted",
     "Backtest",
     "Kline",
 ]

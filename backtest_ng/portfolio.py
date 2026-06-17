@@ -8,11 +8,6 @@ from . import PortfolioModel, Signal, Portfolio, Universe, Target
 
 
 class EqualWeight(PortfolioModel):
-    def __init__(self, timestamp_col="ts", symbol_col="symbol", price_col="close"):
-        self.ts_col = timestamp_col
-        self.symbol_col = symbol_col
-        self.price_col = price_col
-
     def __call__(
         self,
         history: pl.DataFrame,
@@ -30,6 +25,116 @@ class EqualWeight(PortfolioModel):
             by_symbol[s.symbol] += w * (1 if s.bullish else -1)
 
         return [Target(symbol=k, weight=v) for k, v in by_symbol.items()]
+
+
+class VolatilityWeighted(PortfolioModel):
+    """Inverse-volatility (risk-parity style) portfolio construction.
+
+    Weights signals in inverse proportion to their realised target
+    volatility, with a *single* shared normalisation across both sides
+    so that the gross exposure of the basket is ``leverage`` and the
+    long:short ratio is determined by the number of signals on each
+    side.  This mirrors the manual construction in
+    ``sector-rotation-prod-v1.py``::
+
+        inv_vol[s]  = 1 / sqrt(var[s])        (or 0 if var is missing/<=0)
+        weight[s]   = (inv_vol[s] / tiv) * leverage      (signed by side)
+
+    where ``tiv = sum(inv_vol[s] for s in selected)`` is taken over
+    the *combined* long + short basket, not per side.  This is the
+    key reason the live production strategy is long-biased: with
+    ``max_long=4, max_short=1, leverage=2`` the typical gross is
+    ~2.0× equity, of which ~1.6× is long and ~0.4× is short.
+
+    The volatility estimate is read from ``u.df()[volatility_col]`` at
+    the most recent bar, per symbol.  Symbols whose volatility is
+    missing or non-positive get zero weight (and are silently dropped
+    rather than penalising the rest of the basket).
+
+    Parameters
+    ----------
+    volatility_col:
+        Column in ``u.df()`` carrying a *per-bar variance* estimate
+        for each symbol.  Defaults to ``"var"`` to match the
+        Yang-Zhang variance computed in ``sector-rotation-prod-v1.py``.
+        Any other variance-style column works the same way (rolling
+        close-to-close variance, Parkinson, Garman-Klass, …).
+    leverage:
+        Total gross exposure of the basket.  Defaults to ``1.0``.
+        Note that the gross, not each side, sums to ``leverage`` —
+        a 4-long / 1-short basket with ``leverage=2.0`` produces
+        ~1.6× long and ~0.4× short, not 2.0×/2.0×.
+    """
+
+    def __init__(self, volatility_col: str = "var", leverage: float = 1.0):
+        self.volatility_col = volatility_col
+        self.leverage = leverage
+
+    def __call__(
+        self,
+        history: pl.DataFrame,
+        u: Universe,
+        signals: list[Signal],
+        portfolio: Portfolio,
+    ) -> list[Target]:
+        if len(signals) == 0:
+            return []
+
+        # Pull the most recent row of the universe and index variance
+        # by symbol.  Per-bar variance → per-bar stdev → inverse vol.
+        df = u.df()
+        tscol = u.timestamp_col()
+        symcol = u.symbol_col()
+        latest = df.filter(pl.col(tscol) == df[tscol].max())
+
+        if self.volatility_col in latest.columns:
+            var_rows = latest.select(symcol, self.volatility_col).iter_rows(named=True)
+            # Polars surfaces a null ``var`` as Python ``None`` here;
+            # normalise to 0.0 so the ``<= 0`` check below correctly
+            # drops a NaN-vol symbol from the basket.
+            var_dict: Dict[str, float] = {
+                r[symcol]: (0.0 if r[self.volatility_col] is None else float(r[self.volatility_col]))
+                for r in var_rows
+            }
+        else:
+            # The volatility column hasn't been computed (yet) — fall
+            # back to equal weight so the model still emits targets.
+            var_dict = {s.symbol: 0.0 for s in signals}
+
+        # Compute inverse vols over the *combined* long + short basket
+        # and normalise by a single ``tiv``.  The v1 reference
+        # intentionally does this so a small short basket (e.g. 1 name)
+        # doesn't get an outsized weight by being normalised alone
+        # — instead the long:short ratio is driven by the count and
+        # by relative vol.
+        #
+        # We key by the signal itself, not by symbol, so a name that
+        # appears on both sides keeps separate long and short entries
+        # — the v1 reference iterates over ``long_bkt`` and ``short_bkt``
+        # independently for the same reason.
+        def _inv_vol(sym: str) -> float:
+            var = var_dict.get(sym, 0.0)
+            if var is None or var <= 0.0:
+                return 0.0
+            return 1.0 / (var ** 0.5)
+
+        inv_vols = [(s, _inv_vol(s.symbol)) for s in signals]
+        tiv = sum(v for _, v in inv_vols)
+        n = len(signals)
+
+        targets: list[Target] = []
+        for s, iv in inv_vols:
+            if tiv > 0.0:
+                w = (iv / tiv) * self.leverage
+            else:
+                # All symbols have missing/non-positive vol — fall
+                # back to per-name equal weight so the basket is
+                # still well-defined.
+                w = self.leverage / n
+            sign = 1.0 if s.bullish else -1.0
+            targets.append(Target(symbol=s.symbol, weight=sign * w))
+
+        return targets
 
 
 # class VolumeWeighted(PortfolioModel):
