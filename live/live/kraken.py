@@ -194,7 +194,7 @@ class Kraken(Exchange):
     # ------------------------------------------------------------------
     # pairs
     # ------------------------------------------------------------------
-    async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
+    async def pairs(self, client: AsyncClient, quote_assets: set[str], limit: int | None = None) -> pl.DataFrame:
         """Returns active USDT/USDC spot pairs.
 
         Columns: ts, symbol, exchange, base, quote, cross_rate,

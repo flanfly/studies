@@ -36,6 +36,7 @@ from live import (
     Hyperliquid,
     Kraken,
     KuCoin,
+    MEXC,
     empty_klines_df,
 )
 
@@ -169,6 +170,17 @@ def _build_exchanges() -> list[Exchange]:
         # public. Binance-compatible perps DEX on BNB Chain;
         # same perp-as-pair convention as Hyperliquid.
         AsterDex(),
+        # MEXC spot v3 + contract v1 endpoints are public; the
+        # API key is forwarded for forward-compatibility (in case
+        # MEXC ever gates ``/exchangeInfo`` behind auth). Borrow
+        # rates are not fetched: MEXC has no spot-margin trading
+        # (verified: ``isMarginTradingAllowed == false`` for every
+        # active pair). Funding rates come from the public USDⓈ-M
+        # funding-rate endpoint.
+        MEXC(
+            api_key=os.environ.get("MEXC_ACCESS_KEY"),
+            api_secret=os.environ.get("MEXC_SECRET_KEY"),
+        ),
     ]
 
 

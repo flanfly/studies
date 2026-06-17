@@ -428,7 +428,7 @@ class KuCoin(Exchange):
     # ------------------------------------------------------------------
     # pairs
     # ------------------------------------------------------------------
-    async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
+    async def pairs(self, client: AsyncClient, quote_assets: set[str], limit: int | None = None) -> pl.DataFrame:
         """Returns active USDT/USDC spot pairs with cross/isolated
         margin rates and the current perpetual-futures funding rate
         APR.

@@ -306,7 +306,7 @@ class Hyperliquid(Exchange):
     # pairs
     # ------------------------------------------------------------------
     async def pairs(
-        self, client: AsyncClient, quote_assets: set[str]
+        self, client: AsyncClient, quote_assets: set[str], limit: int | None = None
     ) -> pl.DataFrame:
         """Return one row per active perp contract.
 

@@ -26,7 +26,7 @@ import pytest
 from dotenv import load_dotenv
 from httpx import AsyncClient
 
-from live import AsterDex, Binance, HTX, Hyperliquid, Kraken, KuCoin
+from live import AsterDex, Binance, HTX, Hyperliquid, Kraken, KuCoin, MEXC
 
 
 def _find_env(start: Path) -> Path | None:
@@ -144,3 +144,17 @@ def hyperliquid() -> Hyperliquid:
 def asterdex() -> AsterDex:
     # Public endpoints only; no credentials needed.
     return AsterDex()
+
+
+@pytest.fixture
+def mexc() -> MEXC:
+    # MEXC's spot v3 endpoints we use are public; credentials are
+    # accepted but unused. We pull them from the environment when
+    # available so the adapter is forward-compatible with any future
+    # signed endpoints MEXC may add (e.g. if they expose a public
+    # borrow-rate endpoint behind auth).
+    import os
+    return MEXC(
+        api_key=os.environ.get("MEXC_ACCESS_KEY"),
+        api_secret=os.environ.get("MEXC_SECRET_KEY"),
+    )

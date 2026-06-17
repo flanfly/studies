@@ -62,6 +62,7 @@ __all__ = [
     "KuCoin",
     "Kraken",
     "Binance",
+    "MEXC",
     "Hyperliquid",
     "AsterDex",
     # Schema dicts and helpers shared across adapters and tests.
@@ -428,7 +429,12 @@ class Exchange(ABC):
                 await asyncio.sleep(delay)
 
     @abstractmethod
-    async def pairs(self, client: AsyncClient, quote_assets: set[str]) -> pl.DataFrame:
+    async def pairs(
+        self,
+        client: AsyncClient,
+        quote_assets: set[str],
+        limit: int | None = None,
+    ) -> pl.DataFrame:
         """Return active spot pairs for ``quote_assets`` with margin rates
         and (where applicable) the current perpetual-futures funding
         rate annualised as APR.
@@ -441,6 +447,17 @@ class Exchange(ABC):
         rate for the perpetual contract on the same base/quote, ``None``
         if the exchange has no native perpetuals -- currently Kraken --
         or if the coin has no perpetual contract).
+
+        ``limit`` is an optional cap on the number of pairs returned:
+        when ``None`` (the default), the entire pair universe is
+        enumerated. When set to a positive integer, only the first
+        ``limit`` pairs (sorted by exchange-specific ordering, usually
+        alphabetical by base) are returned, and any per-pair follow-up
+        calls (funding rates, etc.) are also bounded. This is useful
+        for tests that want to exercise the full ``pairs()`` path on a
+        small subset without paying the cost of fetching data for the
+        entire exchange. The CLI never passes ``limit``; it always
+        fetches the full universe.
         """
         pass
 
@@ -523,13 +540,18 @@ class Exchange(ABC):
         self,
         client: AsyncClient,
         quote_assets: set[str],
+        limit: int | None = None,
     ) -> pl.DataFrame:
         """Public wrapper around ``pairs()`` that retries on
         transient errors. Equivalent to ``self._retry("pairs", ...)``
         but exposed as a method so callers don't have to know the
         internal ``_retry`` name.
+
+        ``limit`` is forwarded verbatim to ``pairs()``: when set
+        to a positive integer, only the first ``limit`` pairs are
+        returned. See ``Exchange.pairs`` for details.
         """
-        df = await self._retry("pairs", client, quote_assets)
+        df = await self._retry("pairs", client, quote_assets, limit)
         self.validate_pairs_df(df)
         return df
 
@@ -596,5 +618,6 @@ from .htx import HTX  # noqa: E402
 from .kucoin import KuCoin  # noqa: E402
 from .kraken import Kraken  # noqa: E402
 from .binance import Binance  # noqa: E402
+from .mexc import MEXC  # noqa: E402
 from .hyperliquid import Hyperliquid  # noqa: E402
 from .asterdex import AsterDex  # noqa: E402
