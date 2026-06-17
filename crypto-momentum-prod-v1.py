@@ -46,7 +46,7 @@ bottom_percentile: {bottom_percentile_P}
 import datetime as dt
 import polars as pl
 import scrapbook as sb
-import backtest as bt
+import backtest_ng as bt
 import functools as fc
 import operator
 
@@ -82,9 +82,11 @@ class Alpha(bt.AlphaModel):
         self.long_expr = long_expr
         self.short_expr = short_expr
 
-    def __call__(self, df: pl.DataFrame) -> list[bt.Signal]:
-        today = df["ts"].max()
-        dfnow = df.filter(pl.col("ts") == today)
+    def __call__(self, history: pl.DataFrame, u: pl.DataFrame) -> list[bt.Signal]:
+        df = u.df()
+        ts = u.timestamp_col()
+        today = df[ts].max()
+        dfnow = df.filter(pl.col(ts) == today)
         l = dfnow.filter(self.long_expr)
         s = dfnow.filter(self.short_expr)
 
@@ -105,7 +107,7 @@ else:
 
 
 test = bt.Backtest(
-    df,
+    bt.Manual(df),
     alpha=Alpha(
         long_expr=(pl.col("rank") >= top_percentile_P) & long_gate_expr & (pl.col('volume') > min_volume_P),
         short_expr=(
@@ -116,18 +118,10 @@ test = bt.Backtest(
     ),
     benchmark="btc",
     period=days_holding_P,
-    eager_rebalance=False,
 )
 
 test.run()
-res = test.report(plot=True)
-
-for col in set(res.columns) - {'year', 'src'}:
-    s = res.filter(pl.col('src') == 'Strategy')
-    b = res.filter(pl.col('src') == 'Benchmark')
-
-    print(f"{col}: {s[col].mean()} ({b[col].mean()})")
-    sb.glue(col,s[col].mean())
+test.report(plot=True)
 
 # %%
 print(
