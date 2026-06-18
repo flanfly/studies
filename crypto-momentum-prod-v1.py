@@ -50,8 +50,20 @@ import backtest_ng as bt
 import functools as fc
 import operator
 
+diff = [
+    'a7a5', 'acred', 'apyusd', 'bcap', 'borg', 'bp', 'btse', 'buidl', 'coco',
+    'crclon', 'crvusd', 'eurcv', 'eurs', 'eursafo', 'eutbl', 'fdit',
+    'figr_heloc', 'frxusd', 'ft', 'gho', 'gusd', 'hash', 'jaaa', 'jtrsy',
+    'kag', 'kau', 'koge', 'leo', 'nusd', 'ohm', 'onyc', 'ousg', 'ozo',
+    'pc0000023', 'pc0000031', 'pc0000033', 'pc0000097', 'real', 'reusd',
+    'rusd', 'safo', 'satusd', 'shfl', 'strcx', 'thbill', 'tibbir', 'usd0',
+    'usda', 'usdai', 'usdat', 'usdf', 'usdm', 'usdtb', 'usdy', 'ustb', 'ustbl',
+    'usx', 'usyc', 'wfi', 'ylds', 'zano',
+]
+
 df = (
     pl.read_parquet("polarity/latest-data.parquet")
+    .filter(pl.col('asset').is_in(diff).not_())
     .rename(
         {
             "asset": "symbol",
@@ -73,7 +85,7 @@ df = (
         volume=pl.col('total_volume').rolling_mean(days_holding_P).over('symbol'),
     )
     .sort("ts")
-    .filter(pl.col("ts") .dt.year() >= 2025)
+    .filter(pl.col("ts") .dt.year() >= 2026)
     .drop_nulls(['volume'])
 )
 
