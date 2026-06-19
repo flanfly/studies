@@ -51,6 +51,13 @@ the rewards scale uniformly.
 
 from __future__ import annotations
 
+# These env vars MUST be set before `import tensorflow` so that Keras is
+# loaded as tf-keras (Keras 2). TF-Agents doesn't yet support Keras 3.
+import os as _os
+
+_os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
+_os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
 import argparse
 import os
 import time
@@ -60,10 +67,7 @@ import numpy as np
 import polars as pl
 import polars_ols as polars_ols
 import tensorflow as tf
-
-# Keep Keras-2 (tf-keras); TF-Agents doesn't yet support Keras 3.
-os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+from tqdm.auto import tqdm
 
 from tf_agents.agents.dqn import dqn_agent
 from tf_agents.drivers import dynamic_step_driver
@@ -76,26 +80,25 @@ from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step as ts
 from tf_agents.utils import common
 
-
 # =============================================================================
 # Environment / pool parameters (Section V-B of the paper, Table II)
 # =============================================================================
 
 # AMM pool.
-RANGE_WIDTH = 0.01              # 2w: position width as fraction of center (1%)
-POOL_FEE_TIER = 0.0005          # phi: pool fee tier (5 bps)
-POOL_TVL = 10_000_000.0         # L_total: pool TVL in USD
-DEX_CEX_RATIO = 0.10            # alpha: DEX volume / CEX volume per bar
-INITIAL_CAPITAL = 10_000.0      # K: LP capital deployed in USD
+RANGE_WIDTH = 0.01  # 2w: position width as fraction of center (1%)
+POOL_FEE_TIER = 0.0005  # phi: pool fee tier (5 bps)
+POOL_TVL = 10_000_000.0  # L_total: pool TVL in USD
+DEX_CEX_RATIO = 0.10  # alpha: DEX volume / CEX volume per bar
+INITIAL_CAPITAL = 10_000.0  # K: LP capital deployed in USD
 
 # Rebalancing cost (Section V-B, eq. 30): C = phi * 0.5 * K + G.
 # We expose them separately and combine in env.step.
-SWAP_FEE_FRACTION = 0.5         # share of position swapped on rebalance
-GAS_COST = 2.0                  # G: gas cost per rebalance in USD
+SWAP_FEE_FRACTION = 0.5  # share of position swapped on rebalance
+GAS_COST = 2.0  # G: gas cost per rebalance in USD
 
 # Reward shaping (Section IV-D, eq. 28).
-REWARD_SCALE = 100.0            # lambda: stabilises training
-ACTIVE_BONUS = 0.01             # epsilon: per-step bonus for being in-range
+REWARD_SCALE = 100.0  # lambda: stabilises training
+ACTIVE_BONUS = 0.01  # epsilon: per-step bonus for being in-range
 
 
 # =============================================================================
@@ -103,16 +106,16 @@ ACTIVE_BONUS = 0.01             # epsilon: per-step bonus for being in-range
 # =============================================================================
 
 LEARNING_RATE = 1e-4
-DISCOUNT_FACTOR = 0.99          # gamma
+DISCOUNT_FACTOR = 0.99  # gamma
 REPLAY_BUFFER_SIZE = 100_000
 BATCH_SIZE = 128
-TARGET_UPDATE_PERIOD = 100      # hard update every N train steps
+TARGET_UPDATE_PERIOD = 100  # hard update every N train steps
 EPSILON_START = 1.0
 EPSILON_END = 0.05
-EPSILON_DECAY = 0.9998          # multiplicative per training step
+EPSILON_DECAY = 0.9998  # multiplicative per training step
 
 NUM_EPISODES = 150
-EPISODE_LENGTH = 36_000         # 10 hours at 1Hz
+EPISODE_LENGTH = 36_000  # 10 hours at 1Hz
 
 EVAL_EPISODES = 10
 
@@ -128,14 +131,14 @@ VAL_FRACTION = 0.15
 
 STATE_DIM = 8
 # Index of each component in the state vector s_t.
-IDX_DELTA_P = 0     # normalised price deviation: S_t / c - 1
-IDX_D_EDGE = 1      # distance to edge: (S_t - c) / (u - c)
-IDX_THETA = 2       # Stein signal: mean-reversion speed, clipped to [0, 1]
-IDX_DELTA_MU = 3    # mean deviation: (mu - S_t) / S_t
-IDX_SIGMA = 4       # normalised sigma: sigma / S_t, clipped to 0.1
+IDX_DELTA_P = 0  # normalised price deviation: S_t / c - 1
+IDX_D_EDGE = 1  # distance to edge: (S_t - c) / (u - c)
+IDX_THETA = 2  # Stein signal: mean-reversion speed, clipped to [0, 1]
+IDX_DELTA_MU = 3  # mean deviation: (mu - S_t) / S_t
+IDX_SIGMA = 4  # normalised sigma: sigma / S_t, clipped to 0.1
 IDX_PHI_ACTIVE = 5  # active fraction over current episode so far
-IDX_VOL = 6         # rolling realised volatility, clipped to 0.1
-IDX_IN_RANGE = 7    # 1{S_t in [c(1-w), c(1+w)]}
+IDX_VOL = 6  # rolling realised volatility, clipped to 0.1
+IDX_IN_RANGE = 7  # 1{S_t in [c(1-w), c(1+w)]}
 
 # Normalisation constants from the paper.
 THETA_CLIP = 1.0
@@ -157,7 +160,7 @@ VOL_CLIP = 0.1
 # (theta = -beta, mu = -alpha / beta, sigma = residual std). dt = 1 second
 # since the bars are 1Hz.
 
-OU_WINDOW_SECONDS = 1800        # rolling OLS window in seconds (1 bar/sec)
+OU_WINDOW_SECONDS = 1800  # rolling OLS window in seconds (1 bar/sec)
 
 
 def compute_ou_params(
@@ -180,18 +183,17 @@ def compute_ou_params(
     if "price" not in df.columns:
         raise ValueError("compute_ou_params needs a 'price' column")
     out = df.with_columns(
-        (pl.col("price").shift(-1) - pl.col("price")).alias("d_price")
+        (pl.col("price") - pl.col("price").shift(1)).alias("d_price"),
+        pl.col("price").shift(1).alias("price_lag"),
     )
-    rolling_kwargs = polars_ols.RollingKwargs(
-        window_size=window, min_periods=window
-    )
+    rolling_kwargs = polars_ols.RollingKwargs(window_size=window, min_periods=window)
     # `mode='coefficients'` returns a struct {const, price} with alpha and beta.
     # `add_intercept=True` is the right way to ask for the intercept column
     # (it's added implicitly as `const`).
     out = out.with_columns(
         polars_ols.compute_rolling_least_squares(
             out["d_price"],
-            out["price"],
+            out["price_lag"],
             add_intercept=True,
             mode="coefficients",
             rolling_kwargs=rolling_kwargs,
@@ -199,13 +201,17 @@ def compute_ou_params(
     )
     out = out.with_columns(
         pl.col("coefs").struct.field("const").alias("alpha_hat"),
-        pl.col("coefs").struct.field("price").alias("beta_hat"),
+        pl.col("coefs").struct.field("price_lag").alias("beta_hat"),
     ).drop("coefs")
     # Residual = y - (alpha + beta * x). With null_policy='drop' inside
     # polars-ols, the first `window` rows of alpha/beta are null; residuals
     # are therefore null there too.
     out = out.with_columns(
-        (pl.col("d_price") - pl.col("alpha_hat") - pl.col("beta_hat") * pl.col("price")).alias("resid")
+        (
+            pl.col("d_price")
+            - pl.col("alpha_hat")
+            - pl.col("beta_hat") * pl.col("price_lag")
+        ).alias("resid")
     )
     # Rolling std of residuals (ddof=0 to match the paper's eq. 13 OLS).
     # `min_samples=100` lets sigma fill in faster than the OLS itself, so
@@ -213,7 +219,11 @@ def compute_ou_params(
     # paper starts episodes at random offsets within the data, so this only
     # affects a handful of episodes at the very beginning of the series.
     out = out.with_columns(
-        pl.col("resid").pow(2).rolling_mean(window_size=window, min_samples=100).sqrt().alias("sigma")
+        pl.col("resid")
+        .pow(2)
+        .rolling_mean(window_size=window, min_samples=100)
+        .sqrt()
+        .alias("sigma")
     )
     out = out.with_columns(
         pl.max_horizontal(pl.lit(0.0), -pl.col("beta_hat")).alias("theta"),
@@ -232,10 +242,12 @@ def compute_ou_params(
 # Python environment (tf_agents.environments.py_environment.PyEnvironment)
 # =============================================================================
 
+
 @dataclass
 class PoolConfig:
     """Constants derived from the pool + capital parameters."""
-    range_width: float = RANGE_WIDTH              # 2w
+
+    range_width: float = RANGE_WIDTH  # 2w
     pool_fee_tier: float = POOL_FEE_TIER
     pool_tvl: float = POOL_TVL
     dex_cex_ratio: float = DEX_CEX_RATIO
@@ -262,9 +274,7 @@ class PoolConfig:
         fee magnitude relative to gas; tune INITIAL_CAPITAL / POOL_TVL /
         RANGE_WIDTH if your fee numbers come out too small or too large.
         """
-        return self.initial_capital / (
-            self.pool_tvl * 2.0 * np.sqrt(self.range_width)
-        )
+        return self.initial_capital / (self.pool_tvl * 2.0 * np.sqrt(self.range_width))
 
 
 class RammsteinEnv:
@@ -298,10 +308,10 @@ class RammsteinEnv:
 
         # Episode state.
         self._t = 0
-        self._c = 0.0                    # position center
+        self._c = 0.0  # position center
         self._in_range = 0
-        self._t_in_range = 0             # seconds in-range so far in episode
-        self._vol_window: list[float] = []   # rolling returns for realised vol
+        self._t_in_range = 0  # seconds in-range so far in episode
+        self._vol_window: list[float] = []  # rolling returns for realised vol
         self._prev_price = 0.0
 
     # ------------------------------------------------------------------ spec
@@ -329,11 +339,17 @@ class RammsteinEnv:
         upper = self._c * (1.0 + self.pool.range_width)
         return int(lower <= s <= upper)
 
-    def _build_state(self, s: float, theta: float, mu: float, sigma: float) -> np.ndarray:
-        d_edge = (s - self._c) / (self._c * self.pool.range_width) if self._c > 0 else 0.0
+    def _build_state(
+        self, s: float, theta: float, mu: float, sigma: float
+    ) -> np.ndarray:
+        d_edge = (
+            (s - self._c) / (self._c * self.pool.range_width) if self._c > 0 else 0.0
+        )
         delta_p = (s / self._c - 1.0) if self._c > 0 else 0.0
         delta_mu = (mu - s) / s if s > 0 else 0.0
-        realised_vol = float(np.std(self._vol_window)) if len(self._vol_window) >= 2 else 0.0
+        realised_vol = (
+            float(np.std(self._vol_window)) if len(self._vol_window) >= 2 else 0.0
+        )
         phi_active = self._t_in_range / max(self._t_in_episode(), 1)
         state = np.array(
             [
@@ -455,6 +471,7 @@ class PyRammsteinEnv(py_environment.PyEnvironment):
 # Q-network + agent
 # =============================================================================
 
+
 def build_agent(train_env: tf_py_environment.TFPyEnvironment):
     # After TFPyEnvironment wrapping, observation_spec() returns the full
     # array spec, not a nested spec. Action spec is the same shape.
@@ -463,7 +480,9 @@ def build_agent(train_env: tf_py_environment.TFPyEnvironment):
         train_env.action_spec(),
         fc_layer_params=(128, 64),
     )
-    optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+    # Use the legacy TF-Keras optimizer; v2.11+ Adam is slow and has
+    # variable-creation quirks on M-series Macs.
+    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=LEARNING_RATE)
     # int64 step counter; tf-agents complains if it's int32.
     train_step_counter = tf.Variable(0, dtype=tf.int64)
     agent = dqn_agent.DdqnAgent(
@@ -482,6 +501,11 @@ def build_agent(train_env: tf_py_environment.TFPyEnvironment):
         summarize_grads_and_vars=False,
     )
     agent.initialize()
+    # Force-build the Q-network weights with a dummy forward pass; otherwise
+    # the first agent.train() call hits "No variables in the agent's q_network"
+    # because the optimizer hasn't seen any variables yet.
+    dummy_obs = tf.zeros((1, STATE_DIM), dtype=tf.float32)
+    q_net(dummy_obs, step_type=ts.StepType.MID)
     return agent, q_net
 
 
@@ -514,12 +538,13 @@ def train(
     )
 
     # Warm up the buffer with random actions.
-    print("[rammstein] Filling replay buffer with random actions...")
+    init_steps = min(BATCH_SIZE * 4, 5_000)
+    print(f"[rammstein] Filling replay buffer with {init_steps} random steps...")
     init_driver = dynamic_step_driver.DynamicStepDriver(
         train_env,
         random_policy,
         observers=[replay_buffer.add_batch],
-        num_steps=min(BATCH_SIZE * 4, 5_000),
+        num_steps=init_steps,
     )
     init_driver.run()
 
@@ -533,7 +558,14 @@ def train(
         f"{EPISODE_LENGTH} steps each..."
     )
     t0 = time.time()
-    for ep in range(num_episodes):
+    # Outer progress: one row per episode.
+    episode_bar = tqdm(
+        range(num_episodes),
+        desc="episodes",
+        unit="ep",
+        dynamic_ncols=True,
+    )
+    for ep in episode_bar:
         driver = dynamic_step_driver.DynamicStepDriver(
             train_env,
             agent.collect_policy,
@@ -541,15 +573,31 @@ def train(
             num_steps=EPISODE_LENGTH,
         )
         driver.run(train_env.reset())
-        # Train once per collected step (matches Table I).
-        for _ in range(EPISODE_LENGTH):
+        # Inner progress: one row per train step within the episode.
+        step_bar = tqdm(
+            range(EPISODE_LENGTH),
+            desc=f"  ep {ep + 1}/{num_episodes} steps",
+            unit="step",
+            leave=False,
+            dynamic_ncols=True,
+            mininterval=2.0,  # don't redraw too often
+        )
+        ep_loss = 0.0
+        ep_loss_count = 0
+        for _ in step_bar:
             experience, _ = next(iterator)
-            agent.train(experience)
-        if (ep + 1) % 5 == 0:
-            print(
-                f"  episode {ep + 1}/{num_episodes} "
-                f"elapsed={time.time() - t0:.1f}s"
-            )
+            loss_info = agent.train(experience)
+            ep_loss += float(loss_info.loss)
+            ep_loss_count += 1
+        avg_loss = ep_loss / max(ep_loss_count, 1)
+        ep_dt = time.time() - t0
+        mean_ep_dt = ep_dt / (ep + 1)
+        eta_s = mean_ep_dt * (num_episodes - ep - 1)
+        episode_bar.set_postfix(
+            avg_loss=f"{avg_loss:.4f}",
+            ep_t=f"{mean_ep_dt:.0f}s",
+            eta=f"{eta_s / 60:.1f}m",
+        )
 
     os.makedirs(log_dir, exist_ok=True)
     # QNetwork doesn't expose save_weights; persist weights as numpy arrays.
@@ -658,23 +706,19 @@ BINANCE_CSV_COLUMNS = [
     "quoteQty",
     "time",
     "isBuyerMaker",
-    "isBestMatch",
 ]
 
 
 def _load_binance_csv(path: str) -> pl.DataFrame:
     """Read a Binance historical-trades CSV into (ts, price, cex_volume)."""
-    return (
-        pl.read_csv(
-            path,
-            has_header=False,
-            new_columns=BINANCE_CSV_COLUMNS,
-        )
-        .select(
-            ts=pl.col("time").cast(pl.Datetime("us")).dt.replace_time_zone("UTC"),
-            price=pl.col("price"),
-            cex_volume=pl.col("quoteQty"),
-        )
+    return pl.read_csv(
+        path,
+        has_header=True,
+        new_columns=BINANCE_CSV_COLUMNS,
+    ).select(
+        ts=pl.col("time").cast(pl.Datetime("ms")).dt.replace_time_zone("UTC"),
+        price=pl.col("price"),
+        cex_volume=pl.col("quoteQty"),
     )
 
 
@@ -716,6 +760,7 @@ def resample_to_1hz(df: pl.DataFrame) -> pl.DataFrame:
             pl.col("price").mean().alias("price"),
             pl.col("cex_volume").sum().alias("volume_cex"),
         )
+        .upsample(time_column="ts", every="1s")
         .with_columns(
             pl.col("price").forward_fill(),
             pl.col("volume_cex").fill_null(0.0),
@@ -752,9 +797,10 @@ def prepare_arrays(
 def main():
     parser = argparse.ArgumentParser(description="RAmmStein DDQN trainer.")
     parser.add_argument(
-        "--trades", required=True,
+        "--trades",
+        required=True,
         help="Path to a Binance historical-trades CSV (no header, 7 cols: "
-             "trade_id, price, qty, quoteQty, time, isBuyerMaker, isBestMatch)."
+        "trade_id, price, qty, quoteQty, time, isBuyerMaker, isBestMatch).",
     )
     parser.add_argument("--output", default="results/rammstein", help="Output dir.")
     parser.add_argument("--mode", choices=["train", "eval"], default="train")
@@ -764,9 +810,13 @@ def main():
 
     print(f"[rammstein] Loading {args.trades}")
     df = load_trades(args.trades)
-    print(f"[rammstein] Loaded {len(df):,} 1Hz bars; precomputing OU params...")
+    print(f"[rammstein] Loaded {len(df):,} raw trades; resampling to 1Hz...")
     price, volume_cex, theta, mu, sigma = prepare_arrays(df)
-    print(f"[rammstein] OU params ready (median theta={float(np.median(theta)):.4f})")
+    print(
+        f"[rammstein] {len(price):,} 1Hz bars ready "
+        f"(median theta={float(np.median(theta)):.4f}, "
+        f"mean volume USD={float(np.mean(volume_cex)):.0f})"
+    )
 
     # Train / val / test split (Section V-A).
     n = len(price)
@@ -792,16 +842,20 @@ def main():
             num_episodes=args.episodes,
         )
         print("[rammstein] Evaluating on held-out test split...")
-        metrics = evaluate(
-            test_price,
-            test_vol,
-            test_theta,
-            test_mu,
-            test_sigma,
-            q_net,
-            PoolConfig(),
-            args.eval_episodes,
-        )
+        if args.eval_episodes > 0:
+            metrics = evaluate(
+                test_price,
+                test_vol,
+                test_theta,
+                test_mu,
+                test_sigma,
+                q_net,
+                PoolConfig(),
+                args.eval_episodes,
+            )
+        else:
+            print("[rammstein] Skipping eval (--eval-episodes=0)")
+            metrics = {}
     else:
         # Eval-only path: requires weights already saved to args.output.
         env = tf_py_environment.TFPyEnvironment(
@@ -820,16 +874,20 @@ def main():
         weights_path = os.path.join(args.output, "q_network_weights.npz")
         with np.load(weights_path) as data:
             q_net.set_weights([data[k] for k in data.files])
-        metrics = evaluate(
-            test_price,
-            test_vol,
-            test_theta,
-            test_mu,
-            test_sigma,
-            q_net,
-            PoolConfig(),
-            args.eval_episodes,
-        )
+        if args.eval_episodes > 0:
+            metrics = evaluate(
+                test_price,
+                test_vol,
+                test_theta,
+                test_mu,
+                test_sigma,
+                q_net,
+                PoolConfig(),
+                args.eval_episodes,
+            )
+        else:
+            print("[rammstein] Skipping eval (--eval-episodes=0)")
+            metrics = {}
 
     print("\n[rammstein] Headline metrics on test data:")
     for k, v in metrics.items():
