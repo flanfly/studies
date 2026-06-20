@@ -3,3 +3,5 @@
 *.zip filter=lfs diff=lfs merge=lfs -text
 *.parquet filter=lfs diff=lfs merge=lfs -text
 polarity/*.log filter=lfs diff=lfs merge=lfs -text
+
+q_network_weights.npz filter=lfs diff=lfs merge=lfs -text
