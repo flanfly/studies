@@ -2,6 +2,7 @@ import gymnasium as gym
 import polars as pl
 import polars_ols as pls
 import numpy as np
+import torch
 
 from typing import Optional
 from collections.abc import Iterable
@@ -9,7 +10,7 @@ from collections.abc import Iterable
 
 class UniswapCLMM(gym.Env):
 
-    def __init__(self, initial_price: float, folds: list[pl.DataFrame]):
+    def __init__(self, folds: list[pl.DataFrame]):
         # mu, theta and vol are backwards looking and don't include the row's own price
         assert all(
             column in fold.columns
@@ -19,7 +20,7 @@ class UniswapCLMM(gym.Env):
         assert len(folds) > 0
 
         self.folds = folds
-        self.fold_index = 0
+        self.fold_index = -1  # reset increments
         self.action_space = gym.spaces.Discrete(n=2)  # 0: do nothing, 1: rebalance
         self.observation_space = gym.spaces.Dict(
             {
@@ -52,14 +53,12 @@ class UniswapCLMM(gym.Env):
         self.fee = 0.0005  # 0.05%
         self.rebalance_cost = 2  # $2
         self.fee_fraction = 0.01  # we own 1% of the pools active liquidity
-        self.initial_price = initial_price
         self.capital = 10_000
         self.reward_scale = 1.0
 
         self.epsilon_floor = 0.05
         self.epsilon_decay = 0.9998
         self.epsilon = 1.0
-        self.active_bonus = 0.01
 
     def _observe(self):
         assert self.episode.height > 0
@@ -72,7 +71,7 @@ class UniswapCLMM(gym.Env):
         l = self.center * (1 - self.width)
         mu = row["mu"] if row["mu"] is not None else s
 
-        return {
+        ret = {
             "price_deviation": np.array([(s - c) / c], dtype=np.float32),
             "distance_to_edge": np.array([(s - l) / (u - l) * 2 - 1], dtype=np.float32),
             "mean_deviation": np.array([(mu - s) / s], dtype=np.float32),
@@ -98,6 +97,8 @@ class UniswapCLMM(gym.Env):
             ),
             "in_range": int(s >= l and s <= u),
         }
+        # print(ret)
+        return ret
 
     def _info(self):
 
@@ -112,8 +113,8 @@ class UniswapCLMM(gym.Env):
         super().reset(seed=seed)
 
         # select the next fold
-        self.episode = self.folds[self.fold_index]
         self.fold_index = (self.fold_index + 1) % len(self.folds)
+        self.episode = self.folds[self.fold_index]
 
         # skip the first trade
         self.center = self.episode["price"].first()
@@ -132,16 +133,17 @@ class UniswapCLMM(gym.Env):
         row = self.episode.row(0, named=True)
         reward = 0
 
-        # move the position to the last price
         new_gas = 0
+        new_fee = 0
+
+        # move the position to the last price
         if action == 1:
             new_gas = (self.fee * self.capital / 2) + self.rebalance_cost
             self.center = self.price
 
         # trade was within our range
         if observation["in_range"]:
-            reward += self.active_bonus * observation["in_range"]
-            new_fee = row["qty"] * row["price"] * self.fee_fraction * self.fee
+            new_fee += row["qty"] * row["price"] * self.fee_fraction * self.fee
             self.active_rows += 1
 
         reward += (new_fee - new_gas) / self.capital * self.reward_scale
@@ -150,13 +152,52 @@ class UniswapCLMM(gym.Env):
         self.episode = self.episode[1:]
         terminated = self.episode.height == 0
 
+        if terminated:
+            next_observation = observation
+        else:
+            next_observation = self._observe()
+
         # update counters
         self.fees += new_fee
         self.gas += new_gas
         self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_floor)
         self.price = row["price"]
 
-        return observation, reward, terminated, False, self._info()
+        return next_observation, reward, terminated, False, self._info()
+
+
+class Experience:
+    def __init__(self, capacity, observation_dim):
+        self.capacity = capacity
+        self.ptr = 0
+        self.size = 0
+
+        # ring buffer
+        self.observations = np.empty((capacity, observation_dim), dtype=np.float32)
+        self.actions = np.empty((capacity, 1), dtype=np.int64)
+        self.rewards = np.empty((capacity, 1), dtype=np.float32)
+        self.next_observations = np.empty((capacity, observation_dim), dtype=np.float32)
+        self.terminated = np.empty((capacity, 1), dtype=np.bool)
+
+    def add(self, o, a, r, o_next, t):
+        self.observations[self.ptr] = o
+        self.actions[self.ptr] = a
+        self.rewards[self.ptr] = r
+        self.next_observations[self.ptr] = o_next
+        self.terminated[self.ptr] = t
+
+        self.ptr = (self.ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(self, batch_size):
+        idx = np.random.randint(0, self.size, size=min(self.size, batch_size))
+        return (
+            torch.as_tensor(self.observations[idx]),
+            torch.as_tensor(self.actions[idx]),
+            torch.as_tensor(self.rewards[idx]),
+            torch.as_tensor(self.next_observations[idx]),
+            torch.as_tensor(self.terminated[idx]),
+        )
 
 
 def make_folds(df: pl.DataFrame, fold_size: int = 36_000) -> Iterable[pl.DataFrame]:
@@ -247,14 +288,17 @@ gym.register(
 def train():
     from tqdm import tqdm
     from math import floor
+    import matplotlib.pyplot as plt
+    from torch import nn
+    from torch import optim
+    from random import sample
+    from gymnasium.wrappers import FlattenObservation
+    from copy import deepcopy
 
     print("loading data...")
     df = pl.read_csv("../BTCUSDT-all-trades.csv")
     folds = list(
-        tqdm(
-            [from_binance(df) for df in make_folds(df)],
-            desc="Preprocessing folds",
-        )
+        [from_binance(df) for df in make_folds(df)],
     )
 
     train_len = floor(len(folds) * 0.7)
@@ -268,27 +312,107 @@ def train():
 
     print(f"train {len(train)} rows, val {len(val)} rows, test {len(test)} rows")
 
-    env = gym.make("UniswapCLMM-v0", initial_price=60_000, folds=folds)
+    env = FlattenObservation(gym.make("UniswapCLMM-v0", folds=folds))
+
+    # epsilon = 1.0
+
+    policy = nn.Sequential(
+        nn.Linear(env.observation_space.shape[0], 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, env.action_space.n),
+    )
+
+    opt = optim.SGD(policy.parameters(), lr=0.0001)
+    loss = nn.MSELoss()
+
+    target = deepcopy(policy)
+    target.load_state_dict(policy.state_dict())
+    target.eval()
+
+    frag = []
+    replay_memory = Experience(100_000, env.observation_space.shape[0])
+    steps = 0
+
+    gamma = 0.99
+    epsilon = 1.0
+    epsilon_floor = 0.05
+    epsilon_decay = 0.9998
+    episode_loss = None
 
     for episode in tqdm(range(len(train)), desc="training"):
         observation, info = env.reset()
-        print(f"Starting observation: {observation}")
 
         episode_over = False
         total_reward = 0
 
         while not episode_over:
-            action = env.action_space.sample()
+            if torch.rand(()).item() < epsilon:
+                action = env.action_space.sample()
+            else:
+                with torch.no_grad():
+                    action = (
+                        policy.forward(torch.tensor(observation, dtype=torch.float32))
+                        .argmax(dim=-1)
+                        .item()
+                    )
 
-            observation, reward, terminated, truncated, info = env.step(action)
+            next_observation, reward, terminated, truncated, info = env.step(action)
+
+            replay_memory.add(observation, action, reward, next_observation, terminated)
+            recall = replay_memory.sample(128)
+
+            y = recall[2]  # rewards
+
+            # y = r + gamma * max_a'[ Q(observation_{t+1}, a', w-) ]
+            with torch.no_grad():
+                q = torch.max(target.forward(recall[3]), dim=1).values
+            y += gamma * q.unsqueeze(-1) * (1 - recall[4].float())  # terminated
+
+            opt.zero_grad()
+
+            # (y - Q(observation_t, a, w))^2
+            error = loss(policy.forward(recall[0]).gather(1, recall[1]), y)
+            error.backward()
+
+            episode_loss = error.mean()
+
+            opt.step()
+
+            if steps % 100 == 0:
+                target.load_state_dict(policy.state_dict())
 
             total_reward += reward
             episode_over = terminated or truncated
+            steps += 1
 
-        print(f"Episode finished! Total reward: {total_reward}")
-        print(info)
-        print(f'pnl {info["fees"] - info["gas"]}')
-        env.close()
+        epsilon = max(epsilon * epsilon_decay, epsilon_floor)
+        frag.append(
+            {
+                "episode": episode,
+                "fees": info["fees"],
+                "gas": info["gas"],
+                "loss": episode_loss.item() if episode_loss is not None else 0.0,
+                "pnl": info["fees"] - info["gas"],
+                "reward": total_reward,
+            }
+        )
+
+        print(
+            f"episode {frag[-1]['episode']}: fees={frag[-1]['fees']:.2f}, gas={frag[-1]['gas']:.2f}, pnl={frag[-1]['pnl']:.2f}"
+        )
+
+    env.close()
+
+    (
+        pl.DataFrame(frag)
+        .sort("episode")
+        .to_pandas()
+        .plot(x="episode", y=["pnl", "loss"], secondary_y=["loss"])
+    )
+
+    plt.show()
 
 
 if __name__ == "__main__":
