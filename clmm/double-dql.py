@@ -54,7 +54,7 @@ class UniswapCLMM(gym.Env):
         self.rebalance_cost = 2  # $2
         self.fee_fraction = 0.01  # we own 1% of the pools active liquidity
         self.capital = 10_000
-        self.reward_scale = 1.0
+        self.reward_scale = 10_000.0
 
         self.epsilon_floor = 0.05
         self.epsilon_decay = 0.9998
@@ -131,7 +131,6 @@ class UniswapCLMM(gym.Env):
     def step(self, action):
         observation = self._observe()
         row = self.episode.row(0, named=True)
-        reward = 0
 
         new_gas = 0
         new_fee = 0
@@ -146,7 +145,7 @@ class UniswapCLMM(gym.Env):
             new_fee += row["qty"] * row["price"] * self.fee_fraction * self.fee
             self.active_rows += 1
 
-        reward += (new_fee - new_gas) / self.capital * self.reward_scale
+        reward = (new_fee - new_gas) / self.capital * self.reward_scale
 
         # Advance to next state (t+1)
         self.episode = self.episode[1:]
@@ -314,8 +313,6 @@ def train():
 
     env = FlattenObservation(gym.make("UniswapCLMM-v0", folds=folds))
 
-    # epsilon = 1.0
-
     policy = nn.Sequential(
         nn.Linear(env.observation_space.shape[0], 128),
         nn.ReLU(),
@@ -361,24 +358,26 @@ def train():
             next_observation, reward, terminated, truncated, info = env.step(action)
 
             replay_memory.add(observation, action, reward, next_observation, terminated)
-            recall = replay_memory.sample(128)
 
-            y = recall[2]  # rewards
+            if replay_memory.size >= 128:
+                recall = replay_memory.sample(128)
 
-            # y = r + gamma * max_a'[ Q(observation_{t+1}, a', w-) ]
-            with torch.no_grad():
-                q = torch.max(target.forward(recall[3]), dim=1).values
-            y += gamma * q.unsqueeze(-1) * (1 - recall[4].float())  # terminated
+                y = recall[2]  # rewards
 
-            opt.zero_grad()
+                # y = r + gamma * max_a'[ Q(observation_{t+1}, a', w-) ]
+                with torch.no_grad():
+                    q = torch.max(target.forward(recall[3]), dim=1).values
+                y += gamma * q.unsqueeze(-1) * (1 - recall[4].float())  # terminated
 
-            # (y - Q(observation_t, a, w))^2
-            error = loss(policy.forward(recall[0]).gather(1, recall[1]), y)
-            error.backward()
+                opt.zero_grad()
 
-            episode_loss = error.mean()
+                # (y - Q(observation_t, a, w))^2
+                error = loss(policy.forward(recall[0]).gather(1, recall[1]), y)
+                error.backward()
 
-            opt.step()
+                episode_loss = error.mean()
+
+                opt.step()
 
             if steps % 100 == 0:
                 target.load_state_dict(policy.state_dict())
