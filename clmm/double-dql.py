@@ -366,7 +366,9 @@ def train():
 
                 # y = r + gamma * max_a'[ Q(observation_{t+1}, a', w-) ]
                 with torch.no_grad():
-                    q = torch.max(target.forward(recall[3]), dim=1).values
+                    best_actions = policy.forward(recall[3]).argmax(dim=1, keepdim=True)
+                    q = target.forward(recall[3]).gather(1, best_actions).squeeze(-1)
+
                 y += gamma * q.unsqueeze(-1) * (1 - recall[4].float())  # terminated
 
                 opt.zero_grad()
