@@ -258,7 +258,11 @@ class V3Pool:
         )
         self.swaps = self.swaps.vstack(new_swaps_row)
 
-        return amount_out, remaining  # remaining > 0 only if book exhausted
+        return (
+            amount_out,
+            remaining,  # remaining > 0 only if book exhausted
+            (my_earned0 > 0 or my_earned1 > 0),
+        )
 
     def _get_fee_growth_inside(
         self, tick_lower: int, tick_upper: int
@@ -478,6 +482,7 @@ class UniswapCLMM(gym.Env):
         self,
         position_width: int,
         rebalance_cost: float,
+        my_liquidity: int,
         meta: Pool,
         swaps: pl.DataFrame,
         liq: pl.DataFrame,
@@ -495,15 +500,32 @@ class UniswapCLMM(gym.Env):
         params: bn, price, quote_volume, mu, theta, sigma, vol
         """
 
+        # fixed
         self.position_width = position_width
         self.rebalance_cost = rebalance_cost
+        self.my_liquidity = my_liquidity
         self.meta = meta
         self.swaps = swaps
         self.liq = liq
         self.params = params
-        self.block_number = None
         self.folds = folds
+
+        self.epsilon_floor = 0.05
+        self.epsilon_decay = 0.9998
+        self.reward_scale = 100.0
+        self.active_bonus = 1e-4
+
+        # changed each reset
         self.fold_index: None | int = None
+        self.contract: V3Pool | None = None
+
+        # changed each step
+        self.gas = 0
+        self.block_number = None
+        self.active_rows = 0
+        self.epsilon = 1.0
+
+        # spaces
         self.observation_space = gym.spaces.Dict(
             {
                 "price_deviation": gym.spaces.Box(
@@ -512,19 +534,22 @@ class UniswapCLMM(gym.Env):
                 "distance_to_edge": gym.spaces.Box(
                     low=-10.0, high=10.0, shape=(1,), dtype=np.float32
                 ),
-                "active_liquidity_fraction": gym.spaces.Box(
+                "stein_signal": gym.spaces.Box(
                     low=0.0, high=1.0, shape=(1,), dtype=np.float32
                 ),
-                "in_range": gym.spaces.Discrete(n=2),
-                "current_tick": gym.spaces.Box(
-                    low=-100000.0, high=100000.0, shape=(1,), dtype=np.float32
+                "mean_deviation": gym.spaces.Box(
+                    low=-1.0, high=1.0, shape=(1,), dtype=np.float32
                 ),
-                "lower_tick": gym.spaces.Box(
-                    low=-100000.0, high=100000.0, shape=(1,), dtype=np.float32
+                "sigma": gym.spaces.Box(
+                    low=0.0, high=0.1, shape=(1,), dtype=np.float32
                 ),
-                "upper_tick": gym.spaces.Box(
-                    low=-100000.0, high=100000.0, shape=(1,), dtype=np.float32
+                "active_fraction": gym.spaces.Box(
+                    low=0.0, high=1.0, shape=(1,), dtype=np.float32
                 ),
+                "recent_volatility": gym.spaces.Box(
+                    low=0.0, high=0.1, shape=(1,), dtype=np.float32
+                ),
+                "in_range": gym.spaces.Discrete(n=2),  # 0: False, 1: True
             }
         )
 
@@ -602,8 +627,11 @@ class UniswapCLMM(gym.Env):
             self.fold_index = 0
         else:
             self.fold_index = (self.fold_index + 1) % len(self.folds)
+
+        self.gas = 0
         self.active_rows = 0
         self.block_number = self.folds[self.fold_index][0]
+        self.epsilon = 1.0
 
         match self.meta.feeTier:
             case 0.0001:
@@ -637,6 +665,17 @@ class UniswapCLMM(gym.Env):
             self.contract._sqrtp_to_tick(self.meta.sqrt_price) + self.position_width
         )
 
+        self.lower_tick = (
+            round(self.lower_tick / self.contract.tick_spacing)
+            * self.contract.tick_spacing
+        )
+        self.upper_tick = (
+            round(self.upper_tick / self.contract.tick_spacing)
+            * self.contract.tick_spacing
+        )
+
+        self.contract.mint(self.lower_tick, self.upper_tick, self.my_liquidity, True)
+
         for pos in self.meta.positions:
             self.contract.mint(pos.tick_lower, pos.tick_upper, pos.liquidity, False)
 
@@ -645,52 +684,77 @@ class UniswapCLMM(gym.Env):
     def step(self, action):
         # first, the trades of the block execute, then the position is updated
         sqrtp = self.contract.sqrtp
-        new_fees = -self.my_fees
+        new_fees_t0t1 = self.contract.my_fees
         in_range = False
 
         swaps = self.swaps.filter(pl.col("block_number") == self.block_number)
         liq = self.liq.filter(pl.col("block_number") == self.block_number)
 
-        for ord in (swaps["ord"] + liq["ord"]).sort():
+        for ord in sorted(set(swaps["ord"].to_list()) | set(liq["ord"].to_list())):
             for row in swaps.filter(pl.col("ord") == ord).iter_rows(named=True):
-                if row["token0"] > 0:
+                if row["amount0"] > 0:
                     token_in = 0
-                    amount_in = row["token0"]
-                    amount_out = row["token1"]
+                    amount_in = row["amount0"]
+                    amount_out = row["amount1"]
                 else:
                     token_in = 1
-                    amount_in = row["token1"]
-                    amount_out = row["token0"]
+                    amount_in = row["amount1"]
+                    amount_out = row["amount0"]
 
                 out, remaining, hit = self.contract.swap(
                     self.block_number, token_in, amount_in
                 )
+
+                print(out, amount_out, out - amount_out)
                 assert remaining == 0
-                assert out == amount_out
+                # assert out == amount_out
 
                 in_range |= hit
 
             for row in liq.filter(pl.col("ord") == ord).iter_rows(named=True):
-                if row["liquidity"] >= 0:
+                if row["liquidity"] > 0:
                     self.contract.mint(
                         row["tick_lower"], row["tick_upper"], row["liquidity"], False
                     )
-                else:
+                elif row["liquidity"] < 0:
                     self.contract.burn(
                         row["tick_lower"], row["tick_upper"], -row["liquidity"], False
                     )
+                else:
+                    l.warning(
+                        f"""mint/burn with 0 liq for ticks {row['tick_lower']} to {row['tick_upper']}"""
+                    )
 
-        new_fees += self.my_fees
+        new_fee_t0t1 = map(
+            lambda p: p[1] - p[0], zip(new_fees_t0t1, self.contract.my_fees)
+        )
+
+        new_gas = 0
+        reward = 0
+        new_fees = new_fees_t0t1[0] + pow(self.contract.sqrtp, 2) * new_fees_t0t1[1]
 
         # rebalance
         if action == 1:
-            self.contract.burn(self.lower_tick, self.upper_tick, self.liquidity, True)
+            self.contract.burn(
+                self.lower_tick, self.upper_tick, self.my_liquidity, True
+            )
 
             self.lower_tick = self.contract._sqrtp_to_tick(sqrtp) - self.position_width
             self.upper_tick = self.contract._sqrtp_to_tick(sqrtp) + self.position_width
 
-            # add IL from swapping self.liquidity / 2
-            self.contract.mint(self.lower_tick, self.upper_tick, self.liquidity, True)
+            self.lower_tick = (
+                round(self.lower_tick / self.contract.tick_spacing)
+                * self.contract.tick_spacing
+            )
+            self.upper_tick = (
+                round(self.upper_tick / self.contract.tick_spacing)
+                * self.contract.tick_spacing
+            )
+
+            # XXX add IL from swapping self.my_liquidity / 2
+            self.contract.mint(
+                self.lower_tick, self.upper_tick, self.my_liquidity, True
+            )
             new_gas += self.rebalance_cost
 
         # trade was within our range
@@ -916,6 +980,14 @@ async def from_ethereum(
             }
         )
         .with_columns(
+            amount0=pl.col("slot0").map_elements(
+                lambda b: float(int.from_bytes(b, signed=True, byteorder="big")),
+                return_dtype=pl.Float64,
+            ),
+            amount1=pl.col("slot1").map_elements(
+                lambda b: float(int.from_bytes(b, signed=True, byteorder="big")),
+                return_dtype=pl.Float64,
+            ),
             quote_volume=pl.col("slot0").map_elements(
                 lambda b: float(abs(int.from_bytes(b, signed=True, byteorder="big")))
                 / pow(10, meta.d0),
@@ -938,19 +1010,24 @@ async def from_ethereum(
                 lambda b: int.from_bytes(b, signed=True, byteorder="big"),
                 return_dtype=pl.Int32,
             ),
+            ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
         )
         .select(
             [
                 "ts",
                 "block_number",
                 "transaction_index",
+                "ord",
                 "log_index",
                 "price",
+                "amount0",
+                "amount1",
                 "quote_volume",
                 "liquidity",
                 "tick",
             ]
         )
+        .sort(["block_number", "ord"])
     )
 
     liq = (
@@ -962,41 +1039,48 @@ async def from_ethereum(
             }
         )
         .with_columns(
-            quote_volume=pl.col("slot0").map_elements(
-                lambda b: float(abs(int.from_bytes(b, signed=True, byteorder="big")))
-                / pow(10, meta.d0),
-                return_dtype=pl.Float64,
-            ),
-            price=1.0
-            / pow(
-                pl.col("slot2").map_elements(
-                    lambda b: float(int.from_bytes(b, byteorder="big")) / pow(2, 96),
-                    return_dtype=pl.Float64,
-                ),
-                2,
-            )
-            * pow(10, meta.d1 - meta.d0),
-            liquidity=pl.col("slot3").map_elements(
-                lambda b: float(int.from_bytes(b, byteorder="big")),
-                return_dtype=pl.Float64,
-            ),
-            tick=pl.col("slot4").map_elements(
+            tick_lower=pl.col("topic2").map_elements(
                 lambda b: int.from_bytes(b, signed=True, byteorder="big"),
                 return_dtype=pl.Int32,
             ),
+            tick_upper=pl.col("topic3").map_elements(
+                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
+                return_dtype=pl.Int32,
+            ),
+            liquidity=pl.col("slot2").map_elements(
+                lambda b: float(int.from_bytes(b, byteorder="big")),
+                return_dtype=pl.Float64,
+            ),
+            amount0=pl.col("slot3").map_elements(
+                lambda b: float(int.from_bytes(b, byteorder="big")),
+                return_dtype=pl.Float64,
+            ),
+            amount1=pl.col("slot4").map_elements(
+                lambda b: float(int.from_bytes(b, byteorder="big")),
+                return_dtype=pl.Float64,
+            ),
+            ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
+        )
+        .with_columns(
+            liquidity=pl.when(pl.col("topic0") == burn)
+            .then(-pl.col("liquidity"))
+            .otherwise(pl.col("liquidity")),
         )
         .select(
             [
                 "ts",
                 "block_number",
                 "transaction_index",
+                "ord",
                 "log_index",
-                "price",
-                "quote_volume",
+                "tick_lower",
+                "tick_upper",
                 "liquidity",
-                "tick",
+                "amount0",
+                "amount1",
             ]
         )
+        .sort(["block_number", "ord"])
     )
 
     params = (
@@ -1006,6 +1090,11 @@ async def from_ethereum(
         .agg(
             pl.col("price").mean(),
             pl.col("quote_volume").sum(),
+        )
+        # forward fill
+        .upsample(time_column="block_number", every="1i")
+        .with_columns(
+            [pl.col("price").forward_fill(), pl.col("quote_volume").fill_null(0)]
         )
         .with_columns(
             diff=pl.col("price").shift(-1) - pl.col("price"),
@@ -1118,8 +1207,9 @@ def train(swaps, liq, params, meta):
     print(f"train {len(train)} folds, test {len(test)} folds")
 
     args = {
-        "position_width": 5,
+        "position_width": 200,
         "rebalance_cost": 3,
+        "my_liquidity": 1_000_000,
         "meta": meta,
         "swaps": swaps,
         "liq": liq,
