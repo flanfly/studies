@@ -43,7 +43,7 @@ class Tick:
 
 
 @dataclass()
-class Position:
+class LiquidityPosition:
     liquidity: int
     feeGrowthInside0Last: float
     feeGrowthInside1Last: float
@@ -113,7 +113,7 @@ class V3Pool:
         self.fee_growth_global = [0.0, 0.0]  # per L
 
         # Initialize positions and tick fee growth
-        self.positions: dict[tuple[int, int, bool], Position] = {}
+        self.positions: dict[tuple[int, int, bool], LiquidityPosition] = {}
 
         import math
 
@@ -349,7 +349,7 @@ class V3Pool:
         position_key = (tick_lower, tick_upper, mine)
         fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
         if position_key not in self.positions:
-            self.positions[position_key] = Position(
+            self.positions[position_key] = LiquidityPosition(
                 liquidity=0,
                 feeGrowthInside0Last=fi0,
                 feeGrowthInside1Last=fi1,
@@ -440,7 +440,7 @@ class V3Pool:
 
     @staticmethod
     def _sqrtp_to_tick(sqrtp: float) -> float:
-        return np.floor(np.log(sqrtp) / np.log(1.0001) * 2)
+        return np.floor(np.log(float(sqrtp)) / np.log(1.0001) * 2)
 
 
 @dataclass(frozen=True)
@@ -500,6 +500,10 @@ class UniswapCLMM(gym.Env):
         self.meta = meta
         self.swaps = swaps
         self.liq = liq
+        self.params = params
+        self.block_number = None
+        self.folds = folds
+        self.fold_index: None | int = None
         self.observation_space = gym.spaces.Dict(
             {
                 "price_deviation": gym.spaces.Box(
@@ -528,14 +532,22 @@ class UniswapCLMM(gym.Env):
 
     def _observe(self):
         p = self.params.filter(pl.col("block_number") == self.block_number)
+        print(p)
+
         assert p.height == 1
+        assert self.fold_index != None
 
         row = p.row(0, named=True)
 
         s = row["price"]
-        u = pow(self.contract._tick_to_sqrt(self.upper_tick), 2)
-        l = pow(self.contract._tick_to_sqrt(self.lower_tick), 2)
+        u = pow(self.contract._tick_to_sqrtp(self.upper_tick), 2)
+        l = pow(self.contract._tick_to_sqrtp(self.lower_tick), 2)
+        c = l + (u - l) / 2
         mu = row["mu"] if row["mu"] is not None and not np.isnan(row["mu"]) else s
+
+        fold = self.folds[self.fold_index]
+        numblks = len(fold)
+        remblks = fold[-1] - self.block_number
 
         ret = {
             "price_deviation": np.array([(s - c) / c], dtype=np.float32),
@@ -550,14 +562,7 @@ class UniswapCLMM(gym.Env):
                 dtype=np.float32,
             ),
             "active_fraction": np.array(
-                [
-                    (
-                        self.active_rows
-                        / (self.folds[self.fold_index].height - self.episode.height)
-                        if self.folds[self.fold_index].height != self.episode.height
-                        else 0
-                    )
-                ],
+                [self.active_rows / (numblks - remblks) if numblks != remblks else 0],
                 dtype=np.float32,
             ),
             "recent_volatility": np.array(
@@ -593,6 +598,13 @@ class UniswapCLMM(gym.Env):
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
 
+        if self.fold_index == None:
+            self.fold_index = 0
+        else:
+            self.fold_index = (self.fold_index + 1) % len(self.folds)
+        self.active_rows = 0
+        self.block_number = self.folds[self.fold_index][0]
+
         match self.meta.feeTier:
             case 0.0001:
                 protocol_fraction = 0.25
@@ -618,8 +630,17 @@ class UniswapCLMM(gym.Env):
             protocol_fraction,
         )
 
+        self.lower_tick = (
+            self.contract._sqrtp_to_tick(self.meta.sqrt_price) - self.position_width
+        )
+        self.upper_tick = (
+            self.contract._sqrtp_to_tick(self.meta.sqrt_price) + self.position_width
+        )
+
         for pos in self.meta.positions:
             self.contract.mint(pos.tick_lower, pos.tick_upper, pos.liquidity, False)
+
+        return self._observe(), self._info()
 
     def step(self, action):
         # first, the trades of the block execute, then the position is updated
@@ -627,8 +648,8 @@ class UniswapCLMM(gym.Env):
         new_fees = -self.my_fees
         in_range = False
 
-        swaps = self.swaps.filter(pl.col("block_number") == self.bn)
-        liq = self.liq.filter(pl.col("block_number") == self.bn)
+        swaps = self.swaps.filter(pl.col("block_number") == self.block_number)
+        liq = self.liq.filter(pl.col("block_number") == self.block_number)
 
         for ord in (swaps["ord"] + liq["ord"]).sort():
             for row in swaps.filter(pl.col("ord") == ord).iter_rows(named=True):
@@ -641,7 +662,9 @@ class UniswapCLMM(gym.Env):
                     amount_in = row["token1"]
                     amount_out = row["token0"]
 
-                out, remaining, hit = self.contract.swap(self.bn, token_in, amount_in)
+                out, remaining, hit = self.contract.swap(
+                    self.block_number, token_in, amount_in
+                )
                 assert remaining == 0
                 assert out == amount_out
 
@@ -1019,6 +1042,7 @@ async def from_ethereum(
         )
         .select(
             pl.col("ts"),
+            pl.col("block_number"),
             pl.col("price"),
             pl.col("quote_volume").alias("qty"),
             pl.col("mu").shift(1),
@@ -1036,8 +1060,8 @@ async def from_ethereum(
     )
 
     return (
-        swaps,
-        liq,
+        swaps.join(params.select("block_number"), on="block_number"),
+        liq.join(params.select("block_number"), on="block_number"),
         params,
         meta,
     )
@@ -1063,8 +1087,16 @@ def train(swaps, liq, params, meta):
     torch.manual_seed(42)
     random.seed(42)
 
-    first_bn = min(swaps["block_number"].min(), liq["block_number"].min())
-    last_bn = max(swaps["block_number"].max(), liq["block_number"].max())
+    first_bn = min(
+        swaps["block_number"].min(),
+        liq["block_number"].min(),
+        params["block_number"].min(),
+    )
+    last_bn = max(
+        swaps["block_number"].max(),
+        liq["block_number"].max(),
+        params["block_number"].max(),
+    )
 
     block_range = list(range(first_bn, last_bn + 1))
     blen = len(block_range)
