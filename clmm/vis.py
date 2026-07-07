@@ -237,7 +237,7 @@ events_df = df.filter(pl.col("topic0").is_in([swap, mint, burn])).with_columns(
 
 # Setup timeline binning (Fix 7)
 N_bins = 1500 * 2  # Horizontal time resolution
-M = 800 * 2  # Vertical price resolution
+M = 800 * 3  # Vertical price resolution
 
 # Find timeline range from actual swap events
 swaps_df = events_df.filter(pl.col("topic0") == swap)
@@ -328,14 +328,9 @@ print(
     f"Validation Mismatches: {mismatch_count} / {total_swaps} ({(mismatch_count/total_swaps*100.0 if total_swaps > 0 else 0.0):.2f}%)"
 )
 
-# Define the vertical price grid (y-axis) based on historical price range
-# Exclude 0.0 fallback prices from range calculation
-valid_prices = binned_prices[binned_prices > 0]
-if len(valid_prices) > 0:
-    min_price = valid_prices.min() * 0.99
-    max_price = valid_prices.max() * 1.01
-else:
-    min_price, max_price = 1800.0, 2200.0
+# Define the vertical price range to exactly 500 to 3000 (Fix 7)
+min_price = 500.0
+max_price = 3000.0
 
 prices_grid = np.linspace(min_price, max_price, M)
 
@@ -361,13 +356,17 @@ for j in range(N_bins):
     tick_liquidity = []
     for tick in sorted_ticks:
         cum_liq += ticks_dict[tick]
-        tick_liquidity.append(cum_liq)
+        tick_liquidity.append(max(0, cum_liq))
+
+    total_pool_liq = sum(tick_liquidity)
 
     # Find active liquidity for each price level using fast binary search
     for i, T in enumerate(ticks_grid):
         tick_idx = bisect.bisect_right(sorted_ticks, T) - 1
-        if tick_idx >= 0:
-            liquidity_grid[i, j] = float(tick_liquidity[tick_idx])
+        if tick_idx >= 0 and total_pool_liq > 0:
+            liquidity_grid[i, j] = (
+                float(tick_liquidity[tick_idx]) / total_pool_liq
+            ) * 100.0
         else:
             liquidity_grid[i, j] = 0.0
 
@@ -378,10 +377,14 @@ grid[grid <= 0] = np.nan
 # Define robust norm bounds to prevent floating residue from shrinking the range (Fix 3)
 valid_vals = grid[~np.isnan(grid)]
 if len(valid_vals) > 0:
-    vmin = np.nanpercentile(valid_vals, 2)
+    vmin = max(0.001, np.nanpercentile(valid_vals, 2))
     vmax = np.nanmax(valid_vals)
 else:
-    vmin, vmax = 1.0, 10.0
+    vmin, vmax = 0.01, 100.0
+
+# Ensure log-norm is happy
+vmin = max(vmin, 1e-4)
+vmax = max(vmax, vmin * 10)
 
 norm = colors.LogNorm(vmin=vmin, vmax=vmax)
 
@@ -422,11 +425,14 @@ ax.set_ylabel("Price (USDC per ETH)", fontsize=12, color="white")
 ax.tick_params(colors="white", which="both")
 ax.grid(True, linestyle="--", color="#444444", alpha=0.4)
 
-# Colorbar for active liquidity depth
-cbar = fig.colorbar(pcm, ax=ax, pad=0.02)
+# Colorbar for active liquidity depth formatted as percentage
+cbar = fig.colorbar(pcm, ax=ax, pad=0.02, format=ticker.PercentFormatter(xmax=100.0))
 cbar.ax.yaxis.set_tick_params(color="white")
 cbar.set_label(
-    "Absolute Active Liquidity ($L$)", fontsize=12, color="white", labelpad=10
+    "Active Liquidity (% of Pool's Current Active Liquidity)",
+    fontsize=12,
+    color="white",
+    labelpad=10,
 )
 plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="white")
 
