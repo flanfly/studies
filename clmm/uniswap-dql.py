@@ -8,21 +8,19 @@ import torch
 
 import asyncio
 from httpx import AsyncClient
-
+from sgqlc.endpoint.base import BaseEndpoint
+from httpx import AsyncClient
 
 from typing import Optional, Dict, Any, Literal, Tuple
 from collections.abc import Iterable
 from dataclasses import dataclass
-
-from sgqlc.endpoint.base import BaseEndpoint
-from httpx import AsyncClient
+from bisect import bisect_right
+from functools import lru_cache
 
 import sys
 from dotenv import load_dotenv
 import logging as l
 from tqdm.contrib.logging import logging_redirect_tqdm
-
-from bisect import bisect_right
 
 load_dotenv()
 
@@ -32,6 +30,10 @@ l.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stderr,
 )
+
+
+def close(a, b, rtol=np.finfo(np.float32).eps) -> bool:
+    return abs(a - b) <= max(abs(a), abs(b), 1) * rtol
 
 
 @dataclass()
@@ -58,6 +60,7 @@ class V3Pool:
     def __init__(
         self,
         sqrtp: float,
+        tick: int,
         liquidity: int,
         ticks: dict[int, Tick],
         tick_spacing: int,
@@ -81,7 +84,7 @@ class V3Pool:
         # updated by swap
         self.sqrtp = sqrtp
         self.liquidity = liquidity
-        self.tick = self._sqrtp_to_tick(sqrtp)
+        self.tick = tick
 
         self.seen_block: dict[int, int] = {}
 
@@ -141,6 +144,7 @@ class V3Pool:
             # 1. boundary: nearest initialized tick in trade direction,
             #    from EXPLICIT tick state (not re-derived from sqrtp)
             i = bisect_right(self.tick_keys, self.tick)
+
             if going_up:
                 boundary = (
                     self.tick_keys[i] if i < len(self.tick_keys) else self.MAX_TICK
@@ -153,26 +157,41 @@ class V3Pool:
             if self.liquidity > 0:
                 # 2. net budget (ratio-scaled, per iteration)
                 net = remaining * (1 - self.fee_tier)
-                # 3.+4. candidate destination, clamped at the boundary
+                # 3.+4.+5. destination and amounts, cancellation-free in the unclamped branch
                 if going_up:
-                    goal = s + net / self.liquidity
-                    s_next = min(goal, s_target)
+                    ds = net / self.liquidity
+                    s_next = s + ds
+                    hit_boundary = s_next >= s_target
+                    if hit_boundary:
+                        s_next = s_target
+                        d = s_next - s  # genuine span → safe
+                        step_in = self.liquidity * d  # dy
+                        step_out = self.liquidity * d / (s * s_next)  # dx
+                    else:
+                        step_in = net  # exact by construction
+                        step_out = net / (s * s_next)
                 else:
-                    goal = (self.liquidity * s) / (self.liquidity + net * s)
-                    s_next = max(goal, s_target)
-                # 5. amounts off the interval [s, s_next]
-                if going_up:
-                    step_in = self.liquidity * (s_next - s)  # dy
-                    step_out = self.liquidity * (s_next - s) / (s * s_next)  # dx
-                else:
-                    step_in = self.liquidity * (s - s_next) / (s * s_next)  # dx
-                    step_out = self.liquidity * (s - s_next)  # dy
+                    denom = self.liquidity + net * s
+                    s_goal = self.liquidity * s / denom
+                    hit_boundary = s_goal <= s_target
+                    if hit_boundary:
+                        s_next = s_target
+                        d = s - s_next
+                        step_in = self.liquidity * d / (s * s_next)  # dx
+                        step_out = self.liquidity * d  # dy
+                    else:
+                        s_next = s_goal
+                        step_in = net
+                        step_out = (
+                            self.liquidity * net * s * s / denom
+                        )  # = L·(s − s_goal), no subtraction
+
                 # 6. fee, by branch
-                hit_boundary = s_next == s_target
-                if hit_boundary and s_next != goal:
+                if hit_boundary:
                     fee_amt = step_in * self.fee_tier / (1 - self.fee_tier)  # gross-up
                 else:
-                    fee_amt = remaining - step_in  # remainder
+                    fee_amt = remaining - net  # = remaining · fee_tier
+
                 # 7. bookkeeping
                 dao = fee_amt * self.protocol_fraction
                 self.protocol_fees[token_in] += dao
@@ -306,15 +325,20 @@ class V3Pool:
 
         return fi0, fi1
 
-    def mint(self, tick_lower: int, tick_upper: int, amount: int, mine: bool) -> None:
+    def mint(
+        self, tick_lower: int, tick_upper: int, amount: int, mine: bool
+    ) -> Tuple[float, float]:
         assert tick_lower < tick_upper
         assert tick_lower % self.tick_spacing == 0
         assert tick_upper % self.tick_spacing == 0
-        assert amount > 0
 
         import math
 
         current_tick = int(math.floor(self.tick + 1e-9))
+
+        amount0, amount1 = self._amounts_for_liquidity(
+            self.sqrtp, current_tick, tick_lower, tick_upper, amount
+        )
 
         # Update tick_lower
         if tick_lower not in self.ticks:
@@ -352,38 +376,37 @@ class V3Pool:
         # Update position
         position_key = (tick_lower, tick_upper, mine)
         fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
-        if position_key not in self.positions:
-            self.positions[position_key] = LiquidityPosition(
-                liquidity=0,
-                feeGrowthInside0Last=fi0,
-                feeGrowthInside1Last=fi1,
-                tokensOwed0=0.0,
-                tokensOwed1=0.0,
-            )
 
-        pos = self.positions[position_key]
-        fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
-        fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
-        pos.tokensOwed0 += fees0
-        pos.tokensOwed1 += fees1
-        pos.feeGrowthInside0Last = fi0
-        pos.feeGrowthInside1Last = fi1
-        pos.liquidity += amount
+        if mine:
+            if position_key not in self.positions:
+                self.positions[position_key] = LiquidityPosition(
+                    liquidity=0,
+                    feeGrowthInside0Last=fi0,
+                    feeGrowthInside1Last=fi1,
+                    tokensOwed0=0.0,
+                    tokensOwed1=0.0,
+                )
+
+            pos = self.positions[position_key]
+            fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
+            fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
+            pos.tokensOwed0 += fees0
+            pos.tokensOwed1 += fees1
+            pos.feeGrowthInside0Last = fi0
+            pos.feeGrowthInside1Last = fi1
+            pos.liquidity += amount
 
         # Update active pool liquidity if in range
         if tick_lower <= current_tick < tick_upper:
             self.liquidity += amount
+
+        return amount0, amount1
 
     def burn(self, tick_lower: int, tick_upper: int, amount: int, mine: bool) -> None:
         assert tick_lower < tick_upper
         assert tick_lower % self.tick_spacing == 0
         assert tick_upper % self.tick_spacing == 0
         assert amount > 0
-
-        position_key = (tick_lower, tick_upper, mine)
-        assert position_key in self.positions
-        pos = self.positions[position_key]
-        assert pos.liquidity >= amount
 
         assert tick_lower in self.ticks
         assert tick_upper in self.ticks
@@ -394,15 +417,19 @@ class V3Pool:
 
         current_tick = int(math.floor(self.tick + 1e-9))
 
-        # Update position fees first
-        fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
-        fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
-        fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
-        pos.tokensOwed0 += fees0
-        pos.tokensOwed1 += fees1
-        pos.feeGrowthInside0Last = fi0
-        pos.feeGrowthInside1Last = fi1
-        pos.liquidity -= amount
+        position_key = (tick_lower, tick_upper, mine)
+        if mine:
+            pos = self.positions[position_key]
+            assert pos.liquidity >= amount
+            # Update position fees first
+            fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
+            fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
+            fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
+            pos.tokensOwed0 += fees0
+            pos.tokensOwed1 += fees1
+            pos.feeGrowthInside0Last = fi0
+            pos.feeGrowthInside1Last = fi1
+            pos.liquidity -= amount
 
         # Update tick_lower
         self.ticks[tick_lower].liquidityGross -= amount
@@ -438,21 +465,74 @@ class V3Pool:
                 total1 += pos.tokensOwed1 + fees1
         return total0, total1
 
-    @staticmethod
-    def _tick_to_sqrtp(tick: float) -> float:
-        return 1.0001 ** (tick / 2)
+    Q96_CONSTANTS = [
+        0xFFFCB933BD6FAD37AA2D162D1A594001,
+        0xFFF97272373D413259A46990580E213A,
+        0xFFF2E50F5F656932EF12357CF3C7FDCC,
+        0xFFE5CACA7E10E4E61C3624EAA0941CD0,
+        0xFFCB9843D60F6159C9DB58835C926644,
+        0xFF973B41FA98C081472E6896DFB254C0,
+        0xFF2EA16466C96A3843EC78B326B52861,
+        0xFE5DEE046A99A2A811C461F1969C3053,
+        0xFCBE86C7900A88AEDCFFC83B479AA3A4,
+        0xF987A7253AC413176F2B074CF7815E54,
+        0xF3392B0822B70005940C7A398E4B70F3,
+        0xE7159475A2C29B7443B29C7FA6E889D9,
+        0xD097F3BDFD2022B8845AD8F792AA5825,
+        0xA9F746462D870FDF8A65DC1F90E061E5,
+        0x70D869A156D2A1B890BB3DF62BAF32F7,
+        0x31BE135F97D08FD981231505542FCFA6,
+        0x9AA508B5B7A84E1C677DE54F3E99BC9,
+        0x5D6AF8DEDB81196699C329225EE604,
+        0x2216E584F5FA1EA926041BEDFE98,
+        0x48A170391F7DC42444E8FA2,
+    ]
+
+    @lru_cache(maxsize=None)
+    def _sqrt_ratio_at_tick(tick: int) -> int:
+        """TickMath.getSqrtRatioAtTick"""
+
+        a = abs(tick)
+        assert a <= 887272
+
+        ratio = (
+            V3Pool.Q96_CONSTANTS[0] if a & 1 else 0x100000000000000000000000000000000
+        )
+
+        for i in range(1, 20):
+            if a & (1 << i):
+                ratio = (ratio * V3Pool.Q96_CONSTANTS[i]) >> 128
+
+        if tick > 0:
+            ratio = ((1 << 256) - 1) // ratio
+
+        return (ratio >> 32) + (1 if ratio & 0xFFFFFFFF else 0)
 
     @staticmethod
-    def _sqrtp_to_tick(sqrtp: float) -> float:
-        return np.floor(np.log(float(sqrtp)) / np.log(1.0001) * 2)
+    @lru_cache(maxsize=None)
+    def _tick_to_sqrtp(tick: int) -> float:
+        return V3Pool._sqrt_ratio_at_tick(tick) / 2**96
 
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _sqrtp_to_tick(sqrtp: float) -> int:
+        return int(np.floor(np.log(float(sqrtp)) / np.log(1.0001) * 2))
 
-@dataclass(frozen=True)
-class Position:
-    owner: str
-    liquidity: int
-    tick_lower: int
-    tick_upper: int
+    @staticmethod
+    def _amounts_for_liquidity(
+        sqrtp, tick, tick_lower, tick_upper, L
+    ) -> Tuple[float, float]:
+        import math
+
+        sl = V3Pool._tick_to_sqrtp(int(tick_lower))
+        su = V3Pool._tick_to_sqrtp(int(tick_upper))
+        ct = int(math.floor(tick + 1e-9))
+        if ct < tick_lower:  # entirely above price: all token0
+            return L * (1 / sl - 1 / su), 0.0
+        elif ct >= tick_upper:  # entirely below price: all token1
+            return 0.0, L * (su - sl)
+        else:  # straddles price
+            return L * (1 / sqrtp - 1 / su), L * (sqrtp - sl)
 
 
 @dataclass(frozen=True)
@@ -461,9 +541,9 @@ class Pool:
     name1: str
     d0: int
     d1: int
-    positions: list[Position]
-    sqrt_price: int
+    sqrt_price: float
     tick: int
+    ticks: dict[int, Tick]
     liquidity: int
     feeTier: float
 
@@ -557,7 +637,6 @@ class UniswapCLMM(gym.Env):
 
     def _observe(self):
         p = self.params.filter(pl.col("block_number") == self.block_number)
-        print(p)
 
         assert p.height == 1
         assert self.fold_index != None
@@ -651,8 +730,9 @@ class UniswapCLMM(gym.Env):
 
         self.contract = V3Pool(
             self.meta.sqrt_price,
+            self.meta.tick,
             self.meta.liquidity,
-            {},
+            self.meta.ticks,
             tickSpacing,
             self.meta.feeTier,
             protocol_fraction,
@@ -674,10 +754,7 @@ class UniswapCLMM(gym.Env):
             * self.contract.tick_spacing
         )
 
-        self.contract.mint(self.lower_tick, self.upper_tick, self.my_liquidity, True)
-
-        for pos in self.meta.positions:
-            self.contract.mint(pos.tick_lower, pos.tick_upper, pos.liquidity, False)
+        # self.contract.mint(self.lower_tick, self.upper_tick, self.my_liquidity, True)
 
         return self._observe(), self._info()
 
@@ -705,17 +782,31 @@ class UniswapCLMM(gym.Env):
                     self.block_number, token_in, amount_in
                 )
 
-                print(out, amount_out, out - amount_out)
+                assert self.contract.tick - row["tick"] <= 1, (
+                    self.contract.tick,
+                    row["tick"],
+                )
+                assert close(self.contract.sqrtp, row["sqrtp"]), (
+                    self.contract.sqrtp,
+                    row["sqrtp"],
+                )
+                assert close(self.contract.liquidity , row["liquidity"]), (self.contract.liquidity , row["liquidity"])
                 assert remaining == 0
-                # assert out == amount_out
 
                 in_range |= hit
 
             for row in liq.filter(pl.col("ord") == ord).iter_rows(named=True):
                 if row["liquidity"] > 0:
-                    self.contract.mint(
+                    amount0, amount1 = self.contract.mint(
                         row["tick_lower"], row["tick_upper"], row["liquidity"], False
                     )
+                    assert abs(amount0 - row["amount0"]) <= max(
+                        1e-6 * row["amount0"], 2.0
+                    ), (amount0, row["amount0"])
+                    assert abs(amount1 - row["amount1"]) <= max(
+                        1e-6 * row["amount1"], 2.0
+                    )
+
                 elif row["liquidity"] < 0:
                     self.contract.burn(
                         row["tick_lower"], row["tick_upper"], -row["liquidity"], False
@@ -735,26 +826,26 @@ class UniswapCLMM(gym.Env):
 
         # rebalance
         if action == 1:
-            self.contract.burn(
-                self.lower_tick, self.upper_tick, self.my_liquidity, True
-            )
+            # self.contract.burn(
+            #    self.lower_tick, self.upper_tick, self.my_liquidity, True
+            # )
 
-            self.lower_tick = self.contract._sqrtp_to_tick(sqrtp) - self.position_width
-            self.upper_tick = self.contract._sqrtp_to_tick(sqrtp) + self.position_width
+            # self.lower_tick = self.contract._sqrtp_to_tick(sqrtp) - self.position_width
+            # self.upper_tick = self.contract._sqrtp_to_tick(sqrtp) + self.position_width
 
-            self.lower_tick = (
-                round(self.lower_tick / self.contract.tick_spacing)
-                * self.contract.tick_spacing
-            )
-            self.upper_tick = (
-                round(self.upper_tick / self.contract.tick_spacing)
-                * self.contract.tick_spacing
-            )
+            # self.lower_tick = (
+            #    round(self.lower_tick / self.contract.tick_spacing)
+            #    * self.contract.tick_spacing
+            # )
+            # self.upper_tick = (
+            #    round(self.upper_tick / self.contract.tick_spacing)
+            #    * self.contract.tick_spacing
+            # )
 
-            # XXX add IL from swapping self.my_liquidity / 2
-            self.contract.mint(
-                self.lower_tick, self.upper_tick, self.my_liquidity, True
-            )
+            ## XXX add IL from swapping self.my_liquidity / 2
+            # self.contract.mint(
+            #    self.lower_tick, self.upper_tick, self.my_liquidity, True
+            # )
             new_gas += self.rebalance_cost
 
         # trade was within our range
@@ -825,15 +916,18 @@ def make_folds(l: list, fold_size: int) -> Iterable[pl.DataFrame]:
 
     return [
         ll
-        for ll in sample(list(batched(l, fold_size)), ceil(len(l) / fold_size))
+        for ll in list(batched(l, fold_size))
+        # for ll in sample(list(batched(l, fold_size)), ceil(len(l) / fold_size))
         if len(ll) == fold_size
     ]
 
 
-async def gql_get_pool_tokens(ep: BaseEndpoint, contract: str) -> dict[str, Any]:
+async def gql_get_pool_tokens(
+    ep: BaseEndpoint, block_number: int, contract: str
+) -> dict[str, Any]:
     query = """
-    query GetPoolTokens($poolId: ID!) {
-      pool(id: $poolId) {
+    query GetPoolTokens($poolId: ID!, $bn: Int!) {
+      pool(id: $poolId, block: { number: $bn }) {
         id
         sqrtPrice
         tick
@@ -852,69 +946,58 @@ async def gql_get_pool_tokens(ep: BaseEndpoint, contract: str) -> dict[str, Any]
       }
     }
     """
-    data = await ep(query, {"poolId": contract})
+    data = await ep(query, {"poolId": contract, "bn": block_number})
 
     return data.get("data", {}).get("pool", {})
 
 
-async def gql_get_liquidity_profile(
-    ep: BaseEndpoint, bn: int, contract: str
-) -> list[Position]:
+async def gql_get_ticks(ep: BaseEndpoint, bn: int, contract: str) -> dict[int, Tick]:
     query = """
-    query GetPoolPositionsPaginated($poolAddress: String!, $blockNumber: Int!, $lastId: String!) {
-      positions(
-        where: { pool: $poolAddress, id_gt: $lastId }
-        block: { number: $blockNumber }
-        first: 1000
-        orderBy: id
-        orderDirection: asc
+    query Ticks($poolId: ID!, $bn: Int!, $lastTick: BigInt!) {
+      ticks(
+        where: { pool: $poolId, tickIdx_gte: $lastTick, liquidityGross_gt: 0 }
+        block: { number: $bn }
+        first: 1000, orderBy: tickIdx, orderDirection: asc
       ) {
-        id
-        owner
-        liquidity
-        tickLower {
-          tickIdx
-        }
-        tickUpper {
-          tickIdx
-        }
+        tickIdx
+        liquidityNet
+        liquidityGross
       }
     }
     """
 
-    ret: list[Position] = []
-    last_id = None
+    ret: dict[int, Tick] = {}
+    last_tick = V3Pool.MIN_TICK
 
-    while True:
+    while last_tick <= V3Pool.MAX_TICK:
         vars = {
-            "poolAddress": contract,
-            "blockNumber": bn,
-            "lastId": str(last_id),
+            "poolId": contract,
+            "bn": bn,
+            "lastTick": last_tick,
         }
         page = await ep(query, vars)
 
-        pos = page.get("data", {}).get("positions", [])
-        if len(pos) == 0:
-            return ret
+        ticks = page.get("data", {}).get("ticks", [])
+        if len(ticks) == 0:
+            break
 
-        ret.extend(
-            [
-                Position(
-                    owner=p["owner"],
-                    liquidity=int(p["liquidity"]),
-                    tick_lower=int(p["tickLower"]["tickIdx"]),
-                    tick_upper=int(p["tickUpper"]["tickIdx"]),
-                )
-                for p in pos
-            ]
-        )
-        last_id = pos[-1]["id"]
+        ret |= {
+            int(t["tickIdx"]): Tick(
+                liquidityNet=int(t["liquidityNet"]),
+                liquidityGross=int(t["liquidityGross"]),
+            )
+            for t in ticks
+        }
+
+        last_tick = int(max(ticks, key=lambda t: int(t["tickIdx"]))["tickIdx"]) + 1
+
+    return ret
 
 
 async def pool_meta(ep: BaseEndpoint, bn: int, contract: str) -> Pool:
-    meta, positions = await asyncio.gather(
-        gql_get_pool_tokens(ep, contract),
-        gql_get_liquidity_profile(ep, bn, contract),
+    meta, ticks = await asyncio.gather(
+        gql_get_pool_tokens(ep, bn, contract),
+        gql_get_ticks(ep, bn, contract),
     )
 
     pool = Pool(
@@ -922,10 +1005,10 @@ async def pool_meta(ep: BaseEndpoint, bn: int, contract: str) -> Pool:
         name1=meta["token1"]["name"],
         d0=int(meta["token0"]["decimals"]),
         d1=int(meta["token1"]["decimals"]),
-        sqrt_price=int(meta["sqrtPrice"]),
+        sqrt_price=float(meta["sqrtPrice"]) / 2**96,
         liquidity=int(meta["liquidity"]),
         tick=int(meta["tick"]),
-        positions=positions,
+        ticks=ticks,
         feeTier=float(meta["feeTier"]) / 1_000_000.0,
     )
     return pool
@@ -937,18 +1020,6 @@ async def from_ethereum(
     from sgqlc.endpoint.httpx import HTTPXEndpoint
     from os import getenv
     from eth_utils import event_signature_to_log_topic
-
-    bn = df["block_number"].min()
-    pool = df["address"].unique().to_list()
-
-    assert len(pool) == 1
-    pool = f"0x{pool[0].hex()}"
-
-    headers = {"Authorization": f"""bearer {getenv('GRAPH_API_KEY')}"""}
-    url = "https://gateway.thegraph.com/api/[api-key]/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
-    endpoint = HTTPXEndpoint(url, headers, client=AsyncClient())
-
-    meta = await pool_meta(endpoint, bn, pool)
 
     swap = event_signature_to_log_topic(
         "Swap(address,address,int256,int256,uint160,uint128,int24)"
@@ -989,19 +1060,13 @@ async def from_ethereum(
                 return_dtype=pl.Float64,
             ),
             quote_volume=pl.col("slot0").map_elements(
-                lambda b: float(abs(int.from_bytes(b, signed=True, byteorder="big")))
-                / pow(10, meta.d0),
+                lambda b: float(abs(int.from_bytes(b, signed=True, byteorder="big"))),
                 return_dtype=pl.Float64,
             ),
-            price=1.0
-            / pow(
-                pl.col("slot2").map_elements(
-                    lambda b: float(int.from_bytes(b, byteorder="big")) / pow(2, 96),
-                    return_dtype=pl.Float64,
-                ),
-                2,
-            )
-            * pow(10, meta.d1 - meta.d0),
+            sqrtp=pl.col("slot2").map_elements(
+                lambda b: float(int.from_bytes(b, byteorder="big")) / (2**96),
+                return_dtype=pl.Float64,
+            ),
             liquidity=pl.col("slot3").map_elements(
                 lambda b: float(int.from_bytes(b, byteorder="big")),
                 return_dtype=pl.Float64,
@@ -1012,6 +1077,16 @@ async def from_ethereum(
             ),
             ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
         )
+        .with_columns(
+            price=1.0
+            / pow(
+                pl.col("sqrtp").map_elements(
+                    lambda b: float(b), return_dtype=pl.Float64
+                )
+                / pow(2, 96),
+                2,
+            ),
+        )
         .select(
             [
                 "ts",
@@ -1019,6 +1094,7 @@ async def from_ethereum(
                 "transaction_index",
                 "ord",
                 "log_index",
+                "sqrtp",
                 "price",
                 "amount0",
                 "amount1",
@@ -1030,8 +1106,8 @@ async def from_ethereum(
         .sort(["block_number", "ord"])
     )
 
-    liq = (
-        df.filter((pl.col("topic0") == mint) | (pl.col("topic0") == burn))
+    mint = (
+        df.filter(pl.col("topic0") == mint)
         .with_columns(
             **{
                 f"slot{i}": pl.col("data").bin.slice(offset=32 * i, length=32)
@@ -1047,25 +1123,56 @@ async def from_ethereum(
                 lambda b: int.from_bytes(b, signed=True, byteorder="big"),
                 return_dtype=pl.Int32,
             ),
-            liquidity=pl.col("slot2").map_elements(
-                lambda b: float(int.from_bytes(b, byteorder="big")),
-                return_dtype=pl.Float64,
+            liquidity=pl.col("slot1").map_elements(
+                lambda b: int.from_bytes(b, byteorder="big"),
+                return_dtype=pl.Object,
             ),
-            amount0=pl.col("slot3").map_elements(
-                lambda b: float(int.from_bytes(b, byteorder="big")),
-                return_dtype=pl.Float64,
+            amount0=pl.col("slot2").map_elements(
+                lambda b: int.from_bytes(b, byteorder="big"),
+                return_dtype=pl.Object,
             ),
-            amount1=pl.col("slot4").map_elements(
-                lambda b: float(int.from_bytes(b, byteorder="big")),
-                return_dtype=pl.Float64,
+            amount1=pl.col("slot3").map_elements(
+                lambda b: int.from_bytes(b, byteorder="big"),
+                return_dtype=pl.Object,
             ),
             ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
         )
+    )
+    burn = (
+        df.filter(pl.col("topic0") == burn)
         .with_columns(
-            liquidity=pl.when(pl.col("topic0") == burn)
-            .then(-pl.col("liquidity"))
-            .otherwise(pl.col("liquidity")),
+            **{
+                f"slot{i}": pl.col("data").bin.slice(offset=32 * i, length=32)
+                for i in range(5)
+            }
         )
+        .with_columns(
+            tick_lower=pl.col("topic2").map_elements(
+                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
+                return_dtype=pl.Int32,
+            ),
+            tick_upper=pl.col("topic3").map_elements(
+                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
+                return_dtype=pl.Int32,
+            ),
+            liquidity=pl.col("slot0").map_elements(
+                lambda b: -int.from_bytes(b, byteorder="big"),
+                return_dtype=pl.Object,
+            ),
+            amount0=pl.col("slot1").map_elements(
+                lambda b: int.from_bytes(b, byteorder="big"),
+                return_dtype=pl.Object,
+            ),
+            amount1=pl.col("slot2").map_elements(
+                lambda b: int.from_bytes(b, byteorder="big"),
+                return_dtype=pl.Object,
+            ),
+            ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
+        )
+    )
+
+    liq = (
+        pl.concat([mint, burn])
         .select(
             [
                 "ts",
@@ -1148,9 +1255,24 @@ async def from_ethereum(
         .drop_nulls()
     )
 
+    swaps = swaps.join(params.select("block_number"), on="block_number")
+    liq = liq.join(params.select("block_number"), on="block_number")
+
+    bn = params["block_number"].min()
+    pool = df["address"].unique().to_list()
+
+    assert len(pool) == 1
+    pool = f"0x{pool[0].hex()}"
+
+    headers = {"Authorization": f"""bearer {getenv('GRAPH_API_KEY')}"""}
+    url = "https://gateway.thegraph.com/api/[api-key]/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+    endpoint = HTTPXEndpoint(url, headers, client=AsyncClient())
+
+    meta = await pool_meta(endpoint, bn - 1, pool)
+
     return (
-        swaps.join(params.select("block_number"), on="block_number"),
-        liq.join(params.select("block_number"), on="block_number"),
+        swaps,
+        liq,
         params,
         meta,
     )
