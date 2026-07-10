@@ -38,10 +38,9 @@ def close(a, b, rtol=np.finfo(np.float32).eps) -> bool:
 
 @dataclass()
 class Tick:
-    liquidityNet: int
-    liquidityGross: int
-    feeGrowthOutside0: float = 0.0
-    feeGrowthOutside1: float = 0.0
+    liquidity_net: int
+    liquidity_gross: int
+    fee_growth_outside_x128: Tuple[int, int]
 
 
 @dataclass()
@@ -59,12 +58,12 @@ class V3Pool:
 
     def __init__(
         self,
-        sqrtp: float,
+        sqrt_price_x96: int,
         tick: int,
         liquidity: int,
         ticks: dict[int, Tick],
         tick_spacing: int,
-        fee_tier: float,
+        fee_pips: int,
         protocol_fraction: float,
     ):
         assert tick_spacing > 0
@@ -74,7 +73,7 @@ class V3Pool:
 
         # constant
         self.tick_spacing = tick_spacing
-        self.fee_tier = fee_tier
+        self.fee_pips = fee_pips
         self.protocol_fraction = protocol_fraction
 
         # updated by mint/burn
@@ -82,13 +81,13 @@ class V3Pool:
         self.tick_keys = sorted(self.ticks.keys())
 
         # updated by swap
-        self.sqrtp = sqrtp
+        self.sqrt_price_x96 = sqrt_price_x96
         self.liquidity = liquidity
         self.tick = tick
 
         self.seen_block: dict[int, int] = {}
 
-        self.fees = pl.DataFrame(
+        self.fee_df = pl.DataFrame(
             schema={
                 "bn": pl.Int64,
                 "ord": pl.Int32,
@@ -102,7 +101,7 @@ class V3Pool:
             }
         )
 
-        self.swaps = pl.DataFrame(
+        self.swap_df = pl.DataFrame(
             schema={
                 "bn": pl.Int64,
                 "ord": pl.Int32,
@@ -113,174 +112,211 @@ class V3Pool:
         )
 
         self.protocol_fees = [0.0, 0.0]
-        self.fee_growth_global = [0.0, 0.0]  # per L
+        self.fee_growth_global_x128 = [0, 0]  # per L
 
         # Initialize positions and tick fee growth
         self.positions: dict[tuple[int, int, bool], LiquidityPosition] = {}
 
         import math
+        from deepcopy import deepcopy
 
         current_tick = int(math.floor(self.tick + 1e-9))
         for tick_idx, tick in self.ticks.items():
             if current_tick >= tick_idx:
-                tick.feeGrowthOutside0 = self.fee_growth_global[0]
-                tick.feeGrowthOutside1 = self.fee_growth_global[1]
+                tick.fee_growth_outside_x128 = deepcopy(self.fee_growth_global_x128)
             else:
-                tick.feeGrowthOutside0 = 0.0
-                tick.feeGrowthOutside1 = 0.0
+                tick.fee_growth_outside_x128 = [0, 0]
 
-    def swap(self, bn: int, token_in: int, amount_in: float):
-        # Track my fees before swap
+    def swap(self, bn: int, token_in: int, amount_in: int, limit_sqrt_x96: int):
+        import uniswap_math as v3math
+
+        # compute_swap_step is excact_input only
+        assert amount_in > 0
+
+        zero_for_one = token_in == 0
+        exact_input = amount_in > 0
+
+        # XXX
+        cache_fee_protocol = 0
+
+        state_amount_specified_remaining = amount_in
+        state_amount_calculated = 0
+        state_sqrt_price_x96 = self.sqrt_price_x96
+        state_tick = self.tick
+        state_fee_growth_global_x128 = self.fee_growth_global_x128[token_in]
+        state_protocol_fee = 0
+        state_liquidity = self.liquidity
+
+        total_fee = 0
+
         my_fees_before = self.my_fees
 
-        total_swap_fee0 = 0.0
-        total_swap_fee1 = 0.0
-        total_dao_fee0 = 0.0
-        total_dao_fee1 = 0.0
+        while (
+            state_amount_specified_remaining > 0
+            and state_sqrt_price_x96 != limit_sqrt_x96
+        ):
+            step_sqrt_price_start_x96 = state_sqrt_price_x96
 
-        remaining, amount_out = float(amount_in), 0.0
-        going_up = token_in == 1
-        while remaining > 0:
-            # 1. boundary: nearest initialized tick in trade direction,
-            #    from EXPLICIT tick state (not re-derived from sqrtp)
-            i = bisect_right(self.tick_keys, self.tick)
-
-            if going_up:
-                boundary = (
+            i = bisect_right(self.tick_keys, state_tick)
+            if zero_for_one:
+                step_tick_next = self.tick_keys[i - 1] if i > 0 else self.MIN_TICK
+            else:
+                step_tick_next = (
                     self.tick_keys[i] if i < len(self.tick_keys) else self.MAX_TICK
                 )
-            else:
-                boundary = self.tick_keys[i - 1] if i > 0 else self.MIN_TICK
-            s_target = self._tick_to_sqrtp(boundary)
-            s = self.sqrtp
+            step_initialized = (
+                step_tick_next != self.MIN_TICK and step_tick_next != self.MAX_TICK
+            )
 
-            if self.liquidity > 0:
-                # 2. net budget (ratio-scaled, per iteration)
-                net = remaining * (1 - self.fee_tier)
-                # 3.+4.+5. destination and amounts, cancellation-free in the unclamped branch
-                if going_up:
-                    ds = net / self.liquidity
-                    s_next = s + ds
-                    hit_boundary = s_next >= s_target
-                    if hit_boundary:
-                        s_next = s_target
-                        d = s_next - s  # genuine span → safe
-                        step_in = self.liquidity * d  # dy
-                        step_out = self.liquidity * d / (s * s_next)  # dx
+            step_sqrt_price_next_x96 = v3math.get_sqrt_ratio_at_tick(step_tick_next)
+
+            if zero_for_one:
+                next_tick_past_limit = step_sqrt_price_next_x96 < limit_sqrt_x96
+            else:
+                next_tick_past_limit = step_sqrt_price_next_x96 > limit_sqrt_x96
+            if next_tick_past_limit:
+                sqrt_price_target_x96 = limit_sqrt_x96
+            else:
+                sqrt_price_target_x96 = step_sqrt_price_next_x96
+
+            state_sqrt_price_x96, step_amount_in, step_amount_out, step_fee_amount = (
+                v3math.compute_swap_step(
+                    state_sqrt_price_x96,
+                    sqrt_price_target_x96,
+                    state_liquidity,
+                    state_amount_specified_remaining,
+                    self.fee_pips,
+                )
+            )
+
+            total_fee += step_fee_amount
+
+            if exact_input:
+                state_amount_specified_remaining -= step_amount_in + step_fee_amount
+                state_amount_calculated = state_amount_calculated - step_amount_out
+            else:
+                state_amount_specified_remaining += step_amount_out
+                state_amount_calculated = (
+                    state_amount_calculated + step_amount_in + step_fee_amount
+                )
+
+            if cache_fee_protocol > 0:
+                delta = step_fee_amount // cache_fee_protocol
+                step_fee_amount -= delta
+                state_protocol_fee += delta
+
+            if state_liquidity > 0:
+                state_fee_growth_global_x128 = v3math.wrap256(
+                    state_fee_growth_global_x128
+                    + v3math.mul_div(step_fee_amount, v3math.Q128, state_liquidity)
+                )
+
+            if state_sqrt_price_x96 == step_sqrt_price_next_x96:
+                if step_initialized:
+                    # oracle omitted
+
+                    # Ticks.cross
+                    tick = self.ticks[step_tick_next]
+                    if zero_for_one:
+                        tick.fee_growth_outside_x128[0] = v3math.wrap256(
+                            state_fee_growth_global_x128
+                            - tick.fee_growth_outside_x128[0]
+                        )
+                        tick.fee_growth_outside_x128[1] = v3math.wrap256(
+                            self.fee_growth_global_x128[1]
+                            - tick.fee_growth_outside_x128[1]
+                        )
                     else:
-                        step_in = net  # exact by construction
-                        step_out = net / (s * s_next)
+                        tick.fee_growth_outside_x128[0] = v3math.wrap256(
+                            self.fee_growth_global_x128[0]
+                            - tick.fee_growth_outside_x128[0]
+                        )
+                        tick.fee_growth_outside_x128[1] = v3math.wrap256(
+                            state_fee_growth_global_x128
+                            - tick.fee_growth_outside_x128[1]
+                        )
+
+                    liquidity_net = tick.liquidity_net
+
+                    if zero_for_one:
+                        liquidity_net = -liquidity_net
+                    state_liquidity += liquidity_net
+                    assert state_liquidity >= 0
+
+                if zero_for_one:
+                    state_tick = step_tick_next - 1
                 else:
-                    denom = self.liquidity + net * s
-                    s_goal = self.liquidity * s / denom
-                    hit_boundary = s_goal <= s_target
-                    if hit_boundary:
-                        s_next = s_target
-                        d = s - s_next
-                        step_in = self.liquidity * d / (s * s_next)  # dx
-                        step_out = self.liquidity * d  # dy
-                    else:
-                        s_next = s_goal
-                        step_in = net
-                        step_out = (
-                            self.liquidity * net * s * s / denom
-                        )  # = L·(s − s_goal), no subtraction
+                    state_tick = step_tick_next
 
-                # 6. fee, by branch
-                if hit_boundary:
-                    fee_amt = step_in * self.fee_tier / (1 - self.fee_tier)  # gross-up
-                else:
-                    fee_amt = remaining - net  # = remaining · fee_tier
+            elif state_sqrt_price_x96 != step_sqrt_price_start_x96:
+                state_tick = v3math.get_tick_at_sqrt_ratio(state_sqrt_price_x96)
 
-                # 7. bookkeeping
-                dao = fee_amt * self.protocol_fraction
-                self.protocol_fees[token_in] += dao
-                self.fee_growth_global[token_in] += (fee_amt - dao) / self.liquidity
-                remaining -= step_in + fee_amt
-                amount_out += step_out
-                self.sqrtp = s_next
+        self.sqrt_price_x96 = state_sqrt_price_x96
+        self.liquidity = state_liquidity
+        self.fee_growth_global_x128[token_in] = state_fee_growth_global_x128
+        self.protocol_fees[token_in] += state_protocol_fee
+        self.tick = state_tick
 
-                if token_in == 0:
-                    total_swap_fee0 += fee_amt
-                    total_dao_fee0 += dao
-                else:
-                    total_swap_fee1 += fee_amt
-                    total_dao_fee1 += dao
-            else:
-                # empty segment: price gaps across, no trade, no fee
-                self.sqrtp = s_next = s_target
-                hit_boundary = True
-
-            # 8. cross or finish
-            if hit_boundary:
-                if boundary in self.ticks:
-                    # Update tick fee growth outside when crossed
-                    t_crossed = self.ticks[boundary]
-                    t_crossed.feeGrowthOutside0 = (
-                        self.fee_growth_global[0] - t_crossed.feeGrowthOutside0
-                    )
-                    t_crossed.feeGrowthOutside1 = (
-                        self.fee_growth_global[1] - t_crossed.feeGrowthOutside1
-                    )
-
-                    net_L = t_crossed.liquidityNet
-                    self.liquidity += net_L if going_up else -net_L
-                elif boundary in (self.MIN_TICK, self.MAX_TICK):
-                    break  # ran off the book
-                self.tick = boundary if going_up else boundary - 1
-            else:
-                self.tick = self._sqrtp_to_tick(self.sqrtp)
-                break
-
-        # Get my fees after swap
+        # metrics code added by us
         my_fees_after = self.my_fees
-
         my_earned0 = my_fees_after[0] - my_fees_before[0]
         my_earned1 = my_fees_after[1] - my_fees_before[1]
 
-        lp0 = total_swap_fee0 - total_dao_fee0
-        lp1 = total_swap_fee1 - total_dao_fee1
+        if zero_for_one:
+            total_dao_fee0 = state_protocol_fee
+            total_dao_fee1 = 0
+            total_swap_fee0 = total_fee
+            total_swap_fee1 = 0
+        else:
+            total_dao_fee0 = 0
+            total_dao_fee1 = state_protocol_fee
+            total_swap_fee0 = 0
+            total_swap_fee1 = total_fee
 
         ord_idx = self.seen_block.get(bn, 0)
         self.seen_block[bn] = ord_idx + 1
 
-        # Append to self.fees
-        new_fees_row = pl.DataFrame(
-            {
-                "bn": [bn],
-                "ord": [ord_idx],
-                "fee0": [total_swap_fee0],
-                "fee1": [total_swap_fee0],
-                "dao_fee0": [total_dao_fee0],
-                "dao_fee1": [total_dao_fee1],
-                "my_fee0": [my_earned0],
-                "my_fee1": [my_earned1],
-                "sqrtp": [self.sqrtp],
-            },
-            schema=self.fees.schema,
+        self.fee_df = self.fee_df.vstack(
+            pl.DataFrame(
+                {
+                    "bn": [bn],
+                    "ord": [ord_idx],
+                    "fee0": [total_swap_fee0],
+                    "fee1": [total_swap_fee1],
+                    "dao_fee0": [total_dao_fee0],
+                    "dao_fee1": [total_dao_fee1],
+                    "my_fee0": [my_earned0],
+                    "my_fee1": [my_earned1],
+                    "sqrtp": [self.sqrt_price_x96 / 2**96],
+                },
+                schema=self.fee_df.schema,
+            )
         )
-        self.fees = self.fees.vstack(new_fees_row)
 
-        # Append to self.swaps
-        token0_amt = amount_in if token_in == 0 else -amount_out
-        token1_amt = amount_in if token_in == 1 else -amount_out
+        if zero_for_one:
+            token0 = amount_in - state_amount_specified_remaining
+            token1 = state_amount_calculated
+        else:
+            token0 = state_amount_calculated
+            token1 = amount_in - state_amount_specified_remaining
 
-        new_swaps_row = pl.DataFrame(
-            {
-                "bn": [bn],
-                "ord": [ord_idx],
-                "token0": [token0_amt],
-                "token1": [token1_amt],
-                "sqrtp": [self.sqrtp],
-            },
-            schema=self.swaps.schema,
+        self.swap_df = self.swap_df.vstack(
+            pl.DataFrame(
+                {
+                    "bn": [bn],
+                    "ord": [ord_idx],
+                    "token0": [token0],
+                    "token1": [token1],
+                    "sqrtp": [self.sqrt_price_x96 / 2**96],
+                },
+                schema=self.swap_df.schema,
+            )
         )
-        self.swaps = self.swaps.vstack(new_swaps_row)
 
         return (
-            amount_out,
-            remaining,  # remaining > 0 only if book exhausted
-            (my_earned0 > 0 or my_earned1 > 0),
+            token0,
+            token1,
+            state_amount_specified_remaining,
         )
 
     def _get_fee_growth_inside(
@@ -790,7 +826,10 @@ class UniswapCLMM(gym.Env):
                     self.contract.sqrtp,
                     row["sqrtp"],
                 )
-                assert close(self.contract.liquidity , row["liquidity"]), (self.contract.liquidity , row["liquidity"])
+                assert close(self.contract.liquidity, row["liquidity"]), (
+                    self.contract.liquidity,
+                    row["liquidity"],
+                )
                 assert remaining == 0
 
                 in_range |= hit
