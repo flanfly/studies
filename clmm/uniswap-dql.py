@@ -85,8 +85,11 @@ class V3Pool:
         self.liquidity = liquidity
         self.tick = tick
 
-        self.seen_block: dict[int, int] = {}
+        self.protocol_fees = [0.0, 0.0]
+        self.fee_growth_global_x128 = [0, 0]  # per L
 
+        # metrics
+        self.seen_block: dict[int, int] = {}
         self.fee_df = pl.DataFrame(
             schema={
                 "bn": pl.Int64,
@@ -100,7 +103,6 @@ class V3Pool:
                 "sqrtp": pl.Float64,
             }
         )
-
         self.swap_df = pl.DataFrame(
             schema={
                 "bn": pl.Int64,
@@ -111,8 +113,6 @@ class V3Pool:
             }
         )
 
-        self.protocol_fees = [0.0, 0.0]
-        self.fee_growth_global_x128 = [0, 0]  # per L
 
         # Initialize positions and tick fee growth
         self.positions: dict[tuple[int, int, bool], LiquidityPosition] = {}
