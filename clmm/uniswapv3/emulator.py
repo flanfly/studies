@@ -18,6 +18,8 @@ from bisect import bisect_right
 from functools import lru_cache
 from copy import deepcopy
 
+from uniswapv3.load import Tick
+
 import sys
 from dotenv import load_dotenv
 import logging as l
@@ -25,18 +27,11 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 import uniswapv3.math as v3math
 
-__all__ = ["Emulator"]
+__all__ = ["Emulator", "Tick", "LiquidityPosition"]
 
 
 def close(a, b, rtol=np.finfo(np.float32).eps) -> bool:
     return abs(a - b) <= max(abs(a), abs(b), 1) * rtol
-
-
-@dataclass()
-class Tick:
-    liquidity_net: int
-    liquidity_gross: int
-    fee_growth_outside_x128: Tuple[int, int]
 
 
 @dataclass()
@@ -55,10 +50,16 @@ class EmulatorSwapState:
     fee_growth_global_x128: list[int]
     protocol_fees: list[float]
     tick: int
-    fee_df: pl.DataFrame
     swap_df: pl.DataFrame
     seen_block: dict[int, int]
     fee_growth_outside_x128: dict[int, Tuple[int, int]]
+
+
+@dataclass(frozen=True)
+class EmulatorLiquidityPosition:
+    tick_lower: int
+    tick_upper: int
+    liquidity: int
 
 
 class Emulator:
@@ -99,28 +100,20 @@ class Emulator:
         self.protocol_fees = [0.0, 0.0]
         self.fee_growth_global_x128 = [0, 0]  # per L
 
+        # set_position
+        self.my_position: None | EmulatorLiquidityPosition = None
+
         # metrics
         self.seen_block: dict[int, int] = {}
-        self.fee_df = pl.DataFrame(
-            schema={
-                "bn": pl.Int64,
-                "ord": pl.Int32,
-                "fee0": pl.Float64,
-                "fee1": pl.Float64,
-                "dao_fee0": pl.Float64,
-                "dao_fee1": pl.Float64,
-                "my_fee0": pl.Float64,
-                "my_fee1": pl.Float64,
-                "sqrtp": pl.Float64,
-            }
-        )
         self.swap_df = pl.DataFrame(
             schema={
                 "bn": pl.Int64,
                 "ord": pl.Int32,
                 "token0": pl.Float64,
                 "token1": pl.Float64,
-                "sqrtp": pl.Float64,
+                "price": pl.Float64,
+                "fee0": pl.Float64,
+                "fee1": pl.Float64,
             }
         )
 
@@ -143,7 +136,6 @@ class Emulator:
             fee_growth_global_x128=deepcopy(self.fee_growth_global_x128),
             protocol_fees=deepcopy(self.protocol_fees),
             tick=self.tick,
-            fee_df=self.fee_df,
             swap_df=self.swap_df,
             seen_block=deepcopy(self.seen_block),
             fee_growth_outside_x128={
@@ -157,7 +149,6 @@ class Emulator:
         self.fee_growth_global_x128 = deepcopy(state.fee_growth_global_x128)
         self.protocol_fees = deepcopy(state.protocol_fees)
         self.tick = state.tick
-        self.fee_df = state.fee_df
         self.swap_df = state.swap_df
         self.seen_block = deepcopy(state.seen_block)
         for t in self.ticks.keys():
@@ -196,8 +187,7 @@ class Emulator:
         state_liquidity = self.liquidity
 
         total_fee = 0
-
-        my_fees_before = self.my_fees
+        my_fee = 0
 
         while (
             state_amount_specified_remaining != 0
@@ -252,6 +242,11 @@ class Emulator:
                 delta = step_fee_amount // cache_fee_protocol
                 step_fee_amount -= delta
                 state_protocol_fee += delta
+
+            p = self.my_position
+            if (not p is None) and p.tick_lower <= state_tick < p.tick_upper:
+                assert state_liquidity >= p.liquidity
+                my_fee += v3math.mul_div(step_fee_amount, p.liquidity, state_liquidity)
 
             if state_liquidity > 0:
                 state_fee_growth_global_x128 = v3math.wrap256(
@@ -309,41 +304,8 @@ class Emulator:
         self.protocol_fees[token_in] += state_protocol_fee
         self.tick = state_tick
 
-        # metrics code added by us
-        my_fees_after = self.my_fees
-        my_earned0 = my_fees_after[0] - my_fees_before[0]
-        my_earned1 = my_fees_after[1] - my_fees_before[1]
-
-        if zero_for_one:
-            total_dao_fee0 = state_protocol_fee
-            total_dao_fee1 = 0
-            total_swap_fee0 = total_fee
-            total_swap_fee1 = 0
-        else:
-            total_dao_fee0 = 0
-            total_dao_fee1 = state_protocol_fee
-            total_swap_fee0 = 0
-            total_swap_fee1 = total_fee
-
         ord_idx = self.seen_block.get(bn, 0)
         self.seen_block[bn] = ord_idx + 1
-
-        self.fee_df = self.fee_df.vstack(
-            pl.DataFrame(
-                {
-                    "bn": [bn],
-                    "ord": [ord_idx],
-                    "fee0": [total_swap_fee0],
-                    "fee1": [total_swap_fee1],
-                    "dao_fee0": [total_dao_fee0],
-                    "dao_fee1": [total_dao_fee1],
-                    "my_fee0": [my_earned0],
-                    "my_fee1": [my_earned1],
-                    "sqrtp": [self.sqrt_price_x96 / 2**96],
-                },
-                schema=self.fee_df.schema,
-            )
-        )
 
         if zero_for_one == exact_input:
             token0 = amount_specified - state_amount_specified_remaining
@@ -352,6 +314,13 @@ class Emulator:
             token0 = state_amount_calculated
             token1 = amount_specified - state_amount_specified_remaining
 
+        if zero_for_one:
+            my_fee0 = my_fee
+            my_fee1 = 0
+        else:
+            my_fee0 = 0
+            my_fee1 = my_fee
+
         self.swap_df = self.swap_df.vstack(
             pl.DataFrame(
                 {
@@ -359,7 +328,9 @@ class Emulator:
                     "ord": [ord_idx],
                     "token0": [token0],
                     "token1": [token1],
-                    "sqrtp": [self.sqrt_price_x96 / 2**96],
+                    "price": [pow(float(self.sqrt_price_x96) / 2**96, 2)],
+                    "fee0": [my_fee0],
+                    "fee1": [my_fee1],
                 },
                 schema=self.swap_df.schema,
             )
@@ -384,7 +355,6 @@ class Emulator:
         # )
 
         if delta == 0:
-            l.warning(f"modify_position delta=0")
             return (
                 0,
                 0,
@@ -444,6 +414,42 @@ class Emulator:
             amount1,
         )
 
+    def set_position(self, tick_lower: int, tick_upper: int, liquidity: int):
+        assert tick_lower % self.tick_spacing == 0 == tick_upper % self.tick_spacing
+
+        if self.my_position is not None:
+            self.modify_liquidity(
+                self.my_position.tick_lower,
+                self.my_position.tick_upper,
+                -self.my_position.liquidity,
+            )
+            self.my_position = None
+
+        if liquidity == 0:
+            return
+
+        self.modify_liquidity(tick_lower, tick_upper, liquidity)
+        self.my_position = EmulatorLiquidityPosition(
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            liquidity=liquidity,
+        )
+
+    def position_amounts(self) -> tuple[int, int] | None:
+        p = self.my_position
+
+        if p is None:
+            return None
+
+        sa = v3math.get_sqrt_ratio_at_tick(p.tick_lower)
+        sb = v3math.get_sqrt_ratio_at_tick(p.tick_upper)
+        s = min(max(self.sqrt_price_x96, sa), sb)
+
+        return (
+            v3math.get_amount0_delta(s, sb, p.liquidity, False),
+            v3math.get_amount1_delta(sa, s, p.liquidity, False),
+        )
+
     def _update_tick(
         self,
         tick: int,
@@ -469,57 +475,3 @@ class Emulator:
         self.ticks[tick] = t
         self.tick_keys = sorted(self.ticks.keys())
         return (t.liquidity_gross == 0) != (liq_before == 0)
-
-    def _get_fee_growth_inside(
-        self, tick_lower: int, tick_upper: int
-    ) -> tuple[float, float]:
-        import math
-
-        current_tick = int(math.floor(self.tick + 1e-9))
-
-        t_lower = self.ticks.get(tick_lower)
-        t_upper = self.ticks.get(tick_upper)
-
-        f_g0, f_g1 = self.fee_growth_global_x128
-
-        if t_lower is not None:
-            fo_l0, fo_l1 = t_lower.fee_growth_outside_x128
-        else:
-            if current_tick >= tick_lower:
-                fo_l0, fo_l1 = f_g0, f_g1
-            else:
-                fo_l0, fo_l1 = 0, 0
-
-        if t_upper is not None:
-            fo_u0, fo_u1 = t_upper.fee_growth_outside_x128
-        else:
-            if current_tick >= tick_upper:
-                fo_u0, fo_u1 = f_g0, f_g1
-            else:
-                fo_u0, fo_u1 = 0, 0
-
-        if current_tick < tick_lower:
-            fi0 = fo_l0 - fo_u0
-            fi1 = fo_l1 - fo_u1
-        elif current_tick >= tick_upper:
-            fi0 = fo_u0 - fo_l0
-            fi1 = fo_u1 - fo_l1
-        else:
-            fi0 = f_g0 - fo_l0 - fo_u0
-            fi1 = f_g1 - fo_l1 - fo_u1
-
-        return fi0, fi1
-
-    @property
-    def my_fees(self) -> tuple[float, float]:
-        """Returns the total fees (token0, token1) accumulated by 'mine' positions."""
-        total0, total1 = 0.0, 0.0
-        for pos_key, pos in self.positions.items():
-            tick_lower, tick_upper, mine = pos_key
-            if mine:
-                fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
-                fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
-                fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
-                total0 += pos.tokensOwed0 + fees0
-                total1 += pos.tokensOwed1 + fees1
-        return total0, total1

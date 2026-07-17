@@ -39,6 +39,8 @@ class Tick:
 class Pool:
     name0: str
     name1: str
+    symbol0: str
+    symbol1: str
     d0: int
     d1: int
     sqrt_price_x96: int
@@ -238,6 +240,8 @@ async def pool_meta(ep: BaseEndpoint, bn: int, contract: str) -> Pool:
     pool = Pool(
         name0=meta["token0"]["name"],
         name1=meta["token1"]["name"],
+        symbol0=meta["token0"]["symbol"],
+        symbol1=meta["token1"]["symbol"],
         d0=int(meta["token0"]["decimals"]),
         d1=int(meta["token1"]["decimals"]),
         sqrt_price_x96=int(meta["sqrtPrice"]),
