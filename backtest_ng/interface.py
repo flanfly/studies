@@ -63,17 +63,24 @@ class Universe(ABC):
         if now is None:
             now = self.df()[self.timestamp_col()].max()
 
-        # Pull the last bar per symbol so we get the close, high, and low
-        # for the as-of timestamp in one shot.  The previous implementation
-        # only aggregated the price column, which caused a KeyError when a
-        # high/low column was configured on the universe.
-        last_bar = (
-            self.df()
-            .filter(pl.col(self.timestamp_col()) <= now)
-            .sort([self.symbol_col(), self.timestamp_col()])
-            .group_by(self.symbol_col())
-            .tail(1)
+        # Forward-fill null closes per symbol to the previous non-null
+        # close, BEFORE taking the per-symbol tail.  A null close is the
+        # typical signature of a market-closed day (US holiday, half-day)
+        # or a yfinance data artifact: the engine needs a price to mark
+        # positions to market, and carrying the previous close forward
+        # is the correct economic answer.  Fill BEFORE the tail, because
+        # a 1-row group has no prior value to fill from.
+        df = self.df().filter(pl.col(self.timestamp_col()) <= now)
+        df = df.sort([self.symbol_col(), self.timestamp_col()]).with_columns(
+            close=pl.col(self.price_col()).forward_fill().over(self.symbol_col()),
+            high=pl.col(self.high_col()).forward_fill().over(self.symbol_col())
+            if self.high_col()
+            else pl.lit(None),
+            low=pl.col(self.low_col()).forward_fill().over(self.symbol_col())
+            if self.low_col()
+            else pl.lit(None),
         )
+        last_bar = df.group_by(self.symbol_col()).tail(1)
 
         return {
             r[self.symbol_col()]: Kline(
@@ -428,6 +435,25 @@ class AlphaModel(ABC):
     @abstractmethod
     def __call__(self, history: pl.DataFrame, u: Universe) -> list[Signal]:
         pass
+
+    def augment(self, history: pl.DataFrame, u: Universe) -> pl.DataFrame:
+        """Return the per-symbol dataframe the portfolio model should see.
+
+        ``AlphaModel`` often derives auxiliary columns from the raw
+        universe (rolling vol, momentum, ranks, …) that downstream
+        ``PortfolioModel`` instances also need — the vol-weighted
+        portfolio model reads a ``var`` column that the alpha has
+        just computed, for example.  The engine calls this method
+        once per rebalance and passes the returned ``pl.DataFrame``
+        to the portfolio model wrapped in a fresh ``Manual``
+        universe, so the portfolio model never has to redo the
+        alpha's work.
+
+        The default implementation returns ``u.df()`` unchanged for
+        alphas that only need the raw universe.  Override when the
+        alpha computes columns the portfolio model should consume.
+        """
+        return u.df()
 
 
 class PortfolioModel(ABC):

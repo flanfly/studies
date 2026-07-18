@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from bisect import bisect_right
 from functools import lru_cache
 
+from uniswapv3.emulator import Tick, Emulator
+from uniswapv3.load import Pool
+import uniswav3.math as v3math
+
 import sys
 from dotenv import load_dotenv
 import logging as l
@@ -30,558 +34,6 @@ l.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stderr,
 )
-
-
-def close(a, b, rtol=np.finfo(np.float32).eps) -> bool:
-    return abs(a - b) <= max(abs(a), abs(b), 1) * rtol
-
-
-@dataclass()
-class Tick:
-    liquidity_net: int
-    liquidity_gross: int
-    fee_growth_outside_x128: Tuple[int, int]
-
-
-@dataclass()
-class LiquidityPosition:
-    liquidity: int
-    feeGrowthInside0Last: float
-    feeGrowthInside1Last: float
-    tokensOwed0: float = 0.0
-    tokensOwed1: float = 0.0
-
-
-class V3Pool:
-    MIN_TICK = -887272
-    MAX_TICK = 887272
-
-    def __init__(
-        self,
-        sqrt_price_x96: int,
-        tick: int,
-        liquidity: int,
-        ticks: dict[int, Tick],
-        tick_spacing: int,
-        fee_pips: int,
-        protocol_fraction: float,
-    ):
-        assert tick_spacing > 0
-        assert fee_tier >= 0 and fee_tier < 1
-        assert protocol_fraction >= 0 and protocol_fraction <= 1
-        assert tick_spacing >= 0
-
-        # constant
-        self.tick_spacing = tick_spacing
-        self.fee_pips = fee_pips
-        self.protocol_fraction = protocol_fraction
-
-        # updated by mint/burn
-        self.ticks = ticks
-        self.tick_keys = sorted(self.ticks.keys())
-
-        # updated by swap
-        self.sqrt_price_x96 = sqrt_price_x96
-        self.liquidity = liquidity
-        self.tick = tick
-
-        self.protocol_fees = [0.0, 0.0]
-        self.fee_growth_global_x128 = [0, 0]  # per L
-
-        # metrics
-        self.seen_block: dict[int, int] = {}
-        self.fee_df = pl.DataFrame(
-            schema={
-                "bn": pl.Int64,
-                "ord": pl.Int32,
-                "fee0": pl.Float64,
-                "fee1": pl.Float64,
-                "dao_fee0": pl.Float64,
-                "dao_fee1": pl.Float64,
-                "my_fee0": pl.Float64,
-                "my_fee1": pl.Float64,
-                "sqrtp": pl.Float64,
-            }
-        )
-        self.swap_df = pl.DataFrame(
-            schema={
-                "bn": pl.Int64,
-                "ord": pl.Int32,
-                "token0": pl.Float64,
-                "token1": pl.Float64,
-                "sqrtp": pl.Float64,
-            }
-        )
-
-
-        # Initialize positions and tick fee growth
-        self.positions: dict[tuple[int, int, bool], LiquidityPosition] = {}
-
-        import math
-        from deepcopy import deepcopy
-
-        current_tick = int(math.floor(self.tick + 1e-9))
-        for tick_idx, tick in self.ticks.items():
-            if current_tick >= tick_idx:
-                tick.fee_growth_outside_x128 = deepcopy(self.fee_growth_global_x128)
-            else:
-                tick.fee_growth_outside_x128 = [0, 0]
-
-    def swap(self, bn: int, token_in: int, amount_in: int, limit_sqrt_x96: int):
-        import uniswap_math as v3math
-
-        # compute_swap_step is excact_input only
-        assert amount_in > 0
-
-        zero_for_one = token_in == 0
-        exact_input = amount_in > 0
-
-        # XXX
-        cache_fee_protocol = 0
-
-        state_amount_specified_remaining = amount_in
-        state_amount_calculated = 0
-        state_sqrt_price_x96 = self.sqrt_price_x96
-        state_tick = self.tick
-        state_fee_growth_global_x128 = self.fee_growth_global_x128[token_in]
-        state_protocol_fee = 0
-        state_liquidity = self.liquidity
-
-        total_fee = 0
-
-        my_fees_before = self.my_fees
-
-        while (
-            state_amount_specified_remaining > 0
-            and state_sqrt_price_x96 != limit_sqrt_x96
-        ):
-            step_sqrt_price_start_x96 = state_sqrt_price_x96
-
-            i = bisect_right(self.tick_keys, state_tick)
-            if zero_for_one:
-                step_tick_next = self.tick_keys[i - 1] if i > 0 else self.MIN_TICK
-            else:
-                step_tick_next = (
-                    self.tick_keys[i] if i < len(self.tick_keys) else self.MAX_TICK
-                )
-            step_initialized = (
-                step_tick_next != self.MIN_TICK and step_tick_next != self.MAX_TICK
-            )
-
-            step_sqrt_price_next_x96 = v3math.get_sqrt_ratio_at_tick(step_tick_next)
-
-            if zero_for_one:
-                next_tick_past_limit = step_sqrt_price_next_x96 < limit_sqrt_x96
-            else:
-                next_tick_past_limit = step_sqrt_price_next_x96 > limit_sqrt_x96
-            if next_tick_past_limit:
-                sqrt_price_target_x96 = limit_sqrt_x96
-            else:
-                sqrt_price_target_x96 = step_sqrt_price_next_x96
-
-            state_sqrt_price_x96, step_amount_in, step_amount_out, step_fee_amount = (
-                v3math.compute_swap_step(
-                    state_sqrt_price_x96,
-                    sqrt_price_target_x96,
-                    state_liquidity,
-                    state_amount_specified_remaining,
-                    self.fee_pips,
-                )
-            )
-
-            total_fee += step_fee_amount
-
-            if exact_input:
-                state_amount_specified_remaining -= step_amount_in + step_fee_amount
-                state_amount_calculated = state_amount_calculated - step_amount_out
-            else:
-                state_amount_specified_remaining += step_amount_out
-                state_amount_calculated = (
-                    state_amount_calculated + step_amount_in + step_fee_amount
-                )
-
-            if cache_fee_protocol > 0:
-                delta = step_fee_amount // cache_fee_protocol
-                step_fee_amount -= delta
-                state_protocol_fee += delta
-
-            if state_liquidity > 0:
-                state_fee_growth_global_x128 = v3math.wrap256(
-                    state_fee_growth_global_x128
-                    + v3math.mul_div(step_fee_amount, v3math.Q128, state_liquidity)
-                )
-
-            if state_sqrt_price_x96 == step_sqrt_price_next_x96:
-                if step_initialized:
-                    # oracle omitted
-
-                    # Ticks.cross
-                    tick = self.ticks[step_tick_next]
-                    if zero_for_one:
-                        tick.fee_growth_outside_x128[0] = v3math.wrap256(
-                            state_fee_growth_global_x128
-                            - tick.fee_growth_outside_x128[0]
-                        )
-                        tick.fee_growth_outside_x128[1] = v3math.wrap256(
-                            self.fee_growth_global_x128[1]
-                            - tick.fee_growth_outside_x128[1]
-                        )
-                    else:
-                        tick.fee_growth_outside_x128[0] = v3math.wrap256(
-                            self.fee_growth_global_x128[0]
-                            - tick.fee_growth_outside_x128[0]
-                        )
-                        tick.fee_growth_outside_x128[1] = v3math.wrap256(
-                            state_fee_growth_global_x128
-                            - tick.fee_growth_outside_x128[1]
-                        )
-
-                    liquidity_net = tick.liquidity_net
-
-                    if zero_for_one:
-                        liquidity_net = -liquidity_net
-                    state_liquidity += liquidity_net
-                    assert state_liquidity >= 0
-
-                if zero_for_one:
-                    state_tick = step_tick_next - 1
-                else:
-                    state_tick = step_tick_next
-
-            elif state_sqrt_price_x96 != step_sqrt_price_start_x96:
-                state_tick = v3math.get_tick_at_sqrt_ratio(state_sqrt_price_x96)
-
-        self.sqrt_price_x96 = state_sqrt_price_x96
-        self.liquidity = state_liquidity
-        self.fee_growth_global_x128[token_in] = state_fee_growth_global_x128
-        self.protocol_fees[token_in] += state_protocol_fee
-        self.tick = state_tick
-
-        # metrics code added by us
-        my_fees_after = self.my_fees
-        my_earned0 = my_fees_after[0] - my_fees_before[0]
-        my_earned1 = my_fees_after[1] - my_fees_before[1]
-
-        if zero_for_one:
-            total_dao_fee0 = state_protocol_fee
-            total_dao_fee1 = 0
-            total_swap_fee0 = total_fee
-            total_swap_fee1 = 0
-        else:
-            total_dao_fee0 = 0
-            total_dao_fee1 = state_protocol_fee
-            total_swap_fee0 = 0
-            total_swap_fee1 = total_fee
-
-        ord_idx = self.seen_block.get(bn, 0)
-        self.seen_block[bn] = ord_idx + 1
-
-        self.fee_df = self.fee_df.vstack(
-            pl.DataFrame(
-                {
-                    "bn": [bn],
-                    "ord": [ord_idx],
-                    "fee0": [total_swap_fee0],
-                    "fee1": [total_swap_fee1],
-                    "dao_fee0": [total_dao_fee0],
-                    "dao_fee1": [total_dao_fee1],
-                    "my_fee0": [my_earned0],
-                    "my_fee1": [my_earned1],
-                    "sqrtp": [self.sqrt_price_x96 / 2**96],
-                },
-                schema=self.fee_df.schema,
-            )
-        )
-
-        if zero_for_one:
-            token0 = amount_in - state_amount_specified_remaining
-            token1 = state_amount_calculated
-        else:
-            token0 = state_amount_calculated
-            token1 = amount_in - state_amount_specified_remaining
-
-        self.swap_df = self.swap_df.vstack(
-            pl.DataFrame(
-                {
-                    "bn": [bn],
-                    "ord": [ord_idx],
-                    "token0": [token0],
-                    "token1": [token1],
-                    "sqrtp": [self.sqrt_price_x96 / 2**96],
-                },
-                schema=self.swap_df.schema,
-            )
-        )
-
-        return (
-            token0,
-            token1,
-            state_amount_specified_remaining,
-        )
-
-    def _get_fee_growth_inside(
-        self, tick_lower: int, tick_upper: int
-    ) -> tuple[float, float]:
-        import math
-
-        current_tick = int(math.floor(self.tick + 1e-9))
-
-        t_lower = self.ticks.get(tick_lower)
-        t_upper = self.ticks.get(tick_upper)
-
-        f_g0, f_g1 = self.fee_growth_global[0], self.fee_growth_global[1]
-
-        if t_lower is not None:
-            fo_l0 = t_lower.feeGrowthOutside0
-            fo_l1 = t_lower.feeGrowthOutside1
-        else:
-            if current_tick >= tick_lower:
-                fo_l0, fo_l1 = f_g0, f_g1
-            else:
-                fo_l0, fo_l1 = 0.0, 0.0
-
-        if t_upper is not None:
-            fo_u0 = t_upper.feeGrowthOutside0
-            fo_u1 = t_upper.feeGrowthOutside1
-        else:
-            if current_tick >= tick_upper:
-                fo_u0, fo_u1 = f_g0, f_g1
-            else:
-                fo_u0, fo_u1 = 0.0, 0.0
-
-        if current_tick < tick_lower:
-            fi0 = fo_l0 - fo_u0
-            fi1 = fo_l1 - fo_u1
-        elif current_tick >= tick_upper:
-            fi0 = fo_u0 - fo_l0
-            fi1 = fo_u1 - fo_l1
-        else:
-            fi0 = f_g0 - fo_l0 - fo_u0
-            fi1 = f_g1 - fo_l1 - fo_u1
-
-        return fi0, fi1
-
-    def mint(
-        self, tick_lower: int, tick_upper: int, amount: int, mine: bool
-    ) -> Tuple[float, float]:
-        assert tick_lower < tick_upper
-        assert tick_lower % self.tick_spacing == 0
-        assert tick_upper % self.tick_spacing == 0
-
-        import math
-
-        current_tick = int(math.floor(self.tick + 1e-9))
-
-        amount0, amount1 = self._amounts_for_liquidity(
-            self.sqrtp, current_tick, tick_lower, tick_upper, amount
-        )
-
-        # Update tick_lower
-        if tick_lower not in self.ticks:
-            if current_tick >= tick_lower:
-                fo0, fo1 = self.fee_growth_global[0], self.fee_growth_global[1]
-            else:
-                fo0, fo1 = 0.0, 0.0
-            self.ticks[tick_lower] = Tick(
-                liquidityNet=0,
-                liquidityGross=0,
-                feeGrowthOutside0=fo0,
-                feeGrowthOutside1=fo1,
-            )
-        self.ticks[tick_lower].liquidityGross += amount
-        self.ticks[tick_lower].liquidityNet += amount
-
-        # Update tick_upper
-        if tick_upper not in self.ticks:
-            if current_tick >= tick_upper:
-                fo0, fo1 = self.fee_growth_global[0], self.fee_growth_global[1]
-            else:
-                fo0, fo1 = 0.0, 0.0
-            self.ticks[tick_upper] = Tick(
-                liquidityNet=0,
-                liquidityGross=0,
-                feeGrowthOutside0=fo0,
-                feeGrowthOutside1=fo1,
-            )
-        self.ticks[tick_upper].liquidityGross += amount
-        self.ticks[tick_upper].liquidityNet -= amount
-
-        # Sync tick keys
-        self.tick_keys = sorted(self.ticks.keys())
-
-        # Update position
-        position_key = (tick_lower, tick_upper, mine)
-        fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
-
-        if mine:
-            if position_key not in self.positions:
-                self.positions[position_key] = LiquidityPosition(
-                    liquidity=0,
-                    feeGrowthInside0Last=fi0,
-                    feeGrowthInside1Last=fi1,
-                    tokensOwed0=0.0,
-                    tokensOwed1=0.0,
-                )
-
-            pos = self.positions[position_key]
-            fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
-            fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
-            pos.tokensOwed0 += fees0
-            pos.tokensOwed1 += fees1
-            pos.feeGrowthInside0Last = fi0
-            pos.feeGrowthInside1Last = fi1
-            pos.liquidity += amount
-
-        # Update active pool liquidity if in range
-        if tick_lower <= current_tick < tick_upper:
-            self.liquidity += amount
-
-        return amount0, amount1
-
-    def burn(self, tick_lower: int, tick_upper: int, amount: int, mine: bool) -> None:
-        assert tick_lower < tick_upper
-        assert tick_lower % self.tick_spacing == 0
-        assert tick_upper % self.tick_spacing == 0
-        assert amount > 0
-
-        assert tick_lower in self.ticks
-        assert tick_upper in self.ticks
-        assert self.ticks[tick_lower].liquidityGross >= amount
-        assert self.ticks[tick_upper].liquidityGross >= amount
-
-        import math
-
-        current_tick = int(math.floor(self.tick + 1e-9))
-
-        position_key = (tick_lower, tick_upper, mine)
-        if mine:
-            pos = self.positions[position_key]
-            assert pos.liquidity >= amount
-            # Update position fees first
-            fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
-            fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
-            fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
-            pos.tokensOwed0 += fees0
-            pos.tokensOwed1 += fees1
-            pos.feeGrowthInside0Last = fi0
-            pos.feeGrowthInside1Last = fi1
-            pos.liquidity -= amount
-
-        # Update tick_lower
-        self.ticks[tick_lower].liquidityGross -= amount
-        self.ticks[tick_lower].liquidityNet -= amount
-        if self.ticks[tick_lower].liquidityGross == 0:
-            del self.ticks[tick_lower]
-
-        # Update tick_upper
-        self.ticks[tick_upper].liquidityGross -= amount
-        self.ticks[tick_upper].liquidityNet += amount
-        if self.ticks[tick_upper].liquidityGross == 0:
-            del self.ticks[tick_upper]
-
-        # Sync tick keys
-        self.tick_keys = sorted(self.ticks.keys())
-
-        # Update active pool liquidity if in range
-        if tick_lower <= current_tick < tick_upper:
-            self.liquidity -= amount
-            assert self.liquidity >= 0
-
-    @property
-    def my_fees(self) -> tuple[float, float]:
-        """Returns the total fees (token0, token1) accumulated by 'mine' positions."""
-        total0, total1 = 0.0, 0.0
-        for pos_key, pos in self.positions.items():
-            tick_lower, tick_upper, mine = pos_key
-            if mine:
-                fi0, fi1 = self._get_fee_growth_inside(tick_lower, tick_upper)
-                fees0 = pos.liquidity * (fi0 - pos.feeGrowthInside0Last)
-                fees1 = pos.liquidity * (fi1 - pos.feeGrowthInside1Last)
-                total0 += pos.tokensOwed0 + fees0
-                total1 += pos.tokensOwed1 + fees1
-        return total0, total1
-
-    Q96_CONSTANTS = [
-        0xFFFCB933BD6FAD37AA2D162D1A594001,
-        0xFFF97272373D413259A46990580E213A,
-        0xFFF2E50F5F656932EF12357CF3C7FDCC,
-        0xFFE5CACA7E10E4E61C3624EAA0941CD0,
-        0xFFCB9843D60F6159C9DB58835C926644,
-        0xFF973B41FA98C081472E6896DFB254C0,
-        0xFF2EA16466C96A3843EC78B326B52861,
-        0xFE5DEE046A99A2A811C461F1969C3053,
-        0xFCBE86C7900A88AEDCFFC83B479AA3A4,
-        0xF987A7253AC413176F2B074CF7815E54,
-        0xF3392B0822B70005940C7A398E4B70F3,
-        0xE7159475A2C29B7443B29C7FA6E889D9,
-        0xD097F3BDFD2022B8845AD8F792AA5825,
-        0xA9F746462D870FDF8A65DC1F90E061E5,
-        0x70D869A156D2A1B890BB3DF62BAF32F7,
-        0x31BE135F97D08FD981231505542FCFA6,
-        0x9AA508B5B7A84E1C677DE54F3E99BC9,
-        0x5D6AF8DEDB81196699C329225EE604,
-        0x2216E584F5FA1EA926041BEDFE98,
-        0x48A170391F7DC42444E8FA2,
-    ]
-
-    @lru_cache(maxsize=None)
-    def _sqrt_ratio_at_tick(tick: int) -> int:
-        """TickMath.getSqrtRatioAtTick"""
-
-        a = abs(tick)
-        assert a <= 887272
-
-        ratio = (
-            V3Pool.Q96_CONSTANTS[0] if a & 1 else 0x100000000000000000000000000000000
-        )
-
-        for i in range(1, 20):
-            if a & (1 << i):
-                ratio = (ratio * V3Pool.Q96_CONSTANTS[i]) >> 128
-
-        if tick > 0:
-            ratio = ((1 << 256) - 1) // ratio
-
-        return (ratio >> 32) + (1 if ratio & 0xFFFFFFFF else 0)
-
-    @staticmethod
-    @lru_cache(maxsize=None)
-    def _tick_to_sqrtp(tick: int) -> float:
-        return V3Pool._sqrt_ratio_at_tick(tick) / 2**96
-
-    @staticmethod
-    @lru_cache(maxsize=None)
-    def _sqrtp_to_tick(sqrtp: float) -> int:
-        return int(np.floor(np.log(float(sqrtp)) / np.log(1.0001) * 2))
-
-    @staticmethod
-    def _amounts_for_liquidity(
-        sqrtp, tick, tick_lower, tick_upper, L
-    ) -> Tuple[float, float]:
-        import math
-
-        sl = V3Pool._tick_to_sqrtp(int(tick_lower))
-        su = V3Pool._tick_to_sqrtp(int(tick_upper))
-        ct = int(math.floor(tick + 1e-9))
-        if ct < tick_lower:  # entirely above price: all token0
-            return L * (1 / sl - 1 / su), 0.0
-        elif ct >= tick_upper:  # entirely below price: all token1
-            return 0.0, L * (su - sl)
-        else:  # straddles price
-            return L * (1 / sqrtp - 1 / su), L * (sqrtp - sl)
-
-
-@dataclass(frozen=True)
-class Pool:
-    name0: str
-    name1: str
-    d0: int
-    d1: int
-    sqrt_price: float
-    tick: int
-    ticks: dict[int, Tick]
-    liquidity: int
-    feeTier: float
 
 
 @dataclass(frozen=True)
@@ -633,7 +85,7 @@ class UniswapCLMM(gym.Env):
 
         # changed each reset
         self.fold_index: None | int = None
-        self.contract: V3Pool | None = None
+        self.contract: Emulator | None = None
 
         # changed each step
         self.gas = 0
@@ -747,56 +199,33 @@ class UniswapCLMM(gym.Env):
         self.active_rows = 0
         self.block_number = self.folds[self.fold_index][0]
         self.epsilon = 1.0
-
-        match self.meta.feeTier:
-            case 0.0001:
-                protocol_fraction = 0.25
-                tickSpacing = 1
-            case 0.0005:
-                protocol_fraction = 0.25
-                tickSpacing = 10
-            case 0.003:
-                protocol_fraction = 0.1667
-                tickSpacing = 60
-            case 0.01:
-                protocol_fraction = 0.1667
-                tickSpacing = 200
-            case _:
-                assert False
-
-        self.contract = V3Pool(
-            self.meta.sqrt_price,
+        self.contract = Emulator(
+            self.meta.sqrt_price_x96,
             self.meta.tick,
             self.meta.liquidity,
-            self.meta.ticks,
-            tickSpacing,
-            self.meta.feeTier,
-            protocol_fraction,
+            self.ticks,
+            self.meta.tick_spacing,
+            self.meta.fee_pips,
+            self.meta.protocol_fraction,
+            self.meta.max_liquidity_per_tick,
         )
 
-        self.lower_tick = (
-            self.contract._sqrtp_to_tick(self.meta.sqrt_price) - self.position_width
+        # initial position
+        lt = (
+            v3math.get_tick_at_sqrt_ratio(self.meta.sqrt_price_x96)
+            - self.position_width
         )
-        self.upper_tick = (
-            self.contract._sqrtp_to_tick(self.meta.sqrt_price) + self.position_width
+        ut = (
+            v3math.get_tick_at_sqrt_ratio(self.meta.sqrt_price_x96)
+            + self.position_width
         )
-
-        self.lower_tick = (
-            round(self.lower_tick / self.contract.tick_spacing)
-            * self.contract.tick_spacing
-        )
-        self.upper_tick = (
-            round(self.upper_tick / self.contract.tick_spacing)
-            * self.contract.tick_spacing
-        )
-
-        # self.contract.mint(self.lower_tick, self.upper_tick, self.my_liquidity, True)
+        self.set_position(lt, ut, self.my_liquidity)
 
         return self._observe(), self._info()
 
     def step(self, action):
         # first, the trades of the block execute, then the position is updated
-        sqrtp = self.contract.sqrtp
+        sqrt_price_x96 = self.contract.sqrt_price_x96
         new_fees_t0t1 = self.contract.my_fees
         in_range = False
 
@@ -1006,9 +435,9 @@ async def gql_get_ticks(ep: BaseEndpoint, bn: int, contract: str) -> dict[int, T
     """
 
     ret: dict[int, Tick] = {}
-    last_tick = V3Pool.MIN_TICK
+    last_tick = Emulator.MIN_TICK
 
-    while last_tick <= V3Pool.MAX_TICK:
+    while last_tick <= Emulator.MAX_TICK:
         vars = {
             "poolId": contract,
             "bn": bn,
@@ -1022,8 +451,12 @@ async def gql_get_ticks(ep: BaseEndpoint, bn: int, contract: str) -> dict[int, T
 
         ret |= {
             int(t["tickIdx"]): Tick(
-                liquidityNet=int(t["liquidityNet"]),
-                liquidityGross=int(t["liquidityGross"]),
+                liquidity_net=int(t["liquidityNet"]),
+                liquidity_gross=int(t["liquidityGross"]),
+                fee_growth_outside_x128=(
+                    0,
+                    0,
+                ),
             )
             for t in ticks
         }
@@ -1044,277 +477,13 @@ async def pool_meta(ep: BaseEndpoint, bn: int, contract: str) -> Pool:
         name1=meta["token1"]["name"],
         d0=int(meta["token0"]["decimals"]),
         d1=int(meta["token1"]["decimals"]),
-        sqrt_price=float(meta["sqrtPrice"]) / 2**96,
+        sqrt_price_x96=int(meta["sqrtPrice"]),
         liquidity=int(meta["liquidity"]),
         tick=int(meta["tick"]),
         ticks=ticks,
-        feeTier=float(meta["feeTier"]) / 1_000_000.0,
+        fee_pips=int(meta["feeTier"]),
     )
     return pool
-
-
-async def from_ethereum(
-    df: pl.DataFrame,
-) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, Pool]:
-    from sgqlc.endpoint.httpx import HTTPXEndpoint
-    from os import getenv
-    from eth_utils import event_signature_to_log_topic
-
-    swap = event_signature_to_log_topic(
-        "Swap(address,address,int256,int256,uint160,uint128,int24)"
-    )
-    mint = event_signature_to_log_topic(
-        "Mint(address,address,int24,int24,uint128,uint256,uint256)"
-    )
-    burn = event_signature_to_log_topic(
-        "Burn(address,int24,int24,uint128,uint256,uint256)"
-    )
-
-    topic0_to_event = {
-        swap: "swap",
-        mint: "mint",
-        burn: "burn",
-    }
-
-    def be_int(b: bytes, signed: bool) -> int:
-        if b is None:
-            return 0
-        return int.from_bytes(b, "big", signed=signed)
-
-    swaps = (
-        df.filter(pl.col("topic0") == swap)
-        .with_columns(
-            **{
-                f"slot{i}": pl.col("data").bin.slice(offset=32 * i, length=32)
-                for i in range(5)
-            }
-        )
-        .with_columns(
-            amount0=pl.col("slot0").map_elements(
-                lambda b: float(int.from_bytes(b, signed=True, byteorder="big")),
-                return_dtype=pl.Float64,
-            ),
-            amount1=pl.col("slot1").map_elements(
-                lambda b: float(int.from_bytes(b, signed=True, byteorder="big")),
-                return_dtype=pl.Float64,
-            ),
-            quote_volume=pl.col("slot0").map_elements(
-                lambda b: float(abs(int.from_bytes(b, signed=True, byteorder="big"))),
-                return_dtype=pl.Float64,
-            ),
-            sqrtp=pl.col("slot2").map_elements(
-                lambda b: float(int.from_bytes(b, byteorder="big")) / (2**96),
-                return_dtype=pl.Float64,
-            ),
-            liquidity=pl.col("slot3").map_elements(
-                lambda b: float(int.from_bytes(b, byteorder="big")),
-                return_dtype=pl.Float64,
-            ),
-            tick=pl.col("slot4").map_elements(
-                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
-                return_dtype=pl.Int32,
-            ),
-            ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
-        )
-        .with_columns(
-            price=1.0
-            / pow(
-                pl.col("sqrtp").map_elements(
-                    lambda b: float(b), return_dtype=pl.Float64
-                )
-                / pow(2, 96),
-                2,
-            ),
-        )
-        .select(
-            [
-                "ts",
-                "block_number",
-                "transaction_index",
-                "ord",
-                "log_index",
-                "sqrtp",
-                "price",
-                "amount0",
-                "amount1",
-                "quote_volume",
-                "liquidity",
-                "tick",
-            ]
-        )
-        .sort(["block_number", "ord"])
-    )
-
-    mint = (
-        df.filter(pl.col("topic0") == mint)
-        .with_columns(
-            **{
-                f"slot{i}": pl.col("data").bin.slice(offset=32 * i, length=32)
-                for i in range(5)
-            }
-        )
-        .with_columns(
-            tick_lower=pl.col("topic2").map_elements(
-                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
-                return_dtype=pl.Int32,
-            ),
-            tick_upper=pl.col("topic3").map_elements(
-                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
-                return_dtype=pl.Int32,
-            ),
-            liquidity=pl.col("slot1").map_elements(
-                lambda b: int.from_bytes(b, byteorder="big"),
-                return_dtype=pl.Object,
-            ),
-            amount0=pl.col("slot2").map_elements(
-                lambda b: int.from_bytes(b, byteorder="big"),
-                return_dtype=pl.Object,
-            ),
-            amount1=pl.col("slot3").map_elements(
-                lambda b: int.from_bytes(b, byteorder="big"),
-                return_dtype=pl.Object,
-            ),
-            ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
-        )
-    )
-    burn = (
-        df.filter(pl.col("topic0") == burn)
-        .with_columns(
-            **{
-                f"slot{i}": pl.col("data").bin.slice(offset=32 * i, length=32)
-                for i in range(5)
-            }
-        )
-        .with_columns(
-            tick_lower=pl.col("topic2").map_elements(
-                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
-                return_dtype=pl.Int32,
-            ),
-            tick_upper=pl.col("topic3").map_elements(
-                lambda b: int.from_bytes(b, signed=True, byteorder="big"),
-                return_dtype=pl.Int32,
-            ),
-            liquidity=pl.col("slot0").map_elements(
-                lambda b: -int.from_bytes(b, byteorder="big"),
-                return_dtype=pl.Object,
-            ),
-            amount0=pl.col("slot1").map_elements(
-                lambda b: int.from_bytes(b, byteorder="big"),
-                return_dtype=pl.Object,
-            ),
-            amount1=pl.col("slot2").map_elements(
-                lambda b: int.from_bytes(b, byteorder="big"),
-                return_dtype=pl.Object,
-            ),
-            ord=pl.col("transaction_index") * 100 + pl.col("log_index"),
-        )
-    )
-
-    liq = (
-        pl.concat([mint, burn])
-        .select(
-            [
-                "ts",
-                "block_number",
-                "transaction_index",
-                "ord",
-                "log_index",
-                "tick_lower",
-                "tick_upper",
-                "liquidity",
-                "amount0",
-                "amount1",
-            ]
-        )
-        .sort(["block_number", "ord"])
-    )
-
-    params = (
-        swaps
-        # resample to one block bars (~12s)
-        .group_by("block_number")
-        .agg(
-            pl.col("price").mean(),
-            pl.col("quote_volume").sum(),
-        )
-        # forward fill
-        .upsample(time_column="block_number", every="1i")
-        .with_columns(
-            [pl.col("price").forward_fill(), pl.col("quote_volume").fill_null(0)]
-        )
-        .with_columns(
-            diff=pl.col("price").shift(-1) - pl.col("price"),
-        )
-        .drop_nulls()
-        # estimate OU process variables
-        .with_columns(
-            coefs=pl.col("diff").least_squares.rolling_ols(
-                "price",
-                window_size=1800 // 12,
-                min_periods=1800 // 12,
-                add_intercept=True,
-                mode="coefficients",
-            ),
-        )
-        .unnest("coefs", separator="_")
-        .rename({"coefs_const": "alpha", "coefs_price": "beta"})
-        .with_columns(
-            ts=pl.col("block_number"),
-            theta=-pl.col("beta").fill_null(0.0),
-            mu=pl.when(pl.col("beta") < 0)
-            .then(-pl.col("alpha") / pl.col("beta"))
-            .otherwise(pl.col("price"))
-            .fill_null(pl.col("price")),
-            sigma=(
-                pl.col("diff") - (pl.col("alpha") + pl.col("price") * pl.col("beta"))
-            ).fill_null(0.0),
-            vol=(
-                (pl.col("price").shift(1) / pl.col("price"))
-                .log()
-                .rolling_std(300 // 12, min_samples=300 // 12)
-                .clip(0, 0.1 * 12)
-            ),
-        )
-        .select(
-            pl.col("ts"),
-            pl.col("block_number"),
-            pl.col("price"),
-            pl.col("quote_volume").alias("qty"),
-            pl.col("mu").shift(1),
-            pl.col("theta").shift(1).clip(0, 1),
-            (
-                pl.col("sigma").rolling_std(1800 // 12, min_samples=1).shift(1)
-                / pl.col("price")
-            )
-            .clip(0, 0.1 * 12)
-            .alias("sigma"),
-            pl.col("vol"),
-        )
-        # cut off OLS/rolling std warmup
-        .drop_nulls()
-    )
-
-    swaps = swaps.join(params.select("block_number"), on="block_number")
-    liq = liq.join(params.select("block_number"), on="block_number")
-
-    bn = params["block_number"].min()
-    pool = df["address"].unique().to_list()
-
-    assert len(pool) == 1
-    pool = f"0x{pool[0].hex()}"
-
-    headers = {"Authorization": f"""bearer {getenv('GRAPH_API_KEY')}"""}
-    url = "https://gateway.thegraph.com/api/[api-key]/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
-    endpoint = HTTPXEndpoint(url, headers, client=AsyncClient())
-
-    meta = await pool_meta(endpoint, bn - 1, pool)
-
-    return (
-        swaps,
-        liq,
-        params,
-        meta,
-    )
 
 
 gym.register(

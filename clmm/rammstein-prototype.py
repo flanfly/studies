@@ -405,9 +405,7 @@ class RammsteinEnv(gymnasium.Env):
         obs = self._build_state(s, theta, mu, sigma)
         return obs, {}
 
-    def step(
-        self, action: int
-    ) -> tuple[np.ndarray, float, bool, bool, dict]:
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         action = int(action)
         s = float(self.price[self._t])
         s_next = float(self.price[self._t + 1])

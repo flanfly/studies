@@ -1,963 +1,690 @@
-"""
-RAmmStein: Regime Adaptation in Mean-reverting Markets with Stein thresholds.
+import polars as pl
+import polars_ols as pls
 
-Double DQN agent that decides when to rebalance a concentrated AMM liquidity
-position, using OU process parameters as a regime indicator.
+import gymnasium as gym
+import numpy as np
+import torch
 
-Reference:
-    Anchuri, P. "RAmmStein: Regime Adaptation in Mean-reverting Markets with
-    Stein thresholds." arXiv:2602.19419v2, 2026.
+import asyncio
+from sgqlc.endpoint.base import BaseEndpoint
+from httpx import AsyncClient
 
-Required input schema (polars-loaded parquet, irregular trades):
+from copy import deepcopy
 
-    ts         : datetime / int64    trade timestamp (monotonic)
-    price      : float64             trade price (or mid)
-    cex_volume : float64             USD notional of the trade
-
-The script first resamples irregular trades into 1-second bars via
-polars `group_by_dynamic` (forward-filling price, summing USD volume),
-then precomputes OU parameters (theta, mu, sigma) per bar with polars-ols
-rolling OLS, then trains a DDQN agent on rolling-window episodes sliced
-from the bar series, and finally evaluates the greedy policy on the
-test split.
-
-    ts        : datetime / int64         bar timestamp (monotonic, 1Hz)
-    price     : float64                  mid price (S_t)
-    volume_cex: float64                  CEX trade volume in the bar
-                                          (DEX volume = volume_cex * DEX_CEX_RATIO)
-
-The script precomputes (theta, mu, sigma) for every bar once via polars-ols
-rolling OLS, then trains a DDQN agent on rolling-window episodes sliced from
-the input series, and finally evaluates the greedy policy on the test split.
-
-Install (not yet in pyproject.toml):
-
-    uv pip install stable-baselines3 torch gymnasium polars polars-ols
-
-Run:
-
-    uv run python rammstein.py \
-        --trades data/eth_usd_1hz.parquet \
-        --output results/rammstein_run
-
-Note on numbers: the paper's evaluation fee/gas figures (Table III:
-~$389 fees, ~$228 gas over the test split) depend on the CEX trade
-volume per bar of the input dataset. The synthetic loader here uses
-whatever `volume_cex` the parquet contains; if your data has small
-volumes, fees may look tiny relative to gas. The agent's *decisions*
-(when to rebalance) will be qualitatively similar regardless, since
-the rewards scale uniformly.
-
-Implementation note: We use a thin :class:`DoubleDQN` subclass of SB3's
-``DQN`` policy (PyTorch back-end). SB3's stock DQN is vanilla Deep
-Q-Learning (the Bellman target uses ``max_a Q_target(s', a)``), which
-re-introduces the max-overestimation bias that Double DQN was designed
-to fix. To preserve the paper's DDQN formulation, we override
-``train()`` so the next action is *selected* by the online Q-net and
-*evaluated* by the target Q-net (Hasselt et al. 2016).
-"""
-
-from __future__ import annotations
-
-import argparse
-import os
-import time
-from collections import deque
+from typing import Optional, Dict, Any, Literal, Tuple
 from dataclasses import dataclass
 
-import gymnasium
-import numpy as np
-import polars as pl
-import polars_ols as polars_ols
-from gymnasium import spaces
-from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
-from tqdm.auto import tqdm
+from uniswapv3.emulator import Tick, Emulator
+from uniswapv3.load import Pool, make_endpoint, from_ethereum, pool_meta
+import uniswapv3.math as v3math
 
-import torch as th
-import torch.nn.functional as F
-
-# =============================================================================
-# Environment / pool parameters (Section V-B of the paper, Table II)
-# =============================================================================
-
-# AMM pool.
-RANGE_WIDTH = 0.01  # 2w: position width as fraction of center (1%)
-POOL_FEE_TIER = 0.0005  # phi: pool fee tier (5 bps)
-POOL_TVL = 10_000_000.0  # L_total: pool TVL in USD
-DEX_CEX_RATIO = 0.10  # alpha: DEX volume / CEX volume per bar
-INITIAL_CAPITAL = 10_000.0  # K: LP capital deployed in USD
-
-# Rebalancing cost (Section V-B, eq. 30): C = phi * 0.5 * K + G.
-# We expose them separately and combine in env.step.
-SWAP_FEE_FRACTION = 0.5  # share of position swapped on rebalance
-GAS_COST = 2.0  # G: gas cost per rebalance in USD
-
-# Reward shaping (Section IV-D, eq. 28).
-REWARD_SCALE = 100.0  # lambda: stabilises training
-ACTIVE_BONUS = 0.01  # epsilon: per-step bonus for being in-range
+from cli.token import Token, liquidity_for_value, parse_amount
 
 
-# =============================================================================
-# DDQN / training hyperparameters (Section IV-F, Table I)
-# =============================================================================
+import sys
+from dotenv import load_dotenv
+import logging as l
+from tqdm.contrib.logging import logging_redirect_tqdm
 
-LEARNING_RATE = 1e-4
-DISCOUNT_FACTOR = 0.99  # gamma
-REPLAY_BUFFER_SIZE = 100_000
-BATCH_SIZE = 128
-TARGET_UPDATE_PERIOD = 100  # hard update every N train steps
+load_dotenv()
 
-NUM_EPISODES = 150
-EPISODE_LENGTH = 36_000  # 10 hours at 1Hz
-
-# Epsilon schedule: SB3's DQN uses a *linear* decay from EPSILON_START to
-# EPSILON_END over ``exploration_fraction`` of the total timesteps. The
-# paper uses an exponential decay (0.9998) which hits 0.05 around step 15,000.
-# We match this timeframe by setting the linear fraction accordingly.
-EPSILON_START = 1.0
-EPSILON_END = 0.05
-EXPLORATION_FRACTION = 15_000 / (NUM_EPISODES * EPISODE_LENGTH)  # Approx 0.0027
-
-EVAL_EPISODES = 10
-
-# Train / val / test split (Section V-A).
-TRAIN_FRACTION = 0.70
-VAL_FRACTION = 0.15
-# remaining is test.
+l.basicConfig(
+    format="[%(asctime)s] %(levelname)s    %(message)s",
+    level=l.INFO,
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
 
 
-# =============================================================================
-# State / observation (Section IV-B)
-# =============================================================================
-
-STATE_DIM = 8
-# Index of each component in the state vector s_t.
-IDX_DELTA_P = 0  # normalised price deviation: S_t / c - 1
-IDX_D_EDGE = 1  # distance to edge: (S_t - c) / (u - c)
-IDX_THETA = 2  # Stein signal: mean-reversion speed, clipped to [0, 1]
-IDX_DELTA_MU = 3  # mean deviation: (mu - S_t) / S_t
-IDX_SIGMA = 4  # normalised sigma: sigma / S_t, clipped to 0.1
-IDX_PHI_ACTIVE = 5  # active fraction over current episode so far
-IDX_VOL = 6  # rolling realised volatility, clipped to 0.1
-IDX_IN_RANGE = 7  # 1{S_t in [c(1-w), c(1+w)]}
-
-# Normalisation constants from the paper.
-THETA_CLIP = 1.0
-SIGMA_CLIP = 0.1
-VOL_CLIP = 0.1
-STATE_BOUND = 10.0  # Box low/high for the observation space
+@dataclass(frozen=True)
+class Fold:
+    block_numbers: list[int]
+    initial: Pool
 
 
-# =============================================================================
-# OU estimation (Section V-C)
-# =============================================================================
-#
-# theta, mu, sigma are precomputed for every bar in the input series using
-# polars-ols' rolling-least-squares, then looked up by bar index at env
-# step time. This is O(1) per step instead of O(window) and keeps the inner
-# loop free of any polars/numpy linalg work.
-#
-# The rolling OLS regresses dS_t = alpha + beta * S_t + eps on a sliding
-# window of OU_WINDOW_SECONDS bars; eq. (31) then recovers the OU parameters
-# (theta = -beta, mu = -alpha / beta, sigma = residual std). dt = 1 second
-# since the bars are 1Hz.
-
-OU_WINDOW_SECONDS = 1800  # rolling OLS window in seconds (1 bar/sec)
-
-
-def compute_ou_params(
-    df: pl.DataFrame, window: int = OU_WINDOW_SECONDS
-) -> pl.DataFrame:
-    """Augment a polars frame with rolling OLS-based (theta, mu, sigma).
-
-    Input frame must contain a `price` column. Adds columns:
-        d_price    : S_{t+1} - S_t
-        alpha_hat  : rolling OLS intercept
-        beta_hat   : rolling OLS slope on S_t
-        resid      : d_price - alpha_hat - beta_hat * price
-        theta      : max(0, -beta_hat)            (eq. 31, dt=1)
-        mu         : -alpha_hat / beta_hat        (eq. 31)
-        sigma      : rolling std of residuals     (eq. 31)
-
-    The first ~`window` rows will be null; downstream code treats those as
-    theta=0, mu=price, sigma=0 (no mean-reversion signal).
-    """
-    if "price" not in df.columns:
-        raise ValueError("compute_ou_params needs a 'price' column")
-    out = df.with_columns(
-        (pl.col("price") - pl.col("price").shift(1)).alias("d_price"),
-        pl.col("price").shift(1).alias("price_lag"),
-    )
-    rolling_kwargs = polars_ols.RollingKwargs(window_size=window, min_periods=window)
-    # `mode='coefficients'` returns a struct {const, price} with alpha and beta.
-    # `add_intercept=True` is the right way to ask for the intercept column
-    # (it's added implicitly as `const`).
-    out = out.with_columns(
-        polars_ols.compute_rolling_least_squares(
-            out["d_price"],
-            out["price_lag"],
-            add_intercept=True,
-            mode="coefficients",
-            rolling_kwargs=rolling_kwargs,
-        ).alias("coefs")
-    )
-    out = out.with_columns(
-        pl.col("coefs").struct.field("const").alias("alpha_hat"),
-        pl.col("coefs").struct.field("price_lag").alias("beta_hat"),
-    ).drop("coefs")
-    # Residual = y - (alpha + beta * x). With null_policy='drop' inside
-    # polars-ols, the first `window` rows of alpha/beta are null; residuals
-    # are therefore null there too.
-    out = out.with_columns(
-        (
-            pl.col("d_price")
-            - pl.col("alpha_hat")
-            - pl.col("beta_hat") * pl.col("price_lag")
-        ).alias("resid")
-    )
-    # Rolling std of residuals (ddof=0 to match the paper's eq. 13 OLS).
-    # `min_samples=100` lets sigma fill in faster than the OLS itself, so
-    # episodes starting just after t=window still have a usable sigma. The
-    # paper starts episodes at random offsets within the data, so this only
-    # affects a handful of episodes at the very beginning of the series.
-    out = out.with_columns(
-        pl.col("resid")
-        .pow(2)
-        .rolling_mean(window_size=window, min_samples=100)
-        .sqrt()
-        .alias("sigma")
-    )
-    out = out.with_columns(
-        pl.max_horizontal(pl.lit(0.0), -pl.col("beta_hat")).alias("theta"),
-        (-pl.col("alpha_hat") / pl.col("beta_hat")).alias("mu"),
-    )
-    # Fill nulls with neutral values so the env never sees NaN.
-    out = out.with_columns(
-        pl.col("theta").fill_null(0.0),
-        pl.col("mu").fill_null(pl.col("price")),
-        pl.col("sigma").fill_null(0.0),
-    )
-    return out
-
-
-# =============================================================================
-# Pool + env
-# =============================================================================
-
-
-@dataclass
-class PoolConfig:
-    """Constants derived from the pool + capital parameters."""
-
-    range_width: float = RANGE_WIDTH  # 2w
-    pool_fee_tier: float = POOL_FEE_TIER
-    pool_tvl: float = POOL_TVL
-    dex_cex_ratio: float = DEX_CEX_RATIO
-    initial_capital: float = INITIAL_CAPITAL
-    swap_fee_fraction: float = SWAP_FEE_FRACTION
-    gas_cost: float = GAS_COST
-
-    @property
-    def swap_fee(self) -> float:
-        """USD cost of the swap portion of a rebalance (eq. 30, second term)."""
-        return self.pool_fee_tier * self.swap_fee_fraction * self.initial_capital
-
-    @property
-    def rebalance_cost(self) -> float:
-        """Total cost C of one rebalance event."""
-        return self.swap_fee + self.gas_cost
-
-    @property
-    def liquidity_share(self) -> float:
-        """L_LP / L_total proxy for an equal-value deposit in [c(1-w), c(1+w)].
-
-        For narrow ranges around c this is roughly proportional to
-        K / (L_total * 2 * sqrt(w)). The absolute scale only matters for
-        fee magnitude relative to gas; tune INITIAL_CAPITAL / POOL_TVL /
-        RANGE_WIDTH if your fee numbers come out too small or too large.
-        """
-        return self.initial_capital / (self.pool_tvl * 2.0 * np.sqrt(self.range_width))
-
-
-class RammsteinEnv(gymnasium.Env):
-    """Concentrated-liquidity LP rebalancing environment (gymnasium.Env).
-
-    Observations: ``STATE_DIM``-dimensional float32 vector, bounded to
-        ``[-STATE_BOUND, STATE_BOUND]`` for all components (see IDX_*).
-    Actions:      ``Discrete(2)``  -- 0 = hold, 1 = rebalance.
-    Rewards:      (delta_fees - delta_gas) / K * REWARD_SCALE
-                  + ACTIVE_BONUS * 1{in_range}.
-
-    The environment is stateless across ``reset()`` calls: each episode
-    samples a random start index in the bar series (so long as there's
-    enough headroom for the OU warmup window plus the episode length).
-    """
-
-    metadata = {"render_modes": []}
+class Rammstein(gym.Env):
+    """Implement Uniswap liquidity ticks and fees correctly"""
 
     def __init__(
         self,
-        price: np.ndarray,
-        volume_cex: np.ndarray,
-        theta: np.ndarray,
-        mu: np.ndarray,
-        sigma: np.ndarray,
-        pool: PoolConfig | None = None,
-        episode_length: int = EPISODE_LENGTH,
+        position_width: int,  # in tick_spacing
+        rebalance_cost: Token,  # in liquidity
+        capital: Token,
+        swaps: pl.DataFrame,
+        liq: pl.DataFrame,
+        params: pl.DataFrame,
+        folds: list[Fold],
     ):
-        super().__init__()
-        assert len(price) == len(volume_cex) == len(theta) == len(mu) == len(sigma)
-        assert len(price) > episode_length + OU_WINDOW_SECONDS + 2
-        self.price = price
-        self.volume_cex = volume_cex
-        self.theta = theta
-        self.mu = mu
-        self.sigma = sigma
-        self.pool = pool or PoolConfig()
-        self.episode_length = episode_length
+        """
+        fee_tier: 0.0005, 0.003, 0.01
+        tick_spacing: 10 (for 0.05%), 60 (for 0.3%), 200 (for 1%)
+        position_width: number of ticks to add left and right. 2 means [current_tick-2, current_tick+2] (5 ticks wide)
+        rebalance_cost: in qty
+        initial_positions: liquidity positions
+        swaps: bn, ord, token0, token1
+        liq: bn, ord, first_tick, last_tick
+        params: bn, price, quote_volume, mu, theta, sigma, vol
+        """
 
-        # Gymnasium spaces.
-        self.observation_space = spaces.Box(
-            low=-STATE_BOUND,
-            high=STATE_BOUND,
-            shape=(STATE_DIM,),
-            dtype=np.float32,
+        assert capital.ord == rebalance_cost.ord
+
+        # fixed
+        self.position_width = position_width
+        self.rebalance_cost = rebalance_cost
+        self.capital = capital
+        self.swaps = swaps
+        self.liq = liq
+        self.params = params
+        self.folds = folds
+
+        self.epsilon_floor = 0.05
+        self.epsilon_decay = 0.9998
+        self.reward_scale = 100.0
+        self.active_bonus = 1e-4
+
+        # changed each reset
+        self.fold_index: None | int = None
+        self.contract: Emulator | None = None
+
+        # changed each step
+        self.gas = 0
+        self.block_number: None | int = None
+        self.active_rows = 0
+        self.epsilon = 1.0
+
+        # spaces
+        self.observation_space = gym.spaces.Dict(
+            {
+                "price_deviation": gym.spaces.Box(
+                    low=-1.0, high=1.0, shape=(1,), dtype=np.float32
+                ),
+                "distance_to_edge": gym.spaces.Box(
+                    low=-10.0, high=10.0, shape=(1,), dtype=np.float32
+                ),
+                "stein_signal": gym.spaces.Box(
+                    low=0.0, high=1.0, shape=(1,), dtype=np.float32
+                ),
+                "mean_deviation": gym.spaces.Box(
+                    low=-1.0, high=1.0, shape=(1,), dtype=np.float32
+                ),
+                "sigma": gym.spaces.Box(
+                    low=0.0, high=0.1, shape=(1,), dtype=np.float32
+                ),
+                "active_fraction": gym.spaces.Box(
+                    low=0.0, high=1.0, shape=(1,), dtype=np.float32
+                ),
+                "recent_volatility": gym.spaces.Box(
+                    low=0.0, high=0.1, shape=(1,), dtype=np.float32
+                ),
+                "in_range": gym.spaces.Discrete(n=2),  # 0: False, 1: True
+            }
         )
-        self.action_space = spaces.Discrete(2)
 
-        # Episode state (re-initialised on every reset()).
-        self._t = 0
-        self._c = 0.0
-        self._in_range = 0
-        self._t_in_range = 0
-        self._step_count = 0
-        self._vol_window: deque[float] = deque(maxlen=300)
-        self._prev_price = 0.0
-        # Per-episode metrics, exposed via info dict.
-        self._ep_fees = 0.0
-        self._ep_gas = 0.0
-        self._ep_rebalances = 0
+        self.action_space = gym.spaces.Discrete(n=2)  # 0: do nothing, 1: rebalance
 
-    # ----------------------------------------------------------- helpers
-    def _is_in_range(self, s: float) -> int:
-        lower = self._c * (1.0 - self.pool.range_width)
-        upper = self._c * (1.0 + self.pool.range_width)
-        return int(lower <= s <= upper)
+    def _observe(self):
+        assert self.block_number is not None and self.contract is not None
 
-    def _build_state(
-        self, s: float, theta: float, mu: float, sigma: float
-    ) -> np.ndarray:
-        d_edge = (
-            (s - self._c) / (self._c * self.pool.range_width) if self._c > 0 else 0.0
-        )
-        delta_p = (s / self._c - 1.0) if self._c > 0 else 0.0
-        delta_mu = (mu - s) / s if s > 0 else 0.0
-        realised_vol = (
-            float(np.std(self._vol_window)) if len(self._vol_window) >= 2 else 0.0
-        )
-        phi_active = self._t_in_range / max(self._step_count, 1)
-        state = np.array(
-            [
-                delta_p,
-                d_edge,
-                min(theta, THETA_CLIP),
-                delta_mu,
-                min(abs(sigma / s) if s > 0 else 0.0, SIGMA_CLIP),
-                phi_active,
-                min(realised_vol, VOL_CLIP),
-                float(self._in_range),
-            ],
-            dtype=np.float32,
-        )
-        return np.clip(state, -STATE_BOUND, STATE_BOUND)
+        p = self.params.filter(pl.col("block_number") == self.block_number)
 
-    # ----------------------------------------------------------- gym API
-    def reset(
-        self,
-        *,
-        seed: int | None = None,
-        options: dict | None = None,
-    ) -> tuple[np.ndarray, dict]:
+        assert p.height == 1
+        assert self.fold_index != None
+
+        row = p.row(0, named=True)
+
+        # clean this up and move to tick space, figure out what coord to use for OU params
+        s = (self.contract.sqrt_price_x96 / (2**96)) ** 2
+        l = (
+            v3math.get_sqrt_ratio_at_tick(self.contract.my_position.tick_lower)
+            / (2**96)
+        ) ** 2
+        u = (
+            v3math.get_sqrt_ratio_at_tick(self.contract.my_position.tick_upper)
+            / (2**96)
+        ) ** 2
+        c = l + (u - l) / 2
+        p = 1.0 / s
+        mu = row["mu"] if row["mu"] is not None and not np.isnan(row["mu"]) else p
+
+        fold = self.folds[self.fold_index]
+        numblks = len(fold.block_numbers)
+        remblks = fold.block_numbers[-1] - self.block_number
+
+        ret = {
+            "price_deviation": np.array([(s - c) / c], dtype=np.float32),
+            "distance_to_edge": np.array([(s - l) / (u - l) * 2 - 1], dtype=np.float32),
+            "mean_deviation": np.array([(mu - p) / p], dtype=np.float32),
+            "stein_signal": np.array(
+                [row["theta"] if row["theta"] is not None else 0.0],
+                dtype=np.float32,
+            ),
+            "sigma": np.array(
+                [row["sigma"] if row["sigma"] is not None else 0.0],
+                dtype=np.float32,
+            ),
+            "active_fraction": np.array(
+                [self.active_rows / (numblks - remblks) if numblks != remblks else 0],
+                dtype=np.float32,
+            ),
+            "recent_volatility": np.array(
+                [row["vol"] if row["vol"] is not None else 0.0], dtype=np.float32
+            ),
+            "in_range": int(s >= l and s <= u),
+        }
+
+        limits = {
+            "price_deviation": [-1.0, 1.0],
+            "distance_to_edge": [-10.0, 10.0],
+            "mean_deviation": [-1.0, 1.0],
+            "stein_signal": [0.0, 1.0],
+            "sigma": [0.0, 0.1],
+            "active_fraction": [0.0, 1.0],
+            "recent_volatility": [0.0, 0.1],
+        }
+
+        for k, l in limits.items():
+            assert k in ret and isinstance(ret[k], np.ndarray)
+            ret[k] = np.nan_to_num(ret[k], nan=0.0, posinf=l[1], neginf=l[0]).clip(*l)
+
+        return ret
+
+    def _info(self):
+
+        return {
+            # XXX
+            "fees": 0,
+            "bn": self.block_number,
+            "gas": self.gas,
+            "epsilon": self.epsilon,
+        }
+
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
 
-        # Random start: leave enough headroom for OU warmup + episode.
-        max_start = len(self.price) - self.episode_length - 2
-        min_start = OU_WINDOW_SECONDS + 1
-        self._t = int(self.np_random.integers(min_start, max_start))
+        if self.fold_index == None:
+            self.fold_index = 0
+        else:
+            self.fold_index = (self.fold_index + 1) % len(self.folds)
 
-        s = float(self.price[self._t])
-        self._c = s
-        self._in_range = 1
-        self._t_in_range = 0
-        self._step_count = 0
-        self._vol_window.clear()
-        self._prev_price = s
-        self._ep_fees = 0.0
-        self._ep_gas = 0.0
-        self._ep_rebalances = 0
+        fold = self.folds[self.fold_index]
 
-        theta = float(self.theta[self._t])
-        mu = float(self.mu[self._t])
-        sigma = float(self.sigma[self._t])
-        obs = self._build_state(s, theta, mu, sigma)
-        return obs, {}
+        self.gas = 0
+        self.active_rows = 0
+        self.block_number = fold.block_numbers[0]
+        self.epsilon = 1.0
 
-    def step(
-        self, action: int
-    ) -> tuple[np.ndarray, float, bool, bool, dict]:
-        action = int(action)
-        s = float(self.price[self._t])
-        s_next = float(self.price[self._t + 1])
-        v_dex = self.pool.dex_cex_ratio * float(self.volume_cex[self._t])
+        self.contract = Emulator(
+            fold.initial.sqrt_price_x96,
+            fold.initial.tick,
+            fold.initial.liquidity,
+            deepcopy(fold.initial.ticks),
+            fold.initial.tick_spacing,
+            fold.initial.fee_pips,
+            fold.initial.protocol_fraction,
+            fold.initial.max_liquidity_per_tick,
+        )
 
-        # Fee accrual: eq. (2) multiplied by the concentration proxy.
-        fee_t = 0.0
-        if self._in_range:
-            self._t_in_range += 1
-            fee_t = v_dex * self.pool.pool_fee_tier * self.pool.liquidity_share
-        self._ep_fees += fee_t
+        # initial position
+        tsp = fold.initial.tick_spacing
+        tick_lower = max(
+            Emulator.MIN_TICK,
+            fold.initial.tick - max(0, (self.position_width - 1) * tsp),
+        )
+        tick_upper = min(
+            Emulator.MAX_TICK, fold.initial.tick + (self.position_width * tsp)
+        )
+        assert Emulator.MIN_TICK <= tick_lower < tick_upper <= Emulator.MAX_TICK
 
-        # Action.
-        gas_t = 0.0
-        if action == 1:
-            self._c = s_next
-            gas_t = self.pool.rebalance_cost
-            self._ep_rebalances += 1
-        self._ep_gas += gas_t
+        tl = int(np.floor(tick_lower / tsp) * tsp)
+        tu = int(np.ceil(tick_upper / tsp) * tsp)
+        l = liquidity_for_value(fold.initial.sqrt_price_x96, tl, tu, self.capital)
+        self.contract.set_position(tl, tu, l)
+        init0, init1 = self.contract.position_amounts()
 
-        # Reward: eq. (28).
-        net_pnl = (fee_t - gas_t) / self.pool.initial_capital
-        reward = net_pnl * REWARD_SCALE + ACTIVE_BONUS * self._in_range
+        return self._observe(), self._info()
 
-        # Move forward.
-        if self._prev_price > 0:
-            ret = (s_next - self._prev_price) / self._prev_price
-            self._vol_window.append(ret)
-        self._prev_price = s_next
-        self._step_count += 1
-        self._t += 1
-        self._in_range = self._is_in_range(s_next)
+    def step(self, action):
+        assert self.contract is not None and self.block_number is not None
 
-        theta = float(self.theta[self._t])
-        mu = float(self.mu[self._t])
-        sigma = float(self.sigma[self._t])
-        obs = self._build_state(s_next, theta, mu, sigma)
+        observation = self._observe()
 
-        terminated = self._step_count >= self.episode_length
-        info = {
-            "fees": fee_t,
-            "gas": gas_t,
-            "in_range": self._in_range,
-            "rebalances": int(action == 1),
-            # Cumulative metrics, snapshotted on terminal step.
-            "ep_fees": self._ep_fees,
-            "ep_gas": self._ep_gas,
-            "ep_rebalances": self._ep_rebalances,
-            "ep_active_frac": self._t_in_range / max(self._step_count, 1),
-        }
-        return obs, float(reward), terminated, False, info
+        swaps = self.swaps.filter(pl.col("block_number") == self.block_number)
+        liq = self.liq.filter(pl.col("block_number") == self.block_number)
 
-    def close(self) -> None:
-        pass
+        for ord in sorted(set(swaps["ord"].to_list()) | set(liq["ord"].to_list())):
+            for row in swaps.filter(pl.col("ord") == ord).iter_rows(named=True):
+                if row["amount0"] > 0:
+                    token_in = 0
+                    amount_in = row["amount0"]
+                    amount_out = row["amount1"]
+                else:
+                    token_in = 1
+                    amount_in = row["amount1"]
+                    amount_out = row["amount0"]
 
+                self.contract.swap(self.block_number, token_in, int(amount_in))
 
-# =============================================================================
-# SB3 model + training
-# =============================================================================
-
-
-class DoubleDQN(DQN):
-    """DDQN variant of SB3's DQN.
-
-    SB3's stock ``DQN`` is vanilla Deep Q-Learning: the Bellman target uses
-    ``max_a Q_target(s', a)``, which over-estimates Q-values whenever the
-    target network's estimates are noisy. The original RAmmStein paper relies
-    on Double DQN (Decouple action selection from action evaluation) to
-    avoid this bias, so we override ``train()`` to compute the target as
-
-        a*   = argmax_a Q_online(s', a)
-        Q*   = Q_target(s', a*)
-        tgt  = r + gamma * (1 - done) * Q*
-
-    Everything else (replay sampling, Huber loss, gradient clipping,
-    target soft / hard update) is inherited unchanged.
-    """
-
-    def train(self, gradient_steps: int, batch_size: int = 100) -> None:
-        # Switch to train mode (this affects batch norm / dropout)
-        self.policy.set_training_mode(True)
-        # Update learning rate according to schedule
-        self._update_learning_rate(self.policy.optimizer)
-
-        losses = []
-        for _ in range(gradient_steps):
-            # Sample replay buffer
-            replay_data = self.replay_buffer.sample(
-                batch_size, env=self._vec_normalize_env
-            )
-            # For n-step replay, discount factor is gamma**n_steps (when no early termination)
-            discounts = (
-                replay_data.discounts
-                if replay_data.discounts is not None
-                else self.gamma
-            )
-
-            with th.no_grad():
-                # --- Double DQN target -----------------------------------
-                # Use the *online* net to pick the next action.
-                next_q_online = self.q_net(replay_data.next_observations)
-                next_actions = next_q_online.argmax(dim=1, keepdim=True)
-                # Use the *target* net to evaluate the value of that action.
-                next_q_target = self.q_net_target(replay_data.next_observations)
-                next_q_values = th.gather(next_q_target, dim=1, index=next_actions)
-                # 1-step TD target.
-                target_q_values = (
-                    replay_data.rewards
-                    + (1 - replay_data.dones) * discounts * next_q_values
+            for row in liq.filter(pl.col("ord") == ord).iter_rows(named=True):
+                self.contract.modify_liquidity(
+                    row["tick_lower"],
+                    row["tick_upper"],
+                    row["liquidity"],
                 )
-                # ---------------------------------------------------------
 
-            # Get current Q-values estimates
-            current_q_values = self.q_net(replay_data.observations)
-
-            # Retrieve the q-values for the actions from the replay buffer
-            current_q_values = th.gather(
-                current_q_values, dim=1, index=replay_data.actions.long()
-            )
-
-            # Compute Huber loss (less sensitive to outliers)
-            loss = F.smooth_l1_loss(current_q_values, target_q_values)
-            losses.append(loss.item())
-
-            # Optimize the policy
-            self.policy.optimizer.zero_grad()
-            loss.backward()
-            # Clip gradient norm
-            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-            self.policy.optimizer.step()
-
-        # Increase update counter
-        self._n_updates += gradient_steps
-
-
-def make_vec_env(
-    price: np.ndarray,
-    volume_cex: np.ndarray,
-    theta: np.ndarray,
-    mu: np.ndarray,
-    sigma: np.ndarray,
-    seed: int = 0,
-) -> DummyVecEnv:
-    """Wrap RammsteinEnv in a single-process VecEnv for SB3.
-
-    The env is wrapped with :class:`Monitor` so that the per-episode
-    metrics we stash in ``info`` (``ep_fees``, ``ep_gas``,
-    ``ep_rebalances``, ``ep_active_frac``) get aggregated into SB3's
-    ``ep_info_buffer`` on every terminal step. The custom callback reads
-    from that buffer to render progress-bar postfix values.
-    """
-
-    def _thunk():
-        env = RammsteinEnv(price, volume_cex, theta, mu, sigma)
-        # CRITICAL: Wrap with Monitor to populate ep_info_buffer
-        env = Monitor(
-            env,
-            info_keywords=(
-                "ep_fees",
-                "ep_gas",
-                "ep_rebalances",
-                "ep_active_frac",
-            ),
+        in_range = (
+            self.contract.my_position.tick_lower
+            <= self.contract.tick
+            < self.contract.my_position.tick_upper
         )
-        return env
 
-    return DummyVecEnv([_thunk])
-
-
-def build_model(
-    vec_env: DummyVecEnv,
-    log_dir: str,
-) -> DoubleDQN:
-    """Build the DDQN model with the paper's hyperparameters.
-
-    The MLP architecture (128, 64) is paper-faithful (Table I, "Net size");
-    the rest are the standard SB3 DQN hyperparameters and match Table I.
-
-    We use :class:`DoubleDQN` (a thin subclass of ``DQN`` that overrides
-    ``train()``) so that the Bellman target is computed with decoupled
-    action selection (online net) and action evaluation (target net) --
-    matching the paper's DDQN formulation.
-    """
-    policy_kwargs = dict(
-        net_arch=[128, 64],
-    )
-    return DoubleDQN(
-        policy="MlpPolicy",
-        env=vec_env,
-        # Force CPU: PCIe overhead for tiny tensors (8 floats) dominates on GPU.
-        device="cpu",
-        learning_rate=LEARNING_RATE,
-        buffer_size=REPLAY_BUFFER_SIZE,
-        learning_starts=BATCH_SIZE * 4,
-        batch_size=BATCH_SIZE,
-        gamma=DISCOUNT_FACTOR,
-        target_update_interval=TARGET_UPDATE_PERIOD,
-        train_freq=1,
-        gradient_steps=1,
-        exploration_fraction=EXPLORATION_FRACTION,
-        exploration_initial_eps=EPSILON_START,
-        exploration_final_eps=EPSILON_END,
-        policy_kwargs=policy_kwargs,
-        verbose=1,
-        tensorboard_log=os.path.join(log_dir, "tb"),
-        seed=0,
-    )
-
-
-class TqdmCallback(BaseCallback):
-    """Update a tqdm bar with metrics from SB3's ep_info_buffer."""
-
-    def __init__(self, total_timesteps: int):
-        super().__init__()
-        self.pbar = tqdm(
-            total=total_timesteps,
-            desc="training",
-            unit="step",
-            dynamic_ncols=True,
+        meta = self.folds[self.fold_index].initial
+        df = (
+            self.contract.swap_df.rechunk()
+            .filter(pl.col("bn") == self.block_number)
+            .sort("ord")
+            .with_columns(
+                price=pl.col("price") / (10 ** (meta.d1 - meta.d0)),
+                fee0=pl.col("fee0") / (10**meta.d0),
+                fee1=pl.col("fee1") / (10**meta.d1),
+            )
+            .with_columns(
+                fee=pl.when(self.capital.ord == 0)
+                .then(pl.col("fee0") + (pl.col("fee1") / pl.col("price")))
+                .otherwise(pl.col("fee1") + (pl.col("fee0") * pl.col("price"))),
+            )
+            .select(
+                pl.col("fee").sum(),
+            )
         )
-        self._loss_sum = 0.0
-        self._loss_n = 0
 
-    def _on_step(self) -> bool:
-        # Read from SB3's buffer without draining it.
-        postfix = {}
-        if self.model.ep_info_buffer:
-            ep = self.model.ep_info_buffer[-1]
-            profit = float(ep["ep_fees"] - ep["ep_gas"])
-            postfix.update(
-                {
-                    "profit": f"${profit:.2f}",
-                    "active": f"{ep['ep_active_frac'] * 100:.1f}%",
-                    "rebal": f"{int(ep['ep_rebalances'])}",
-                    "fees": f"${ep['ep_fees']:.0f}",
-                    "gas": f"${ep['ep_gas']:.0f}",
-                }
-            )
-        self.pbar.set_postfix(postfix)
-        self.pbar.update(1)
-        return True
+        new_gas = 0
+        reward = 0
+        new_fees = df["fee"].item() or 0.0
 
-    def _on_training_end(self) -> None:
-        self.pbar.close()
+        # rebalance
+        if action == 1:
+            # self.contract.burn(
+            #    self.lower_tick, self.upper_tick, self.my_liquidity, True
+            # )
+
+            # self.lower_tick = self.contract._sqrtp_to_tick(sqrtp) - self.position_width
+            # self.upper_tick = self.contract._sqrtp_to_tick(sqrtp) + self.position_width
+
+            # self.lower_tick = (
+            #    round(self.lower_tick / self.contract.tick_spacing)
+            #    * self.contract.tick_spacing
+            # )
+            # self.upper_tick = (
+            #    round(self.upper_tick / self.contract.tick_spacing)
+            #    * self.contract.tick_spacing
+            # )
+
+            ## XXX add IL from swapping self.my_liquidity / 2
+            # self.contract.mint(
+            #    self.lower_tick, self.upper_tick, self.my_liquidity, True
+            # )
+            new_gas += self.rebalance_cost.amount
+
+        # trade was within our range
+        if in_range:
+            self.active_rows += 1
+            # Eq. 28 active bonus
+            reward += self.active_bonus
+
+        # Eq. 28 less active bonus
+        reward += (new_fees - new_gas) * self.reward_scale
+
+        # Advance to next state (t+1)
+        self.block_number += 1
+        truncated = self.block_number > self.folds[self.fold_index].block_numbers[-1]
+
+        if truncated:
+            next_observation = observation
+        else:
+            next_observation = self._observe()
+
+        # update counters
+        self.gas += new_gas
+        self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_floor)
+
+        return next_observation, reward, False, truncated, self._info()
 
 
-def train(
-    price: np.ndarray,
-    volume_cex: np.ndarray,
-    theta: np.ndarray,
-    mu: np.ndarray,
-    sigma: np.ndarray,
-    log_dir: str,
-    num_episodes: int = NUM_EPISODES,
-    seed: int = 0,
-) -> DoubleDQN:
-    vec_env = make_vec_env(price, volume_cex, theta, mu, sigma, seed=seed)
-    model = build_model(vec_env, log_dir)
+class Experience:
+    def __init__(self, capacity, observation_dim):
+        self.capacity = capacity
+        self.ptr = 0
+        self.size = 0
 
-    total_timesteps = num_episodes * EPISODE_LENGTH
-    print(
-        f"[rammstein] Training DQN for {num_episodes} episodes, "
-        f"{EPISODE_LENGTH} steps each ({total_timesteps:,} total timesteps)..."
+        # ring buffer
+        self.observations = np.empty((capacity, observation_dim), dtype=np.float32)
+        self.actions = np.empty((capacity, 1), dtype=np.int64)
+        self.rewards = np.empty((capacity, 1), dtype=np.float32)
+        self.next_observations = np.empty((capacity, observation_dim), dtype=np.float32)
+        self.terminated = np.empty((capacity, 1), dtype=np.bool_)
+
+    def add(self, o, a, r, o_next, t):
+        self.observations[self.ptr] = o
+        self.actions[self.ptr] = a
+        self.rewards[self.ptr] = r
+        self.next_observations[self.ptr] = o_next
+        self.terminated[self.ptr] = t
+
+        self.ptr = (self.ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(self, batch_size):
+        idx = np.random.randint(0, self.size, size=min(self.size, batch_size))
+        return (
+            torch.as_tensor(self.observations[idx]),
+            torch.as_tensor(self.actions[idx]),
+            torch.as_tensor(self.rewards[idx]),
+            torch.as_tensor(self.next_observations[idx]),
+            torch.as_tensor(self.terminated[idx]),
+        )
+
+
+async def make_folds(
+    l: list, fold_size: int, ep: BaseEndpoint, contract: str
+) -> list[Fold]:
+    from random import sample
+    from math import ceil
+    from more_itertools import batched
+
+    sem = asyncio.Semaphore(4)
+
+    async def fold(bn: list[int], contract: str) -> Fold:
+        async with sem:
+            return Fold(block_numbers=bn, initial=await pool_meta(ep, bn[0], contract))
+
+    fut = [
+        fold(ll, contract)
+        for ll in sample(list(batched(l, fold_size)), ceil(len(l) / fold_size))
+        if len(ll) == fold_size
+    ]
+
+    return await asyncio.gather(*fut)
+
+
+gym.register(
+    id="Rammstein-v1",
+    entry_point=Rammstein,
+)
+
+
+async def prepare(
+    swaps: pl.DataFrame,
+    liq: pl.DataFrame,
+    params: pl.DataFrame,
+    ep: BaseEndpoint,
+    contract: str,
+) -> tuple[list[Fold], list[Fold], list[Fold], Pool]:
+    from tqdm import tqdm
+    from math import floor
+    import matplotlib.pyplot as plt
+    from torch import nn
+    from torch import optim
+    import random
+    from gymnasium.wrappers import FlattenObservation
+    from copy import deepcopy
+
+    first_bn = min(
+        swaps["block_number"].min(),
+        liq["block_number"].min(),
+        params["block_number"].min(),
     )
-    t0 = time.time()
-    callback = TqdmCallback(total_timesteps=total_timesteps)
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=callback,
-        progress_bar=False,  # we use our own
+    last_bn = max(
+        swaps["block_number"].max(),
+        liq["block_number"].max(),
+        params["block_number"].max(),
     )
-    elapsed = time.time() - t0
-    print(f"[rammstein] Training finished in {elapsed / 60:.1f} min")
 
-    os.makedirs(log_dir, exist_ok=True)
-    model_path = os.path.join(log_dir, "dqn_model.zip")
-    model.save(model_path)
-    print(f"[rammstein] Saved DQN model to {model_path}")
-    return model
+    block_range = list(range(first_bn, last_bn + 1))
+    blen = len(block_range)
+
+    train_len = floor(blen * 0.7)
+    train_len = 1000
+    val_len = floor(blen * 0.15)
+    val_len = 100
+    test_len = blen - train_len - val_len
+    train, val, test = (
+        block_range[:train_len],
+        block_range[train_len : train_len + val_len],
+        block_range[train_len + val_len :],
+    )
+
+    l.info(f"train {len(train)} blocks, val {len(val)} blocks, test {len(test)} blocks")
+
+    trainf = await make_folds(
+        train, train_len // 2, ep, contract
+    )  # min(train_len // 5, 36_000 // 12), ep, contract)
+    valf = await make_folds(val, val_len, ep, contract)
+    testf = await make_folds(test, test_len, ep, contract)
+    meta = await pool_meta(ep, first_bn, contract)
+
+    return trainf, valf, testf, meta
 
 
-# =============================================================================
-# Evaluation (greedy rollout, mirroring Section VIII)
-# =============================================================================
+def train_agent(
+    train: list[Fold],
+    val: list[Fold],
+    swaps: pl.DataFrame,
+    liq: pl.DataFrame,
+    params: pl.DataFrame,
+    capital: Token,
+    rebalance: Token,
+):
+    from tqdm import tqdm
+    from math import floor
+    import matplotlib.pyplot as plt
+    from torch import nn
+    from torch import optim
+    from gymnasium.wrappers import FlattenObservation
+    from copy import deepcopy
 
-
-def evaluate(
-    price: np.ndarray,
-    volume_cex: np.ndarray,
-    theta: np.ndarray,
-    mu: np.ndarray,
-    sigma: np.ndarray,
-    model: DQN,
-    pool: PoolConfig,
-    n_episodes: int = EVAL_EPISODES,
-    seed: int = 0,
-) -> dict:
-    """Greedy evaluation: run n_episodes end-to-end and report paper metrics."""
-    np.random.seed(seed)
-    active_fracs, rebal_counts, fees_tot, gas_tot = [], [], [], []
-
-    for _ in range(n_episodes):
-        env = RammsteinEnv(price, volume_cex, theta, mu, sigma, pool=pool)
-        env.reset(seed=seed)
-        rebalances = 0
-        fees = 0.0
-        gas = 0.0
-        in_range_steps = 0
-
-        for _ in range(EPISODE_LENGTH):
-            obs = env._build_state(
-                float(env.price[env._t]),
-                float(env.theta[env._t]),
-                float(env.mu[env._t]),
-                float(env.sigma[env._t]),
-            )
-            # deterministic=True -> greedy argmax
-            action, _ = model.predict(obs, deterministic=True)
-            action = int(action)
-
-            v_dex = pool.dex_cex_ratio * float(env.volume_cex[env._t])
-            if env._in_range:
-                fees += v_dex * pool.pool_fee_tier * pool.liquidity_share
-                in_range_steps += 1
-            if action == 1:
-                rebalances += 1
-                gas += pool.rebalance_cost
-
-            _, _, terminated, _, _ = env.step(action)
-            if terminated:
-                break
-
-        active_fracs.append(in_range_steps / EPISODE_LENGTH)
-        rebal_counts.append(rebalances)
-        fees_tot.append(fees)
-        gas_tot.append(gas)
-
-    fees_tot = np.array(fees_tot)
-    gas_tot = np.array(gas_tot)
-    return {
-        "active_pct": float(np.mean(active_fracs) * 100),
-        "rebalances": int(np.sum(rebal_counts)),
-        "fees_usd": float(fees_tot.sum()),
-        "gas_usd": float(gas_tot.sum()),
-        "net_pnl_usd": float((fees_tot - gas_tot).sum()),
-        "net_roi_pct": float(
-            (fees_tot - gas_tot).sum() / (pool.initial_capital * n_episodes) * 100
-        ),
-        "fee_to_gas": float(fees_tot.sum() / max(gas_tot.sum(), 1e-9)),
+    args = {
+        "position_width": 200,
+        "rebalance_cost": rebalance,
+        "capital": capital,
+        "swaps": swaps,
+        "liq": liq,
+        "params": params,
     }
 
+    train_env = FlattenObservation(gym.make("Rammstein-v1", folds=train, **args))
+    val_env = FlattenObservation(gym.make("Rammstein-v1", folds=val, **args))
 
-# =============================================================================
-# Polars input
-# =============================================================================
-#
-# Expected CSV format: Binance historical trades dump, one row per fill.
-# No header; seven columns in this order:
-#     trade_id, price, qty, quoteQty, time, isBuyerMaker, isBestMatch
-# `time` is microseconds since epoch (UTC). `quoteQty` is USDT notional,
-# which we use directly as `cex_volume`.
-#
-# Schema reference (parquet file format):
-#     ts         : datetime    trade timestamp (UTC)
-#     price      : float64     trade price
-#     cex_volume : float64     USDT notional of the trade
-#
-# Either source ends up as (ts, price, cex_volume) and is then resampled
-# into 1-second bars by `resample_to_1hz`.
-
-BINANCE_CSV_COLUMNS = [
-    "trade_id",
-    "price",
-    "qty",
-    "quoteQty",
-    "time",
-    "isBuyerMaker",
-]
-
-
-def _load_binance_csv(path: str) -> pl.DataFrame:
-    """Read a Binance historical-trades CSV into (ts, price, cex_volume)."""
-    return pl.read_csv(
-        path,
-        has_header=True,
-        new_columns=BINANCE_CSV_COLUMNS,
-    ).select(
-        ts=pl.col("time").cast(pl.Datetime("ms")).dt.replace_time_zone("UTC"),
-        price=pl.col("price"),
-        cex_volume=pl.col("quoteQty"),
+    policy = nn.Sequential(
+        nn.Linear(train_env.observation_space.shape[0], 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, train_env.action_space.n),
     )
 
+    opt = optim.Adam(policy.parameters(), lr=0.0001)
 
-def load_trades(path: str) -> pl.DataFrame:
-    """Load irregular trades from a Binance historical-trades CSV.
+    target = deepcopy(policy)
+    target.load_state_dict(policy.state_dict())
+    target.eval()
 
-    Output schema (pre-resample):
-        ts         : datetime[UTC]
-        price      : float64
-        cex_volume : float64
+    frag = []
+    replay_memory = Experience(100_000, train_env.observation_space.shape[0])
+    steps = 0
 
-    Resampling to 1-second bars is a separate step; see `resample_to_1hz`.
-    """
-    df = _load_binance_csv(path)
-    df = df.sort("ts")
-    # Drop rows where the price is null/NaN/<=0 (defensive; Binance feeds
-    # shouldn't produce these, but a malformed CSV can).
-    df = df.filter(pl.col("price").is_finite() & (pl.col("price") > 0))
-    return df
+    gamma = 0.99
+    epsilon = 1.0
+    epsilon_floor = 0.05
+    epsilon_decay = 0.9998
 
+    for episode in tqdm(range(len(train)), desc="training"):
+        episode_over = False
+        total_reward = 0
+        episode_loss = []
 
-def resample_to_1hz(df: pl.DataFrame) -> pl.DataFrame:
-    """Resample irregular trades into 1-second OHLCV+-ish bars.
+        observation, info = train_env.reset()
 
-    For each 1-second bucket:
-        price      = mean of trade prices in the bucket (forward-filled
-                     across empty buckets; leading nulls are dropped)
-        volume_cex = sum of cex_volume (USD) in the bucket; empty buckets
-                     are 0.0 by construction
+        while not episode_over:
+            if torch.rand(()).item() < epsilon:
+                action = train_env.action_space.sample()
+            else:
+                with torch.no_grad():
+                    action = (
+                        policy(torch.tensor(observation, dtype=torch.float32))
+                        .argmax(dim=-1)
+                        .item()
+                    )
 
-    Output schema:
-        ts         : datetime[UTC]   one row per second
-        price      : float64         forward-filled
-        volume_cex : float64         per-second USD volume
-    """
-    out = (
-        df.group_by_dynamic("ts", every="1s")
-        .agg(
-            pl.col("price").mean().alias("price"),
-            pl.col("cex_volume").sum().alias("volume_cex"),
+            next_observation, reward, terminated, truncated, info = train_env.step(
+                action
+            )
+
+            replay_memory.add(
+                observation, action, reward, next_observation, terminated or truncated
+            )
+
+            if replay_memory.size >= 128:
+                recall = replay_memory.sample(128)
+
+                y = recall[2].clone()  # rewards (clone to avoid buffer corruption)
+
+                # y = r + gamma * max_a'[ Q(observation_{t+1}, a', w-) ]
+                with torch.no_grad():
+                    best_actions = policy(recall[3]).argmax(dim=1, keepdim=True)
+                    q = target(recall[3]).gather(1, best_actions).squeeze(-1)
+
+                y += gamma * q.unsqueeze(-1) * (1 - recall[4].float())  # terminated
+
+                opt.zero_grad()
+
+                # (y - Q(observation_t, a, w))^2
+                loss = nn.functional.smooth_l1_loss(
+                    policy(recall[0]).gather(1, recall[1]), y
+                )
+                loss.backward()
+
+                episode_loss.append(loss.item())
+
+                opt.step()
+
+            if steps % 100 == 0:
+                target.load_state_dict(policy.state_dict())
+
+            total_reward += reward
+            episode_over = terminated or truncated
+            steps += 1
+            observation = next_observation
+            epsilon = max(epsilon * epsilon_decay, epsilon_floor)
+
+        # validation rollout (greedy)
+        val_observation, _ = val_env.reset()
+        val_over = False
+        val_rebals = 0
+        while not val_over:
+            with torch.no_grad():
+                val_action = (
+                    policy(torch.tensor(val_observation, dtype=torch.float32))
+                    .argmax(dim=-1)
+                    .item()
+                )
+            val_observation, _, terminated, truncated, val_info = val_env.step(
+                val_action
+            )
+            val_over = terminated or truncated
+            if val_action == 1:
+                val_rebals += 1
+
+        loss_val = np.mean(episode_loss) if episode_loss else 0.0
+        frag.append(
+            {
+                "episode": episode,
+                "fees": info["fees"],
+                "gas": info["gas"],
+                "loss": loss_val,
+                "pnl": info["fees"] - info["gas"],
+                "val_pnl": val_info["fees"] - val_info["gas"],
+                "val_rebalances": val_rebals,
+                "reward": total_reward,
+            }
         )
-        .upsample(time_column="ts", every="1s")
-        .with_columns(
-            pl.col("price").forward_fill(),
-            pl.col("volume_cex").fill_null(0.0),
+
+        print(
+            f"episode {frag[-1]['episode']}: loss={frag[-1]['loss']:.5f}, val_pnl={frag[-1]['val_pnl']:.2f}, val_rebalances={frag[-1]['val_rebalances']}"
         )
+
+    train_env.close()
+
+    df_frag = pl.DataFrame(frag).sort("episode").to_pandas()
+    df_frag.plot(x="episode", y="val_pnl", title="validation pnl")
+    plt.show()
+
+
+async def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Uniswap v3 backtest",
     )
-    # Drop leading seconds that have no trade yet (nothing to ffill from).
-    out = out.filter(pl.col("price").is_not_null())
-    return out
-
-
-def prepare_arrays(
-    df: pl.DataFrame,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Resample to 1Hz, compute OU params, and return numpy arrays.
-
-    Returns (price, volume_cex, theta, mu, sigma), all float64, length n.
-    """
-    df = resample_to_1hz(df)
-    df = compute_ou_params(df)
-    return (
-        df["price"].to_numpy().astype(np.float64),
-        df["volume_cex"].to_numpy().astype(np.float64),
-        df["theta"].to_numpy().astype(np.float64),
-        df["mu"].to_numpy().astype(np.float64),
-        df["sigma"].to_numpy().astype(np.float64),
-    )
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-
-def main():
-    parser = argparse.ArgumentParser(description="RAmmStein DDQN trainer.")
     parser.add_argument(
-        "--trades",
-        required=True,
-        help="Path to a Binance historical-trades CSV (no header, 7 cols: "
-        "trade_id, price, qty, quoteQty, time, isBuyerMaker, isBestMatch).",
+        "--blocks", nargs="+", help="Parquet files of collected blocks", default=[]
     )
-    parser.add_argument("--output", default="results/rammstein", help="Output dir.")
-    parser.add_argument("--mode", choices=["train", "eval"], default="train")
-    parser.add_argument("--episodes", type=int, default=NUM_EPISODES)
-    parser.add_argument("--eval-episodes", type=int, default=EVAL_EPISODES)
-    args = parser.parse_args()
-
-    print(f"[rammstein] Loading {args.trades}")
-    df = load_trades(args.trades)
-    print(f"[rammstein] Loaded {len(df):,} raw trades; resampling to 1Hz...")
-    price, volume_cex, theta, mu, sigma = prepare_arrays(df)
-    print(
-        f"[rammstein] {len(price):,} 1Hz bars ready "
-        f"(median theta={float(np.median(theta)):.4f}, "
-        f"mean volume USD={float(np.mean(volume_cex)):.0f})"
+    parser.add_argument(
+        "--logs", nargs="+", help="Parquet files of collected logs", default=[]
+    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--capital",
+        help="Position's capital in one token.",
+    )
+    parser.add_argument(
+        "--rebalance",
+        help="Position's rebalance cost in one token.",
+    )
+    parser.add_argument(
+        "--output", help="Parquet file output", default="backtest.parquet"
     )
 
-    # Train / val / test split (Section V-A).
-    n = len(price)
-    n_train = int(n * TRAIN_FRACTION)
-    n_test_start = int(n * (TRAIN_FRACTION + VAL_FRACTION))
-    train_price, train_vol = price[:n_train], volume_cex[:n_train]
-    train_theta, train_mu, train_sigma = theta[:n_train], mu[:n_train], sigma[:n_train]
-    test_price, test_vol = price[n_test_start:], volume_cex[n_test_start:]
-    test_theta, test_mu, test_sigma = (
-        theta[n_test_start:],
-        mu[n_test_start:],
-        sigma[n_test_start:],
+    args, unknown = parser.parse_known_args()
+
+    if args.verbose:
+        l.getLogger().setLevel(l.DEBUG)
+
+    blks = pl.read_parquet(args.blocks).select(
+        pl.col("block_number"),
+        ts=pl.from_epoch(pl.col("timestamp"), time_unit="s").dt.replace_time_zone(
+            "UTC"
+        ),
+    )
+    logs = (
+        pl.read_parquet(args.logs)
+        .join(blks, on=["block_number"])
+        .sort(["block_number", "transaction_index", "log_index"])
     )
 
-    if args.mode == "train":
-        model = train(
-            train_price,
-            train_vol,
-            train_theta,
-            train_mu,
-            train_sigma,
-            log_dir=args.output,
-            num_episodes=args.episodes,
-        )
-        print("[rammstein] Evaluating on held-out test split...")
-        if args.eval_episodes > 0:
-            metrics = evaluate(
-                test_price,
-                test_vol,
-                test_theta,
-                test_mu,
-                test_sigma,
-                model,
-                PoolConfig(),
-                args.eval_episodes,
-            )
-        else:
-            print("[rammstein] Skipping eval (--eval-episodes=0)")
-            metrics = {}
-    else:
-        # Eval-only path: load saved model.
-        model_path = os.path.join(args.output, "dqn_model.zip")
-        model = DQN.load(model_path)
-        if args.eval_episodes > 0:
-            metrics = evaluate(
-                test_price,
-                test_vol,
-                test_theta,
-                test_mu,
-                test_sigma,
-                model,
-                PoolConfig(),
-                args.eval_episodes,
-            )
-        else:
-            print("[rammstein] Skipping eval (--eval-episodes=0)")
-            metrics = {}
+    contract, endpoint = make_endpoint(logs)
+    swaps, liq, params, _ = await from_ethereum(logs, endpoint, contract)
+    train, val, test, meta = await prepare(swaps, liq, params, endpoint, contract)
 
-    print("\n[rammstein] Headline metrics on test data:")
-    for k, v in metrics.items():
-        print(f"  {k:>14s} = {v}")
+    capital = parse_amount(args.capital, meta)
+    rebalance = parse_amount(args.rebalance, meta)
+
+    l.info(
+        f"backtest {meta.symbol0}/{meta.symbol1}, capital {capital.str}, rebalance cost {rebalance.str}"
+    )
+
+    train_agent(train, val, swaps, liq, params, capital, rebalance)
 
 
 if __name__ == "__main__":
-    main()
+    import random
+
+    np.random.seed(42)
+    torch.manual_seed(42)
+    random.seed(42)
+
+    with logging_redirect_tqdm():
+        try:
+            asyncio.run(main())
+        except Exception as e:
+            l.exception("Fatal error during sync", exc_info=e)
+            sys.exit(1)

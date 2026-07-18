@@ -18,7 +18,11 @@ base class. Each adapter implements:
         than spot. AsterDex is a Binance-compatible perps DEX
         on BNB Chain, so ``pairs()`` emits one row per perp
         contract with ``quote = "usdt"`` and ``klines()``
-        returns perp OHLCV.
+        returns perp OHLCV. MEXC's spot v3 API doesn't expose
+        a public borrow-rate endpoint, so ``cross_rate`` and
+        ``isolated_rate`` are ``None`` for every MEXC pair;
+        ``funding_rate`` is populated from the public USDⓈ-M
+        funding-rate endpoint when a perpetual contract exists.
 
   * ``klines(client, symbol, start_time, end_time)``
         Returns at most ``MAX_KLINES`` daily ohlcv klines in the

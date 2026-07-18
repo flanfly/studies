@@ -5,14 +5,22 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "maturin>=1.14.1",
-    "polars-eth",
-    "polars-u256-plugin>=0.2.2",
+    "eth-hash[pycryptdome,pysha3]>=0.8.0",
+    "eth-utils[pycryptdome]>=6.0.0",
+    "gymnasium>=1.2.3",
+    "httpx>=0.28.1",
+    "matplotlib>=3.10.8",
+    "more-itertools>=10.8.0",
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "polars>=1.42.1",
+    "polars-ols>=0.3.5",
+    "pyarrow>=22.0.0",
+    "python-dotenv>=1.2.1",
     "sgqlc>=18",
+    "torch>=2.3.1",
+    "tqdm>=4.67.1",
 ]
-
-[tool.uv.sources]
-polars-eth = { workspace = true, editable = true }
 
 [dependency-groups]
 dev = [

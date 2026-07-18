@@ -1,6 +1,5 @@
 import polars as pl
 import polars_ols as pls
-import polars_u256_plugin as plu
 
 import gymnasium as gym
 import numpy as np

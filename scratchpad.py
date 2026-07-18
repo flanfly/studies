@@ -1761,3 +1761,294 @@ pl.read_parquet('live/klines.parquet').filter(pl.col('exchange') == 'kucoin')
 # %%
 import polars as pl
 pl.read_parquet('live/symbols.parquet').filter(pl.col('exchange') == 'asterdex')
+
+# %%
+import polars as pl
+
+stables = [c.lower() for c in [
+    "USDT", "BUSD", "USDC", "PAX", "PAXG", "TUSD", "DAI", "USDP", "UST",
+    "FDUSD", "USD1", "XUSD", "USD", "EURC", "EURI", "AEUR", "EUR", "GBP",
+    "JPY", "AUD", "CAD", "CHF", "NZD", "KRW", "RLUSD"
+]]
+
+df = (
+    pl.read_parquet('live/klines.parquet')
+    .group_by(['open_ts','base'])
+    .last()
+    .filter(pl.col('base').is_in(stables).not_())
+    .select(
+        ts=pl.col('open_ts'),
+        symbol=pl.col('exchange') + ":" + pl.col('symbol'),
+        base=pl.col('base'),
+        open=pl.col('open'),
+        high=pl.col('high'),
+        low=pl.col('low'),
+        close=pl.col('close'),
+        volume=pl.col('quote_volume'),
+    )
+)
+
+df.filter(pl.col('base') == 'btc').sort('ts')
+
+# %%
+import polars as pl
+import datetime as dt
+
+
+(
+    pl.read_parquet('live/klines.parquet')
+    .sort(['base','open_ts','exchange','symbol'])
+    .group_by(['base','open_ts'])
+    .first()
+    .select(
+        ts=pl.col('open_ts'),
+        symbol=pl.col('base'),
+        close=pl.col('close'),
+        age=(pl.col('open_ts') - pl.col('open_ts').min().over('symbol')).dt.total_days(),
+    )
+    .sort(['symbol','ts'])
+    .with_columns(
+        bucket=pl.col('age').qcut(5, labels=[str(i) for i in range(5)], allow_duplicates=True).over('ts'),
+        fwd=(pl.col('close').shift(-1).over('symbol') / pl.col('close')) - 1,
+    )
+    
+    .group_by(['ts','bucket'])
+    .agg(pl.col('fwd').mean())
+    .filter(pl.col('bucket').is_in(['0','4']))
+    .pivot(
+        index='ts', 
+        on='bucket', 
+        values='fwd'
+    )
+    .sort('ts')
+    
+    # 3. Calculate the long youngest short oldest spread
+    .select(
+        pl.col('ts'),
+        equity=(pl.col('0') - pl.col('4') - 0.0005 + 1).cum_prod(),
+    )
+).to_pandas().plot(x='ts',y='equity',logy=True)
+    
+    
+
+# %%
+import polars as pl
+import polars_ols
+import datetime as dt
+
+
+holding = 14
+
+(
+    pl.read_parquet('live/klines.parquet')
+    .sort(['base','open_ts','exchange','symbol'])
+    .group_by(['base','open_ts'])
+    .first()
+    .sort(['symbol','open_ts'])
+
+    .select(
+        ts=pl.col('open_ts'),
+        symbol=pl.col('base'),
+        close=pl.col('close'),
+        ret=(pl.col('close') / pl.col('close').shift(1).over('symbol')) - 1,
+        volume=pl.col('quote_volume'),
+    )
+    
+    .with_columns(
+        ar=pl.rolling_corr(a=pl.col("ret"),b=pl.col("ret").shift(1),window_size=30).over('symbol'),
+        age=(pl.col('ts') - pl.col('ts').min().over('symbol')).dt.total_days(),
+        mom=pl.col('close') - pl.col('close').shift(40).over('symbol'),
+        fwd=(pl.col('close').shift(-holding).over('symbol') / pl.col('close')) - 1,
+    )
+
+    .with_columns(target=pl.col('fwd').shift(holding).over('symbol'))
+    
+    .drop_nulls(subset=["fwd", "mom", "ar", "age"])
+        .drop_nulls(subset=["fwd", "mom", "ar", "age"])
+    
+    .with_columns(
+        pred=pl.col('target').least_squares.rolling_ols(
+            pl.col("mom"), pl.col("ar"), pl.col("age"),
+            window_size=60,
+            add_intercept=True
+        ).over("symbol")
+    )
+
+    .filter((pl.col("pred") > 0) & (pl.col("volume") > 100_000))
+    .sort(["ts", "pred"], descending=[False, True])
+    .group_by("ts").head(20)
+    .group_by("ts").agg(
+        strategy=(pl.col("fwd") - 0.0005).mean()
+    )
+    .mean() * 100
+)   
+
+
+# %%
+import polars as pl
+import polars_ols
+import datetime as dt
+
+holding = 14
+
+df_result = (
+    pl.read_parquet('live/klines.parquet')
+    .sort(['base','open_ts','exchange','symbol'])
+    .group_by(['base','open_ts'])
+    .first()
+    .sort(['symbol','open_ts'])
+
+    .select(
+        ts=pl.col('open_ts'),
+        symbol=pl.col('base'),
+        close=pl.col('close'),
+        ret=(pl.col('close') / pl.col('close').shift(1).over('symbol')) - 1,
+        volume=pl.col('quote_volume'),
+    )
+    
+    .with_columns(
+        ar=pl.rolling_corr(a=pl.col("ret"), b=pl.col("ret").shift(1), window_size=30).over('symbol'),
+        age=(pl.col('ts') - pl.col('ts').min().over('symbol')).dt.total_days(),
+        mom=pl.col('close') - pl.col('close').shift(40).over('symbol'),
+        con=(
+            pl.when(pl.col("ret") > 0).then(1).otherwise(0).rolling_sum(window_size=63, min_samples=63).over("symbol") / 63.0
+        ),
+        
+        # We need TWO forward returns now:
+        # 1. The 14-day return for the OLS to train on
+        fwd_signal=(pl.col('close').shift(-holding).over('symbol') / pl.col('close')) - 1,
+        # 2. The 1-day return for our actual daily portfolio accounting
+        fwd_1d=(pl.col('close').shift(-1).over('symbol') / pl.col('close')) - 1,
+    )
+
+    # FIX 1: Add .over('symbol') to prevent cross-coin leakage
+    .with_columns(
+        target=pl.col('fwd_signal').shift(holding).over('symbol')
+    )
+    
+    # FIX 2: Explicitly drop nulls for ALL features, targets, and filters
+    .drop_nulls(subset=["fwd_1d", "fwd_signal", "target", "mom", "ar", "age", "volume"])
+    
+    .with_columns(
+        pred=pl.col('target').least_squares.rolling_ols(
+            pl.col("mom"), pl.col("ar"), pl.col("age"),
+            window_size=60,
+            add_intercept=True
+        ).over("symbol")
+    )
+
+    # Strategy Execution
+    .filter((pl.col("pred") > 0) & (pl.col("volume") > 100_000))
+    .sort(["ts", "pred"], descending=[False, True])
+    .group_by("ts").head(20)
+    
+    # FIX 3: Calculate portfolio return using the 1-DAY forward return
+    .group_by("ts").agg(
+        strategy=(pl.col("fwd_1d") * -1 - 0.0005).mean()
+    )
+    .sort("ts")
+    .with_columns(
+        # Now cum_prod is mathematically valid because we are compounding daily returns!
+        equity=(pl.col('strategy') + 1).cum_prod()
+    )
+)
+
+df_result.to_pandas().plot(x='ts', y='equity', logy=True)
+
+# %%
+import polars as pl
+import datetime as dt
+
+days_volatility_sma_P = 30
+
+(
+    pl.read_parquet('live/klines.parquet')
+    .sort(['base','open_ts','exchange','symbol'])
+    .group_by(['base','open_ts'])
+    .first()
+ 
+    .sort(['symbol','open_ts'])
+
+    # base columns
+    .select(
+        ts=pl.col('open_ts'),
+        symbol=pl.col('base'),
+        open=pl.col('open'),
+        high=pl.col('high'),
+        low=pl.col('low'),
+        close=pl.col('close'),
+        volume=pl.col('quote_volume'),
+    )
+
+    # rs volatility
+    .with_columns(
+        ts=pl.col('ts').cast(pl.Datetime("us")),
+        ho = (pl.col('high') / pl.col('open')).log(),
+        hc = (pl.col('high') / pl.col('close')).log(),
+        lo = (pl.col('low') / pl.col('open')).log(),
+        lc = (pl.col('low') / pl.col('close')).log(),
+    )
+    .with_columns(
+        var=(pl.col('ho') * pl.col('hc')) + (pl.col('lo') * pl.col('lc'))
+    )
+    .with_columns(
+        vol=pl.col('var').rolling_mean(window_size=days_volatility_sma_P).over('symbol').mul(365).sqrt(),
+    )
+    .drop(['ho','hc','lo','lc','var'])
+)
+
+# %%
+import polars as pl
+
+(
+    pl.read_csv(
+        'BTCUSDT-all-trades.csv',
+        has_header=True,
+        new_columns=['trade_id','price','qty','quoteQty','time','isBuyerMaker']
+    )
+    .select(
+        ts=pl.col('time').cast(pl.Datetime("ms")).dt.replace_time_zone("UTC"),
+        price=pl.col('price'),
+        cex_volume=pl.col('quoteQty'),
+    )
+    .group_by_dynamic('ts', every='1s')
+    .agg(
+        pl.col('price').mean(),
+        pl.col('cex_volume').sum(),
+    )
+)
+
+# %%
+import polars as pl
+
+df = pl.read_parquet('ethereum__logs__25357100_to_25357194.parquet')
+
+import polars as pl
+
+# Helper function to parse Ethereum's 32-byte two's complement integers
+def parse_int256(b: bytes) -> float:
+    return float(int.from_bytes(b, byteorder='big', signed=True))
+
+# Assuming your dataframe is named 'df'
+df_parsed = df.with_columns(
+    # Slice the first two 32-byte chunks
+    amount0_raw=pl.col("data").bin.slice(0, 32).map_elements(parse_int256, return_dtype=pl.Float64),
+    amount1_raw=pl.col("data").bin.slice(32, 32).map_elements(parse_int256, return_dtype=pl.Float64)
+).with_columns(
+    # For pool 0x8ad... Token0 is USDC (6 decimals) and Token1 is WETH (18 decimals)
+    usdc_amount=pl.col("amount0_raw") / 1e6,
+    weth_amount=pl.col("amount1_raw") / 1e18
+).with_columns(
+    # The 0.3% fee is charged exclusively on the INPUT token (the positive amount)
+    fee_usdc=pl.when(pl.col("usdc_amount") > 0).then(pl.col("usdc_amount") * 0.003).otherwise(0),
+    fee_weth=pl.when(pl.col("weth_amount") > 0).then(pl.col("weth_amount") * 0.003).otherwise(0)
+)
+
+print(df_parsed.select(["block_number", "usdc_amount", "weth_amount", "fee_usdc", "fee_weth"]))
+
+# %%
+import polars as pl
+
+(
+    pl.read_parquet('tao_prices.parquet')
+    .

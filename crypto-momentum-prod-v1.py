@@ -15,11 +15,11 @@
 
 # %% editable=true slideshow={"slide_type": ""} tags=["parameters"]
 days_holding = "3"
-top_percentile = "0.95"
+top_percentile = "0.93"
 bottom_percentile = "0.00"
 days_momentum_score = "40"
 days_momentum_gate = ""
-min_volume = "1_000_000"
+min_volume = "500_000"
 
 # %%
 days_holding_P = int(days_holding)
@@ -62,16 +62,13 @@ diff = [
 ]
 
 df = (
-    pl.read_parquet("polarity/latest-data.parquet")
-    .filter(pl.col('asset').is_in(diff).not_())
-    .rename(
-        {
-            "asset": "symbol",
-            "price": "close",
-            'ts':'ts',
-        }
-    )
-    .with_columns(ts=pl.col("ts").dt.cast_time_unit("us"))
+    pl.read_parquet("live/klines.parquet")
+    .join(pl.read_parquet("polarity/latest-data.parquet").select(base=pl.col('asset')).unique(), on='base')
+    .with_columns(ts=pl.col("open_ts").dt.cast_time_unit("us"))
+    .sort(["base", "ts", "exchange", "quote"])
+    .group_by(["base", "ts"])
+    .last()
+    .with_columns(symbol=pl.col('base'))
     .sort(["symbol", "ts"])
     .with_columns(**{
         f'mom{n}': pl.col("close").pct_change(n).over("symbol")
@@ -82,10 +79,10 @@ df = (
             pl.col(f"mom{days_momentum_score_P}").rank(method="ordinal").over("ts")
             / pl.col(f"mom{days_momentum_score_P}").count().over("ts")
         ),
-        volume=pl.col('total_volume').rolling_mean(days_holding_P).over('symbol'),
+        volume=pl.col('quote_volume').rolling_mean(days_holding_P).over('symbol'),
     )
     .sort("ts")
-    .filter(pl.col("ts") .dt.year() >= 2026)
+    .filter(pl.col("ts") .dt.year() >= 2024)
     .drop_nulls(['volume'])
 )
 

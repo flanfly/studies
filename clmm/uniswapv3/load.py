@@ -253,8 +253,25 @@ async def pool_meta(ep: BaseEndpoint, bn: int, contract: str) -> Pool:
     return pool
 
 
+def make_endpoint(df: pl.DataFrame) -> tuple[str, BaseEndpoint]:
+    from os import getenv
+    from sgqlc.endpoint.httpx import HTTPXEndpoint
+
+    bn = df["block_number"].min()
+    pool = df["address"].unique().to_list()
+
+    assert len(pool) == 1
+    pool = f"0x{pool[0].hex()}"
+
+    headers = {"Authorization": f"""bearer {getenv('GRAPH_API_KEY')}"""}
+    url = "https://gateway.thegraph.com/api/[api-key]/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+    endpoint = HTTPXEndpoint(url, headers, client=AsyncClient(timeout=30))
+
+    return pool, endpoint
+
+
 async def from_ethereum(
-    df: pl.DataFrame,
+    df: pl.DataFrame, endpoint: BaseEndpoint | None = None, contract: str | None = None
 ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, Pool]:
     from sgqlc.endpoint.httpx import HTTPXEndpoint
     from os import getenv
@@ -496,18 +513,11 @@ async def from_ethereum(
 
     swaps = swaps.join(params.select("block_number"), on="block_number")
     liq = liq.join(params.select("block_number"), on="block_number")
+    bn = min(swaps["block_number"].min(), liq["block_number"].min())
 
-    bn = params["block_number"].min()
-    pool = df["address"].unique().to_list()
-
-    assert len(pool) == 1
-    pool = f"0x{pool[0].hex()}"
-
-    headers = {"Authorization": f"""bearer {getenv('GRAPH_API_KEY')}"""}
-    url = "https://gateway.thegraph.com/api/[api-key]/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
-    endpoint = HTTPXEndpoint(url, headers, client=AsyncClient())
-
-    meta = await pool_meta(endpoint, bn - 1, pool)
+    if endpoint is None or contract is None:
+        contract, endpoint = make_endpoint(params)
+    meta = await pool_meta(endpoint, bn - 1, contract)
 
     return (
         swaps,

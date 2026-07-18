@@ -30,6 +30,7 @@ from . import (
     Simple,
     Portfolio,
     Kline,
+    Manual,
 )
 
 eps = sys.float_info.epsilon
@@ -97,6 +98,23 @@ class Backtest:
                 "price": pl.Float64,
             },
         )
+
+    def _augment_universe(
+        self, history: pl.DataFrame, u: Universe
+    ) -> pl.DataFrame:
+        """Run each alpha's ``augment`` hook and return the resulting df.
+
+        The first alpha's enriched df wins; later alphas can extend it
+        via ``pl.concat`` if they want to expose their own columns.
+        An alpha that doesn't override ``augment`` returns ``u.df()``
+        unchanged, so simple alphas (e.g. ``Rank``) keep their old
+        behaviour for free.
+        """
+        for a in self.alpha:
+            augmented = a.augment(history, u)
+            if augmented is not None:
+                return augmented
+        return u.df()
 
     def run(
         self, start: dt.datetime | None = None, initial_equity: float = 1.0
@@ -216,16 +234,33 @@ class Backtest:
                     it.chain.from_iterable([a(self.history, u) for a in self.alpha])
                 )
 
+                # Ask the alphas to enrich the universe (rolling vol,
+                # momentum, ranks, …) and pass the resulting DataFrame
+                # to the portfolio model as a Manual universe.  This is
+                # how the vol-weighted portfolio model can read the
+                # ``var`` column the alpha just computed, without the
+                # alpha having to mutate the universe in place.
+                augmented = self._augment_universe(self.history, u)
+                p_u = Manual(
+                    augmented,
+                    timestamp_col=u.timestamp_col(),
+                    symbol_col=u.symbol_col(),
+                    price_col=u.price_col(),
+                    high_col=u.high_col(),
+                    low_col=u.low_col(),
+                    volume_col=u.volume_col(),
+                )
+
                 # portfolio construction
-                targets = self.portfolio(self.history, u, signals, folio)
+                targets = self.portfolio(self.history, p_u, signals, folio)
 
                 # risk management
                 adj = fc.reduce(
-                    lambda t, r: r(self.history, u, t, folio), self.risk, targets
+                    lambda t, r: r(self.history, p_u, t, folio), self.risk, targets
                 )
 
                 # execution
-                orders = self.execution(self.history, u, adj, folio)
+                orders = self.execution(self.history, p_u, adj, folio)
 
                 # Split the execution model's output: market orders fill
                 # against the current bar's close, everything else becomes
@@ -388,10 +423,25 @@ class Backtest:
         signals = it.chain.from_iterable(
             [a(self.history, self.universe) for a in self.alpha]
         )
+        # Augment the universe the same way ``run()`` does so the
+        # portfolio model sees the columns the alpha computed (e.g.
+        # ``var`` for the vol-weighted model).  Without this the
+        # portfolio model only ever sees the raw YFinance columns and
+        # falls back to equal weight.
+        augmented = self._augment_universe(self.history, self.universe)
+        p_u = Manual(
+            augmented,
+            timestamp_col=self.universe.timestamp_col(),
+            symbol_col=self.universe.symbol_col(),
+            price_col=self.universe.price_col(),
+            high_col=self.universe.high_col(),
+            low_col=self.universe.low_col(),
+            volume_col=self.universe.volume_col(),
+        )
         targets = fc.reduce(
-            lambda t, r: r(self.history, self.universe, t, folio),
+            lambda t, r: r(self.history, p_u, t, folio),
             self.risk,
-            self.portfolio(self.history, self.universe, list(signals), folio),
+            self.portfolio(self.history, p_u, list(signals), folio),
         )
 
         schema = {

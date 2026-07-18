@@ -70,6 +70,8 @@ stables = [c.lower() for c in [
     "JPY", "AUD", "CAD", "CHF", "NZD", "KRW", "RLUSD"
 ]]
 
+symbol_expr = pl.col('exchange') + ":" + pl.col('symbol') + " (" + pl.col('type') + ")"
+
 df = (
     # (cd live; uv run main.py)
     pl.read_parquet('live/symbols.parquet')
@@ -107,8 +109,7 @@ df = (
         on=['base']
     )
     .with_columns(
-        # use the binance kline symbols to make reference below work
-        symbol=pl.col('symbol_right'),
+        symbol=symbol_expr,
         ts=pl.col('open_ts'),
         volume=pl.col("quote_volume"),
     )
@@ -126,18 +127,9 @@ df = (
     .with_columns(
         var=(pl.col('ho') * pl.col('hc')) + (pl.col('lo') * pl.col('lc'))
     )
-    .select([
-        pl.col('ts'),
-        pl.col('symbol'),
-        pl.col('close'),
-        pl.col('high'),
-        pl.col('low'),
-        pl.col('volume'),
-        pl.col('var').rolling_mean(window_size=days_volatility_sma_P).over('symbol').mul(365).sqrt().alias('vol'),
-        pl.col('exchange'),
-        pl.col('rate'),
-        pl.col('type'),
-    ])
+    .with_columns(
+        vol=pl.col('var').rolling_mean(window_size=days_volatility_sma_P).over('symbol').mul(365).sqrt(),
+    )
         
     .drop_nulls(subset=['vol']) 
     .filter((pl.col('ts').dt.year() >= start_year_P))
@@ -176,24 +168,16 @@ res = test.report(plot=True)
 
 # %%
 print(
-    test.live(equity=10_000)
-    .join(df.select(
-        entry_ts=pl.col('ts'),
-        symbol=pl.col('symbol'), 
-        exchange=pl.col('exchange'),
-        rate=pl.col('rate'),
-        margin=pl.col('type'),
-    ), on=['entry_ts','symbol'])
+    test.live(equity=48.38)
+    .join(df.rename({'ts':'entry_ts'}), on=['entry_ts','symbol'])
     .select(
-        pl.col('entry_ts').dt.strftime('%Y-%m-%d'),
-        pl.col('exchange'),
-        pl.col('margin'),
-        pl.col('symbol'),
-        pl.col('entry_price'),
-        pl.col('rate'),
-        (pl.col('entry_price') * pl.col('shares')).abs().alias('cost'),
+        date=pl.col('entry_ts').dt.strftime('%Y-%m-%d'),
+        base=pl.col('base'),
+        quote=pl.col('quote'),
+        venue=pl.col('exchange') + " " + pl.col('type'),
+        sto=pl.col('shares') * -1,
     )
-    .sort('symbol')
+    .sort(['venue','base'])
 
     .write_csv()
 )
