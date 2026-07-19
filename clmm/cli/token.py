@@ -62,13 +62,25 @@ def liquidity_for_value(
     sqrt_price_x96: int, tick_lower: int, tick_upper: int, tok: Token
 ) -> int:
     """L such that the position's total value at the current price equals tok.amount."""
-    sa = v3math.get_sqrt_ratio_at_tick(tick_lower)
-    sb = v3math.get_sqrt_ratio_at_tick(tick_upper)
-    sc = min(max(sqrt_price_x96, sa), sb)  # clamp: one-sided ranges
-    a0 = v3math.get_amount0_delta(sc, sb, v3math.Q96, False)  # token0 leg per Q of L
-    a1 = v3math.get_amount1_delta(sa, sc, v3math.Q96, False)  # token1 leg per Q of L
+    a0, a1 = composition_in_range(sqrt_price_x96, tick_lower, tick_upper)
     a1_in_0 = a1 * (1 << 192) // (sqrt_price_x96**2)  # token1 leg valued in token0
     if tok.ord == 0:
         return tok.amount * v3math.Q96 // (a0 + a1_in_0)
     a0_in_1 = a0 * (sqrt_price_x96**2) // (1 << 192)
     return tok.amount * v3math.Q96 // (a0_in_1 + a1)
+
+
+def composition_in_range(
+    sqrt_price_x96: int,
+    tick_lower: int,
+    tick_upper: int,
+) -> tuple[int, int]:
+    sqrtp_lower = v3math.get_sqrt_ratio_at_tick(tick_lower)
+    sqrtp_upper = v3math.get_sqrt_ratio_at_tick(tick_upper)
+
+    # clamp price to lower/upper ticks
+    sqrtp = min(max(sqrt_price_x96, sqrtp_lower), sqrtp_upper)
+
+    token0 = v3math.get_amount0_delta(sqrtp, sqrtp_upper, v3math.Q96, False)
+    token1 = v3math.get_amount1_delta(sqrtp_lower, sqrtp, v3math.Q96, False)
+    return token0, token1

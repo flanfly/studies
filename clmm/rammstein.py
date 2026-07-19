@@ -12,13 +12,13 @@ from httpx import AsyncClient
 from copy import deepcopy
 
 from typing import Optional, Dict, Any, Literal, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from uniswapv3.emulator import Tick, Emulator
 from uniswapv3.load import Pool, make_endpoint, from_ethereum, pool_meta
 import uniswapv3.math as v3math
 
-from cli.token import Token, liquidity_for_value, parse_amount
+from cli.token import Token, liquidity_for_value, parse_amount, composition_in_range
 
 
 import sys
@@ -191,8 +191,8 @@ class Rammstein(gym.Env):
     def _info(self):
 
         return {
-            # XXX
-            "fees": 0,
+            "fees": self.fee,
+            "il": self.impermanent_loss,
             "bn": self.block_number,
             "gas": self.gas,
             "epsilon": self.epsilon,
@@ -212,6 +212,8 @@ class Rammstein(gym.Env):
         self.active_rows = 0
         self.block_number = fold.block_numbers[0]
         self.epsilon = 1.0
+        self.impermanent_loss = 0
+        self.fee = 0
 
         self.contract = Emulator(
             fold.initial.sqrt_price_x96,
@@ -239,7 +241,7 @@ class Rammstein(gym.Env):
         tu = int(np.ceil(tick_upper / tsp) * tsp)
         l = liquidity_for_value(fold.initial.sqrt_price_x96, tl, tu, self.capital)
         self.contract.set_position(tl, tu, l)
-        init0, init1 = self.contract.position_amounts()
+        self.init0, self.init1 = self.contract.position_amounts()
 
         return self._observe(), self._info()
 
@@ -283,11 +285,6 @@ class Rammstein(gym.Env):
             .filter(pl.col("bn") == self.block_number)
             .sort("ord")
             .with_columns(
-                price=pl.col("price") / (10 ** (meta.d1 - meta.d0)),
-                fee0=pl.col("fee0") / (10**meta.d0),
-                fee1=pl.col("fee1") / (10**meta.d1),
-            )
-            .with_columns(
                 fee=pl.when(self.capital.ord == 0)
                 .then(pl.col("fee0") + (pl.col("fee1") / pl.col("price")))
                 .otherwise(pl.col("fee1") + (pl.col("fee0") * pl.col("price"))),
@@ -299,30 +296,49 @@ class Rammstein(gym.Env):
 
         new_gas = 0
         reward = 0
-        new_fees = df["fee"].item() or 0.0
+        new_fees = int(df["fee"].item()) or 0
+
+        self.fee += new_fees
 
         # rebalance
         if action == 1:
-            # self.contract.burn(
-            #    self.lower_tick, self.upper_tick, self.my_liquidity, True
-            # )
+            # compute IL
+            end0, end1 = self.contract.position_amounts()
+            p = (self.contract.sqrt_price_x96 / (2**96)) ** 2
 
-            # self.lower_tick = self.contract._sqrtp_to_tick(sqrtp) - self.position_width
-            # self.upper_tick = self.contract._sqrtp_to_tick(sqrtp) + self.position_width
+            if self.capital.ord == 0:
+                pos_end = end0 + end1 / p
+                hold_end = self.init0 + self.init1 / p
+            else:
+                pos_end = end1 + end0 * p
+                hold_end = self.init1 + self.init0 * p
 
-            # self.lower_tick = (
-            #    round(self.lower_tick / self.contract.tick_spacing)
-            #    * self.contract.tick_spacing
-            # )
-            # self.upper_tick = (
-            #    round(self.upper_tick / self.contract.tick_spacing)
-            #    * self.contract.tick_spacing
-            # )
+            self.impermanent_loss += int(pos_end - hold_end)
 
-            ## XXX add IL from swapping self.my_liquidity / 2
-            # self.contract.mint(
-            #    self.lower_tick, self.upper_tick, self.my_liquidity, True
-            # )
+            # move position around latest price
+            meta = self.folds[self.fold_index].initial
+            tsp = meta.tick_spacing
+            tick_lower = max(
+                Emulator.MIN_TICK,
+                self.contract.tick - max(0, (self.position_width - 1) * tsp),
+            )
+            tick_upper = min(
+                Emulator.MAX_TICK, self.contract.tick + (self.position_width * tsp)
+            )
+            assert Emulator.MIN_TICK <= tick_lower < tick_upper <= Emulator.MAX_TICK
+
+            tl = int(np.floor(tick_lower / tsp) * tsp)
+            tu = int(np.ceil(tick_upper / tsp) * tsp)
+            liquidity = liquidity_for_value(
+                self.contract.sqrt_price_x96,
+                tl,
+                tu,
+                replace(self.capital, amount=int(pos_end) - self.rebalance_cost.amount),
+            )
+            self.contract.set_position(tl, tu, liquidity)
+            self.init0, self.init1 = self.contract.position_amounts()
+
+            # XXX add swap fees
             new_gas += self.rebalance_cost.amount
 
         # trade was within our range
@@ -332,7 +348,7 @@ class Rammstein(gym.Env):
             reward += self.active_bonus
 
         # Eq. 28 less active bonus
-        reward += (new_fees - new_gas) * self.reward_scale
+        reward += (new_fees / (10**self.capital.decimals) - new_gas) * self.reward_scale
 
         # Advance to next state (t+1)
         self.block_number += 1
@@ -395,7 +411,9 @@ async def make_folds(
 
     async def fold(bn: list[int], contract: str) -> Fold:
         async with sem:
-            return Fold(block_numbers=bn, initial=await pool_meta(ep, bn[0], contract))
+            return Fold(
+                block_numbers=bn, initial=await pool_meta(ep, bn[0] - 1, contract)
+            )
 
     fut = [
         fold(ll, contract)

@@ -265,7 +265,7 @@ def make_endpoint(df: pl.DataFrame) -> tuple[str, BaseEndpoint]:
 
     headers = {"Authorization": f"""bearer {getenv('GRAPH_API_KEY')}"""}
     url = "https://gateway.thegraph.com/api/[api-key]/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
-    endpoint = HTTPXEndpoint(url, headers, client=AsyncClient(timeout=30))
+    endpoint = HTTPXEndpoint(url, headers, timeout=30, client=AsyncClient(timeout=30))
 
     return pool, endpoint
 
