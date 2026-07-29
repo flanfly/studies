@@ -1,5 +1,7 @@
 import polars as pl
 import polars_ols as pls
+from os import getenv
+from sgqlc.endpoint.httpx import HTTPXEndpoint
 
 epoch_s_ms_threshold = 10_000_000_000
 epoch_ms_us_threshold = 20_000_000_000_000
@@ -149,6 +151,49 @@ def fee_growth(series: pl.Struct) -> pl.Float64:
         max(0, int(val)) * fee_pips / 10**6 / int(liq) if liq > 0 else 0
         for val, liq in pairs
     )
+
+
+pool = (
+    pl.scan_parquet("usdc-eth-005/*logs*.parquet")
+    .filter(pl.col("topic0") == swap)["address"]
+    .unique()
+    .list()
+)
+assert len(pool) == 1
+pool = f"0x{pool[0].hex()}"
+
+from httpx import Client
+from sgqlc.endpoint.httpx import HTTPXEndpoint
+
+print(pool)
+
+headers = {"Authorization": f"""bearer {getenv('GRAPH_API_KEY')}"""}
+url = "https://gateway.thegraph.com/api/[api-key]/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+endpoint = HTTPXEndpoint(url, headers, timeout=30, client=Client(timeout=30))
+
+query = """
+query GetPoolTokens($poolId: ID!, $bn: Int!) {
+  pool(id: $poolId) {
+    id
+    sqrtPrice
+    tick
+    liquidity
+    feeTier
+    token0 {
+      name
+      symbol
+      decimals
+    }
+    token1 {
+      name
+      symbol
+      decimals
+    }
+  }
+}
+"""
+data = endpoint(query, {"poolId": pool})
+print(data.get("data", {}).get("pool", {}))
 
 
 swaps = (
