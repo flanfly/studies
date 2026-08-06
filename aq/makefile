@@ -1,7 +1,7 @@
 # papers/%.pdf --marker--> papers/.extracted/%/ --goose--> summaries/%.md
 # Subdirectories are mirrored: papers/crypto/smith.pdf -> summaries/crypto/smith.md
 #
-MARKER = marker_single "$<" --mode fast --output_format markdown --output_dir "papers/.extracted/$*/"
+MARKER = marker_single "$<" --mode fast --output_format markdown --output_dir "papers/.extracted/$(dir $*)"
 GOOSE  = goose run --recipe recipes/extract-markdown.yaml --params "input_path=papers/.extracted/$*/" --params "output_file=$@"
 
 PDFS      := $(shell find papers -name '*.pdf' -not -path '*/.*' 2>/dev/null)
@@ -17,8 +17,10 @@ summaries: $(SUMMARIES)
 # % matches slashes in GNU make, so these handle nested paths unchanged.
 papers/.extracted/%/stamp: papers/%.pdf
 	@rm -rf $(dir $@)
-	@mkdir -p $(dir $@)
+	@mkdir -p papers/.extracted/$(dir $*)
 	$(MARKER)
+	@test -n "$$(find $(dir $@) -name '*.md' -print -quit 2>/dev/null)" \
+		|| { echo "ERROR: no markdown under $(dir $@) — did marker change its output layout?" >&2; exit 1; }
 	@touch $@
 
 summaries/%.md: papers/.extracted/%/stamp
