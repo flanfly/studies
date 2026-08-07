@@ -1,7 +1,7 @@
 # papers/%.pdf --marker--> papers/.extracted/%/ --goose--> summaries/%.md
 # Subdirectories are mirrored: papers/crypto/smith.pdf -> summaries/crypto/smith.md
 #
-MARKER = marker_single "$<" --mode fast --output_format markdown --output_dir "papers/.extracted/$(dir $*)"
+MARKER = uvx --from 'marker-pdf[all]' marker_single "$<" --mode fast --output_format markdown --output_dir "papers/.extracted/$(dir $*)"
 GOOSE  = goose run --recipe recipes/extract-markdown.yaml --params "input_path=papers/.extracted/$*/" --params "output_file=$@"
 
 PDFS      := $(shell find papers -name '*.pdf' -not -path '*/.*' 2>/dev/null)
