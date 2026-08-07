@@ -224,7 +224,7 @@ instructions: |
   strategy or additional sort.
   Signal definitions may run long; narrative sections may not. If you are past 3000 words you
   are reproducing the paper rather than extracting from it.
-prompt: "Summarize the paper in {{ input_path }} and write the summary to {{ output_file }}. You are a text only model and cannot process images."
+prompt: "Summarize the paper in {{ input_path }} and write the summary to {{ output_file }}. You are a text only model and cannot process images. Do not try to injest images."
 parameters:
   - key: input_path
     input_type: string
@@ -235,3 +235,11 @@ parameters:
     input_type: string
     requirement: required
     description: Path of the output markdown file.
+
+retry:
+  max_retries: 3
+  timeout_seconds: 30
+  checks:
+    - type: shell
+      command: "test -s {{ output_file }}"
+  on_failure: "rm -f {{ output_file }}"
