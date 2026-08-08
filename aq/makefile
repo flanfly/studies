@@ -2,13 +2,15 @@
 # Subdirectories are mirrored: papers/crypto/smith.pdf -> summaries/crypto/smith.md
 #
 MARKER = uvx --from 'marker-pdf[all]' marker_single "$<" --mode fast --output_format markdown --output_dir "papers/.extracted/$(dir $*)"
-GOOSE  = goose run --recipe recipes/extract-markdown.yaml --params "input_path=papers/.extracted/$*/" --params "output_file=$@"
+GOOSE  = goose run "Summarize the paper in papers/.extracted/$*/ and write the summary to $@. You are a text only model and cannot process images. Do not try to injest images."
 
 PDFS      := $(shell find papers -name '*.pdf' -not -path '*/.*' 2>/dev/null)
 SUMMARIES := $(patsubst papers/%.pdf,summaries/%.md,$(PDFS))
 
+IMAGE_NAME := "aq-sandbox"
+
 .PHONY: all
-all: rename
+all: rename Dockerfile.buildstamp
 	@$(MAKE) --no-print-directory summaries
 
 .PHONY: summaries
@@ -54,6 +56,10 @@ rename:
 	  echo "  $$f -> $$p/$$s.pdf"; \
 	  mv "$$f" "$$p/$$s.pdf"; \
 	done
+
+Dockerfile.buildstamp: Dockerfile .dockerignore
+	docker build -t $(IMAGE_NAME) .
+	touch Dockerfile.buildstamp
 
 # A killed goose run leaves a truncated summary that make records as done.
 .DELETE_ON_ERROR:
