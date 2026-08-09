@@ -126,7 +126,14 @@ async def kc_list(c: AsyncClient, prefix: str) -> list[str]:
         "delimiter": "/",
         "prefix": prefix,
     }
-    resp = await c.get("https://historical-data.kucoin.com/", params=q)
+    while True:
+        try:
+            resp = await c.get("https://historical-data.kucoin.com/", params=q)
+            break
+        except Exception as e:
+            l.error(f"{prefix}: {e}")
+            await asyncio.sleep(1)
+
     resp.raise_for_status()
     model = ListBucketResult.from_xml(resp.content)
 
@@ -136,7 +143,14 @@ async def kc_list(c: AsyncClient, prefix: str) -> list[str]:
 async def kc_fetch_zip(
     c: AsyncClient, path: str, schema: dict[str, pl.DataType], tscols: list[str] = []
 ) -> pl.DataFrame:
-    resp = await c.get(f"https://historical-data.kucoin.com/{path}")
+    while True:
+        try:
+            resp = await c.get(f"https://historical-data.kucoin.com/{path}")
+            break
+        except Exception as e:
+            l.error(f"{path}: {e}")
+            await asyncio.sleep(1)
+
     resp.raise_for_status()
 
     with io.BytesIO(resp.content) as bio:
