@@ -170,6 +170,11 @@ async def main():
         action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument(
+        "--output",
+        action="store_true",
+    )
+
 
     args = parser.parse_args()
 
@@ -191,7 +196,7 @@ async def main():
         FUTURES_SCHEMA,
         "data/futures/daily/klines/",
         "5m/",
-        "kc-futures-ohlcv-5m.parquet",
+        args.output,
         args.concurrency,
     )
 
