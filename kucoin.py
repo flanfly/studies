@@ -23,7 +23,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pyarrow import fs
 
-from dotenv import load_dotenv
 import logging as l
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -39,41 +38,6 @@ from typing import (
     Callable,
 )
 
-
-class TransientError(Exception):
-    pass
-
-
-load_dotenv()
-
-KLINE_SCHEMA = {
-    "open_time": pl.Int64,
-    "open": pl.Float64,
-    "high": pl.Float64,
-    "low": pl.Float64,
-    "close": pl.Float64,
-    "base_volume": pl.Float64,
-    "close_time": pl.Int64,
-    "quote_volume": pl.Float64,
-    "trades": pl.Int64,
-    "taker_buy_base_volume": pl.Float64,
-    "taker_buy_quote_volume": pl.Float64,
-    "ignore": pl.Int64,
-}
-KLINE_COLUMNS = [
-    "ts",
-    "symbol",
-    "open",
-    "high",
-    "low",
-    "close",
-    "base_volume",
-    "close_time",
-    "quote_volume",
-    "trades",
-    "taker_buy_base_volume",
-    "taker_buy_quote_volume",
-]
 EPOCH_S_MS_THRESHOLD = 10_000_000_000
 EPOCH_MS_US_THRESHOLD = 20_000_000_000_000
 CONCURRENCY = 20
@@ -82,6 +46,15 @@ FUNDING_SCHEMA = {
     "time": pl.Int64,
     "fundingRate": pl.Float64,
 }
+FUTURES_SCHEMA = {
+    "time": pl.Int64,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Utf8,
+}
+
 
 nsmap = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 
@@ -141,7 +114,11 @@ async def kc_list(c: AsyncClient, prefix: str) -> list[str]:
 
 
 async def kc_fetch_zip(
-    c: AsyncClient, path: str, schema: dict[str, pl.DataType], tscols: list[str] = []
+    c: AsyncClient,
+    path: str,
+    schema: dict[str, pl.DataType],
+    tscols: list[str] = [],
+    symbol: str | None = None,
 ) -> pl.DataFrame:
     while True:
         try:
@@ -174,6 +151,7 @@ async def kc_fetch_zip(
                         .alias(col)
                         for col in tscols
                     ]
+                    + ([pl.lit(symbol).alias("symbol")] if symbol else [])
                 )
             return df
 
@@ -202,33 +180,58 @@ async def main():
         l.error("Concurrency must be at least 1.")
         return
 
+    # await download(
+    #    FUNDING_SCHEMA,
+    #    "data/futures/daily/fundingRates/",
+    #    "",
+    #    "kc-funding-rates.parquet",
+    #    args.concurrency,
+    # )
+    await download(
+        FUTURES_SCHEMA,
+        "data/futures/daily/klines/",
+        "5m/",
+        "kc-futures-ohlcv-5m.parquet",
+        args.concurrency,
+    )
+
+
+async def download(
+    schema: dict[str, pl.DataType],
+    level1: str,
+    level2: str,
+    output: str,
+    concurrency: int,
+):
     async with AsyncClient() as c:
         from aiostream import stream, pipe
 
         async def fetch(pfx: str) -> pl.DataFrame:
-            return await kc_fetch_zip(c, pfx, FUNDING_SCHEMA, tscols=["time"])
+            symbol = None
+            if "symbol" not in schema:
+                symbol = pfx.removeprefix(level1).split("/")[0]
+
+            return await kc_fetch_zip(c, pfx, schema, tscols=["time"], symbol=symbol)
 
         async def list_dir(pfx: str):
-            # aiostream 0.7's ``flatten`` only accepts async iterables,
-            # so wrap the plain list in a stream.
-            return stream.iterate(await kc_list(c, pfx))
+            return stream.iterate(await kc_list(c, f"{pfx}{level2}"))
 
         gen = (
-            stream.iterate(await kc_list(c, "data/futures/daily/fundingRates/"))
-            | pipe.map(list_dir, ordered=False, task_limit=args.concurrency)
+            stream.iterate(await kc_list(c, level1))
+            | pipe.map(list_dir, ordered=False, task_limit=concurrency)
             | pipe.flatten()
             | pipe.filter(lambda pfx: pfx.endswith(".zip"))
             | pipe.map(
                 fetch,
                 ordered=False,
-                task_limit=args.concurrency,
+                task_limit=concurrency,
             )
         )
 
-        with open("kc-funding-rates.parquet", "wb") as fd:
+        with open(output, "wb") as fd:
             writer: pq.ParquetWriter | None = None
             async with gen.stream() as streamer:
-                async for df in tqdm(streamer, desc="funding rates"):
+                async for df in tqdm(streamer, desc="download"):
                     table = df.to_arrow()
                     if writer is None:
                         writer = pq.ParquetWriter(
