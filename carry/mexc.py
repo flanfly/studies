@@ -141,7 +141,7 @@ async def mc_fetch_csv(c: AsyncClient, url: str, fn: str) -> pl.DataFrame:
         raise RuntimeError(f"failed to download {fn} after 8 attempts")
 
     with io.BytesIO(resp.content) as bio:
-        df = pl.read_csv(bio, schema=SCHEMA).with_columns(
+        df = pl.read_csv(bio, schema=SCHEMA, null_values=["null"]).with_columns(
             [
                 pl.when(pl.col("open_time") > EPOCH_MS_US_THRESHOLD)
                 .then(pl.from_epoch("open_time", time_unit="us"))
@@ -193,19 +193,20 @@ async def download(
 
         with open(output, "wb") as fd:
             writer: pq.ParquetWriter | None = None
-            async with gen.stream() as streamer:
-                async for df in tqdm(streamer, desc="download"):
-                    table = df.to_arrow()
-                    if writer is None:
-                        writer = pq.ParquetWriter(
-                            fd,
-                            table.schema,
-                            compression="zstd",
-                        )
-                    writer.write_table(table)
-
-            if writer is not None:
-                writer.close()
+            try:
+                async with gen.stream() as streamer:
+                    async for df in tqdm(streamer, desc="download"):
+                        table = df.to_arrow()
+                        if writer is None:
+                            writer = pq.ParquetWriter(
+                                fd,
+                                table.schema,
+                                compression="zstd",
+                            )
+                        writer.write_table(table)
+            finally:
+                if writer is not None:
+                    writer.close()
 
 
 async def main():
