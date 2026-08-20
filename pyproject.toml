@@ -10,6 +10,7 @@ dependencies = [
     "aiostream>=0.7.1",
     "arch>=8.0.0",
     "beautifulsoup4>=4.14.3",
+    "betterproto[compiler]>=1.2.5",
     "ccxt>=4.5.54",
     "cloudml-hypertune>=0.1.0.dev6",
     "coingecko-sdk>=2.0.1",
@@ -23,8 +24,10 @@ dependencies = [
     "google-cloud-aiplatform>=1.139.0",
     "google-cloud-storage>=3.7.0",
     "great-tables>=0.21.0",
+    "grpcio-tools>=1.81.1",
     "gymnasium>=1.2.3",
     "holidays>=0.93",
+    "httpx-ws>=0.9.0",
     "humanize>=4.15.0",
     "jupyter>=1.1.1",
     "jupytext>=1.19.1",
@@ -40,6 +43,7 @@ dependencies = [
     "playwright>=1.59.0",
     "polars>=1.37.1",
     "polars-ols>=0.3.5",
+    "protobuf>=6.33.4",
     "pydantic-xml>=2.21.1",
     "python-dotenv>=1.2.1",
     "python-snappy>=0.7.3",
@@ -70,7 +74,6 @@ members = [
     "backtest_ng",
     "clmm",
     "clmm/polars_eth",
-    "aq",
 ]
 
 [dependency-groups]
