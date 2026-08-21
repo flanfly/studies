@@ -49,7 +49,7 @@ export function useWebSocket(url: string) {
         for (const [fn, w] of Object.entries(PairStateFieldWidths)) {
           const val = state[fn as keyof PairState]
           if (typeof val === 'number') {
-            row[fn] = val.toLocaleString(undefined, { minimumFractionDigits: w })
+            row[fn] = val.toLocaleString(undefined, { minimumFractionDigits: w, maximumFractionDigits: w })
           }
         }
         return [name, row]
@@ -67,23 +67,23 @@ function App() {
   const { data, ready } = useWebSocket('ws://ether:8000/ws');
 
   return (
-    <section id="center">
+    <section id="center" className="mx-auto max-w-4xl px-4 py-8">
       {ready && data !== null && (
-        <table>
-          <tr>
-            <th>ticker</th>
-            <th>basis</th>
-            <th>funding</th>
-            <th>spot mid (spread bps)</th>
-            <th>future mid (spread bps)</th>
+        <table className="w-full border-collapse rounded-lg border border-gray-200 shadow-sm">
+          <tr className="bg-gray-50">
+            <th className="px-4 py-3 text-left text-sm font-semibold">ticker</th>
+            <th className="px-4 py-3 text-right text-sm font-semibold">basis</th>
+            <th className="px-4 py-3 text-right text-sm font-semibold">funding</th>
+            <th className="px-4 py-3 text-right text-sm font-semibold">spot mid (spread bps)</th>
+            <th className="px-4 py-3 text-right text-sm font-semibold">future mid (spread bps)</th>
           </tr>
           {data.map(p => (
             <tr key={p[0]}>
-              <td className='p-2 text-left'>{p[0]}</td>
-              <td className='p-2 text-right tabular-nums'>{p[1]['basis_bps']}</td>
-              <td className='p-2 text-right tabular-nums'>{p[1]['funding']}</td>
-              <td className='p-2 text-right tabular-nums'>{p[1]['spot_mid']} ({p[1]['spot_spread_bps']})</td>
-              <td className='p-2 text-right tabular-nums'>{p[1]['future_mid']} ({p[1]['future_spread_bps']})</td>
+              <td className='px-4 py-2 text-left'>{p[0]}</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['basis_bps']}</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['funding']}</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['spot_mid']} ({p[1]['spot_spread_bps']})</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['future_mid']} ({p[1]['future_spread_bps']})</td>
             </tr>))}
         </table>
       )}

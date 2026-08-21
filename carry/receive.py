@@ -1,5 +1,6 @@
 import asyncio
 import anyio
+from httpx_ws import WebSocketNetworkError
 
 import datetime as dt
 import json
@@ -35,6 +36,8 @@ l.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stderr,
 )
+for n in ("httpx",):
+    l.getLogger(n).setLevel(l.WARNING)
 
 
 class ExchangeInfo(BaseModel):
@@ -305,19 +308,6 @@ class Contracts(BaseModel):
     data: list["Contracts.Data"]
 
 
-class MarkPrice(BaseModel):
-    class Data(BaseModel):
-        markPrice: float
-        indexPrice: float
-        timestamp: int
-        granularity: int
-
-    topic: str
-    type: Literal["message"]
-    subject: Literal["mark.index.price"]
-    data: Data
-
-
 class FundingRate(BaseModel):
     class Data(BaseModel):
         fundingRate: float
@@ -386,9 +376,7 @@ Message = Annotated[
         Welcome,
         Acknowledge,
         Error,
-        Annotated[
-            Union[FundingRate, MarkPrice, Ticker, Trade], Field(discriminator="subject")
-        ],
+        Annotated[Union[FundingRate, Ticker, Trade], Field(discriminator="subject")],
     ],
     Field(discriminator="type"),
 ]
@@ -636,6 +624,36 @@ class PairState(BaseModel):
         return None
 
 
+class Log:
+    def __init__(self, stem: str, schema: dict[str, pl.DataType], chunk_size=1_000_000):
+        self.chunk_size = chunk_size
+        self.schema = schema
+        self.queue = asyncio.Queue(maxsize=1024)
+        self.buffer = []
+        self.stem = stem
+        self.counter = 0
+
+    async def log(self, row):
+        await self.queue.put(row)
+
+    async def run(self):
+        try:
+            while True:
+                self.buffer.append(await self.queue.get())
+                if len(self.buffer) >= self.chunk_size:
+                    self.flush()
+
+        except asyncio.QueueShutDown:
+            return
+
+    def flush(self):
+        fn = f"{self.stem}{self.counter:04d}.parquet"
+        l.info(f"write {fn}")
+        pl.DataFrame(self.buffer, orient="row", schema=self.schema).write_parquet(fn)
+
+        self.buffer = []
+        self.counter += 1
+
 
 async def kc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queue):
     while True:
@@ -675,12 +693,8 @@ async def kc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queu
                         case _:
                             await out.put(msg)
 
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            l.error(f"kc_websocket: {e}")
-            for ee in e.exceptions or []:
-                l.error(f"kc_websocket: {ee}")
+        except* WebSocketNetworkError as e:
+            l.error(f"kc_websocket: network error, reconnect")
             await asyncio.sleep(2)
 
 
@@ -701,14 +715,42 @@ async def mc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queu
                         case BytesMessage(data=raw):
                             await out.put(PushDataV3ApiWrapper.FromString(raw))
 
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            l.error(f"mc_websocket {e}")
+        except* WebSocketNetworkError as e:
+            l.error(f"mc_websocket: network error, reconnect")
             await asyncio.sleep(2)
 
 
-async def exchange_data(states: dict[str, PairState]):
+BookSchema = {
+    "ts": pl.Datetime,
+    "symbol": pl.Utf8,
+    "bid_price": pl.Float64,
+    "bid_qty": pl.Int64,
+    "ask_price": pl.Float64,
+    "ask_qty": pl.Int64,
+}
+TradesSchema = {
+    "ts": pl.Datetime,
+    "symbol": pl.Utf8,
+    "price": pl.Float64,
+    "qty": pl.Int64,
+    "side": pl.Utf8,
+}
+
+FundingSchema = {
+    "ts": pl.Datetime,
+    "symbol": pl.Utf8,
+    "funding": pl.Float64,
+}
+
+
+async def exchange_data(
+    states: dict[str, PairState],
+    spot_book: Log,
+    spot_trades: Log,
+    future_book: Log,
+    future_trades: Log,
+    future_funding: Log,
+):
     from os import getenv
     from aiostream import stream
     import itertools as it
@@ -759,7 +801,6 @@ async def exchange_data(states: dict[str, PairState]):
             kc_topic_templates = [
                 "/contractMarket/tickerV2:",
                 "/contractMarket/execution:",
-                "/contract/instrument:",
             ]
             kc_topics = [
                 f"{p[0]}{p[1]}"
@@ -777,19 +818,29 @@ async def exchange_data(states: dict[str, PairState]):
 
                 while True:
                     msg = await queue.get()
+                    now = dt.datetime.now()
                     match msg:
-                        case MarkPrice() as mp:
-                            symbol = kc_symbols[msg.topic.split(":")[-1]]
-                            states[symbol].mark = mp.data.markPrice
-                            states[symbol].index = mp.data.indexPrice
-
                         case FundingRate() as fr:
                             symbol = kc_symbols[msg.topic.split(":")[-1]]
                             states[symbol].funding = fr.data.fundingRate * 1e4
+                            await future_funding.log(
+                                [ft.data.timestamp, symbol, fr.data.fundingRate * 1e4]
+                            )
 
                         case Trade() as t:
                             symbol = kc_symbols[msg.topic.split(":")[-1]]
                             states[symbol].last_future = float(t.data.price)
+                            await future_trades.log(
+                                [
+                                    dt.datetime.fromtimestamp(
+                                        t.data.ts / 1_000_000_000
+                                    ),
+                                    symbol,
+                                    t.data.price,
+                                    t.data.size,
+                                    t.data.side,
+                                ]
+                            )
 
                         case Ticker() as t:
                             symbol = kc_symbols[msg.topic.split(":")[-1]]
@@ -797,6 +848,18 @@ async def exchange_data(states: dict[str, PairState]):
                             states[symbol].future_ask_qty = float(t.data.bestAskSize)
                             states[symbol].future_bid_price = float(t.data.bestBidPrice)
                             states[symbol].future_bid_qty = float(t.data.bestBidSize)
+                            await future_book.log(
+                                [
+                                    dt.datetime.fromtimestamp(
+                                        t.data.ts / 1_000_000_000
+                                    ),
+                                    symbol,
+                                    t.data.bestAskPrice,
+                                    t.data.bestAskSize,
+                                    t.data.bestBidPrice,
+                                    t.data.bestBidSize,
+                                ]
+                            )
 
                         case PushDataV3ApiWrapper() as pd:
                             symbol = mc_symbols[pd.symbol]
@@ -806,17 +869,34 @@ async def exchange_data(states: dict[str, PairState]):
                                     states[symbol].last_spot = float(
                                         pd.publicAggreDeals.deals[-1].price
                                     )
+                                    for d in pd.publicAggreDeals.deals:
+                                        await spot_trades.log(
+                                            [
+                                                dt.datetime.fromtimestamp(
+                                                    d.time / 1_000
+                                                ),
+                                                symbol,
+                                                d.price,
+                                                d.quantity,
+                                                "buy" if d.tradeType == 1 else "sell",
+                                            ]
+                                        )
 
                                 case "publicAggreBookTicker":
-                                    states[symbol].spot_ask_price = float(
-                                        pd.publicAggreBookTicker.askPrice
-                                    )
-                                    states[symbol].spot_ask_qty = float(
-                                        pd.publicAggreBookTicker.askQuantity
-                                    )
-                                    states[symbol].spot_bid_price = float(
-                                        pd.publicAggreBookTicker.bidPrice
-                                    )
-                                    states[symbol].spot_bid_qty = float(
-                                        pd.publicAggreBookTicker.bidQuantity
+                                    d = pd.publicAggreBookTicker
+                                    states[symbol].spot_ask_price = float(d.askPrice)
+                                    states[symbol].spot_ask_qty = float(d.askQuantity)
+                                    states[symbol].spot_bid_price = float(d.bidPrice)
+                                    states[symbol].spot_bid_qty = float(d.bidQuantity)
+                                    await spot_book.log(
+                                        [
+                                            dt.datetime.fromtimestamp(
+                                                d.lastOrderCreateTime / 1_000
+                                            ),
+                                            symbol,
+                                            d.askPrice,
+                                            d.askQuantity,
+                                            d.bidPrice,
+                                            d.bidQuantity,
+                                        ]
                                     )

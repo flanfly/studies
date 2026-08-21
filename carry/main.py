@@ -5,14 +5,49 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from receive import exchange_data, PairState
+from receive import (
+    exchange_data,
+    PairState,
+    Log,
+    BookSchema,
+    TradesSchema,
+    FundingSchema,
+)
 
-global_pair_state: dict[str,PairState]  = { }
+global_pair_state: dict[str, PairState] = {}
+
 
 async def run_exchange_stream():
-
     global global_pair_state
-    await exchange_data(global_pair_state)
+
+    spot_book = Log("spot-book-", BookSchema)
+    spot_trades = Log("spot-trades-", TradesSchema)
+    future_book = Log("future-book-", BookSchema)
+    future_trades = Log("future-trades-", TradesSchema)
+    future_funding = Log("future-funding-", FundingSchema)
+
+    try:
+        await asyncio.gather(
+            exchange_data(
+                global_pair_state,
+                spot_book,
+                spot_trades,
+                future_book,
+                future_trades,
+                future_funding,
+            ),
+            spot_book.run(),
+            spot_trades.run(),
+            future_book.run(),
+            future_trades.run(),
+            future_funding.run(),
+        )
+    finally:
+        spot_book.flush()
+        spot_trades.flush()
+        future_book.flush()
+        future_trades.flush()
+        future_funding.flush()
 
 
 @asynccontextmanager
@@ -36,7 +71,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            msg = {k: v.model_dump(mode='json') for k,v in global_pair_state.items()}
+            msg = {k: v.model_dump(mode="json") for k, v in global_pair_state.items()}
             await websocket.send_json(msg)
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
