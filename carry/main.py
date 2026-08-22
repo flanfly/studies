@@ -20,11 +20,12 @@ global_pair_state: dict[str, PairState] = {}
 async def run_exchange_stream():
     global global_pair_state
 
-    spot_book = Log("spot-book-", BookSchema)
-    spot_trades = Log("spot-trades-", TradesSchema)
-    future_book = Log("future-book-", BookSchema)
-    future_trades = Log("future-trades-", TradesSchema)
-    future_funding = Log("future-funding-", FundingSchema)
+    chunk = 100_000_000
+    spot_book = Log("spot-book-", BookSchema, chunk_size=chunk)
+    spot_trades = Log("spot-trades-", TradesSchema, chunk_size=chunk)
+    future_book = Log("future-book-", BookSchema, chunk_size=chunk)
+    future_trades = Log("future-trades-", TradesSchema, chunk_size=chunk)
+    future_funding = Log("future-funding-", FundingSchema, chunk_size=chunk)
 
     try:
         await asyncio.gather(

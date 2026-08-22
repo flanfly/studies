@@ -1,6 +1,8 @@
 import asyncio
 import anyio
-from httpx_ws import WebSocketNetworkError
+import random
+import time
+from httpx_ws import WebSocketNetworkError, WebSocketDisconnect
 
 import datetime as dt
 import json
@@ -359,6 +361,11 @@ class Acknowledge(BaseModel):
     id: str
 
 
+class Pong(BaseModel):
+    type: Literal["pong"]
+    id: str
+
+
 class Error(BaseModel):
     type: Literal["error"]
     id: str
@@ -375,6 +382,7 @@ Message = Annotated[
     Union[
         Welcome,
         Acknowledge,
+        Pong,
         Error,
         Annotated[Union[FundingRate, Ticker, Trade], Field(discriminator="subject")],
     ],
@@ -556,8 +564,6 @@ class MEXCSocket:
                 match await ws.receive():
                     case str(msg):
                         msg = json.loads(msg)
-                        l.info(f"ack {ack}")
-
                         if ack["id"] != 0 or ack["code"] != 0:
                             raise ValueError(f"failed to subscribe: {ack}")
 
@@ -586,33 +592,44 @@ class PairState(BaseModel):
         if self.spot_ask_price is not None and self.spot_bid_price is not None:
             return (self.spot_ask_price + self.spot_bid_price) / 2
         return None
+        if self.spot_ask_price is None or self.spot_ask_price == 0:
+            return self.spot_bid_price
+        if self.spot_bid_price is None or self.spot_bid_price == 0:
+            return self.spot_ask_price
+        return (self.spot_ask_price + self.spot_bid_price) / 2
 
     @computed_field
     @property
     def spot_spread_bps(self) -> float | None:
-        if self.spot_ask_price is not None and self.spot_bid_price is not None:
-            return (
-                (self.spot_ask_price - self.spot_bid_price) / self.spot_bid_price * 1e4
-            )
-        return None
+        if self.spot_ask_price is None or self.spot_bid_price is None:
+            return None
+        if self.spot_ask_price == 0 or self.spot_bid_price == 0:
+            return None
+
+        return (self.spot_ask_price - self.spot_bid_price) / self.spot_bid_price * 1e4
 
     @computed_field
     @property
     def future_mid(self) -> float | None:
-        if self.future_ask_price is not None and self.future_bid_price is not None:
-            return (self.future_ask_price + self.future_bid_price) / 2
-        return None
+        if self.future_ask_price is None or self.future_ask_price == 0:
+            return self.future_bid_price
+        if self.future_bid_price is None or self.future_bid_price == 0:
+            return self.future_ask_price
+        return (self.future_ask_price + self.future_bid_price) / 2
 
     @computed_field
     @property
     def future_spread_bps(self) -> float | None:
-        if self.future_ask_price is not None and self.future_bid_price is not None:
-            return (
-                (self.future_ask_price - self.future_bid_price)
-                / self.future_bid_price
-                * 1e4
-            )
-        return None
+        if self.future_ask_price is None or self.future_bid_price is None:
+            return None
+        if self.future_ask_price == 0 or self.future_bid_price == 0:
+            return None
+
+        return (
+            (self.future_ask_price - self.future_bid_price)
+            / self.future_bid_price
+            * 1e4
+        )
 
     @computed_field
     @property
@@ -655,16 +672,50 @@ class Log:
         self.counter += 1
 
 
+async def kc_ping(ws, interval: int):
+    try:
+        while True:
+            await ws.send_json(
+                {
+                    "id": secrets.token_urlsafe(8),
+                    "type": "ping",
+                }
+            )
+            await asyncio.sleep(interval)
+
+    except Exception as e:
+        l.debug(f"kc_ping: socket closed, ending ping loop: {e!r}")
+        return
+
+
+async def mc_ping(ws, interval: int):
+    try:
+        while True:
+            await ws.send_json(
+                {
+                    "method": "PING",
+                }
+            )
+            await asyncio.sleep(interval)
+
+    except Exception as e:
+        l.debug(f"mc_ping: socket closed, ending ping loop: {e!r}")
+        return
+
+
 async def kc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queue):
+    backoff = 1.0
     while True:
+        t0 = time.monotonic()
         try:
             tok = await kc_public_token(client)
             srv = tok.data.instanceServers[0]
             ep = f"{srv.endpoint}?token={tok.data.token}"
 
-            async with aconnect_ws(ep, client) as ws:
+            async with aconnect_ws(
+                ep, client, keepalive_ping_timeout_seconds=None
+            ) as ws:
 
-                # one subscribe per topic-family, comma-joined, throttled
                 for t in topics:
                     await ws.send_json(
                         {
@@ -676,48 +727,70 @@ async def kc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queu
                     )
                     await asyncio.sleep(0.15)
 
-                while True:
-                    raw = await ws.receive_text()
-                    try:
-                        msg = TypeAdapter(Message).validate_json(raw)
-                    except ValidationError as e:
-                        l.error(f"kc parse: {e}")
-                        continue
+                ping = asyncio.create_task(kc_ping(ws, srv.pingInterval / 1000 / 2))
 
-                    match msg:
-                        case Welcome() | Acknowledge():
+                try:
+                    while True:
+                        raw = await ws.receive_text()
+                        try:
+                            msg = TypeAdapter(Message).validate_json(raw)
+                        except ValidationError as e:
+                            l.error(f"kc parse: {e}")
                             continue
-                        case Error() as err:
-                            l.error(f"kc: {err}")
-                            continue
-                        case _:
-                            await out.put(msg)
 
-        except* WebSocketNetworkError as e:
-            l.error(f"kc_websocket: network error, reconnect")
-            await asyncio.sleep(2)
+                        match msg:
+                            case Welcome() | Acknowledge():
+                                continue
+                            case Error() as err:
+                                l.error(f"kc: {err}")
+                                continue
+                            case _:
+                                await out.put(msg)
+                finally:
+                    ping.cancel()
+                    await asyncio.gather(ping, return_exceptions=True)
+
+        except* (WebSocketNetworkError, WebSocketDisconnect) as e:
+            if time.monotonic() - t0 > 30:
+                backoff = 1.0  # healthy run, restart the backoff ladder
+            delay = backoff * random.uniform(0.5, 1.5)
+            backoff = min(backoff * 2, 30)
+            l.warning(f"kc_websocket: connection lost, reconnect in {delay:.1f}s")
+            await asyncio.sleep(delay)
 
 
 async def mc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queue):
     from wsproto.events import TextMessage, BytesMessage
 
+    backoff = 1.0
     while True:
+        t0 = time.monotonic()
         try:
             async with aconnect_ws("wss://wbs-api.mexc.com/ws", client) as ws:
                 await ws.send_json({"method": "SUBSCRIPTION", "params": topics})
 
-                while True:
-                    match await ws.receive():
-                        case TextMessage(data=raw):
-                            ack = json.loads(raw)
-                            if ack.get("code", 0) != 0:
-                                raise ValueError(f"mexc: {ack}")
-                        case BytesMessage(data=raw):
-                            await out.put(PushDataV3ApiWrapper.FromString(raw))
+                ping = asyncio.create_task(mc_ping(ws, 15))
 
-        except* WebSocketNetworkError as e:
-            l.error(f"mc_websocket: network error, reconnect")
-            await asyncio.sleep(2)
+                try:
+                    while True:
+                        match await ws.receive():
+                            case TextMessage(data=raw):
+                                ack = json.loads(raw)
+                                if ack.get("code", 0) != 0:
+                                    raise ValueError(f"mexc: {ack}")
+                            case BytesMessage(data=raw):
+                                await out.put(PushDataV3ApiWrapper.FromString(raw))
+                finally:
+                    ping.cancel()
+                    await asyncio.gather(ping, return_exceptions=True)
+
+        except* (WebSocketNetworkError, WebSocketDisconnect) as e:
+            if time.monotonic() - t0 > 30:
+                backoff = 1.0  # healthy run, restart the backoff
+            delay = backoff * random.uniform(0.5, 1.5)
+            backoff = min(backoff * 2, 30)
+            l.warning(f"mc_websocket: connection lost, reconnect in {delay:.1f}s")
+            await asyncio.sleep(delay)
 
 
 BookSchema = {
