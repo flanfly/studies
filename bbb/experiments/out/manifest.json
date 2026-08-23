@@ -1,0 +1,53 @@
+{
+  "run": "2026-08-23 baseline reproduction (MON anchor)",
+  "data": {
+    "5m_file": "/home/kai/node/data/studies/bn-futures-5m.parquet",
+    "funding_file": "/home/kai/node/data/studies/bn-funding-rates.parquet",
+    "panel_weeks": 347,
+    "universe_symbols": 822,
+    "weeks_min": "2019-12-30",
+    "weeks_max": "2026-08-17"
+  },
+  "deployed_config": {
+    "ranking_frame": "TS",
+    "construction": "books",
+    "book_weighting": "risk_parity",
+    "funding_weight": 0.5,
+    "quintile_frac": 0.20,
+    "turnover_cap": 0.5,
+    "vol_window_weeks": 26,
+    "smooth_window_weeks": 20,
+    "rank_window_weeks": 52,
+    "rank_min_periods": 26,
+    "min_cross_section": 10,
+    "clip_forward_return": 1.0,
+    "fee_bp_liquid": 1.0,
+    "fee_bp_illiquid": 5.0,
+    "cost_multiple": 1.0
+  },
+  "deployed_results": {
+    "sharpe": 1.584,
+    "ann_return": 0.259,
+    "ann_vol": 0.153,
+    "max_dd": -0.148,
+    "mean_turnover": 0.426,
+    "gross_exposure": 1.501,
+    "net_funding_term_per_week_pct": -0.181,
+    "net_receiver_weeks_pct": 80.1
+  },
+  "notes": {
+    "positioning_factors": "WRspread, TopChg, Quad emit all-NaN (no open-interest / long-short ratio data in the provided files); the combination step holds those books flat per spec §6.2.",
+    "sign_verification": "w.funding[t+1] averages -0.181%/wk (paper: -0.173%), book is a net funding receiver; funding-only book Sharpe 1.153, t=2.98 (paper: 1.250, t=2.91)."
+  },
+  "resolved_ambiguities": {
+    "1_avol_denominator": "ratio to 12-week trailing mean volume (avol_lookback_weeks=12)",
+    "2_cpvv_dispersion": "within-week s.d. of daily correlations (cpvv_window=week), requiring >=4 valid days",
+    "3_tskd_diff_order": "average daily asymmetry over the week, then difference (tskd_diff_order=avg_then_diff)",
+    "4_funding_weight": "0.5 (never stated in paper; sweep {0,0.25,0.5,1})",
+    "5_turnover_cap": "0.5 (never stated; inferred from realised turnover 0.369; sweep {0.35,0.5,1})",
+    "6_vol_window_weeks": "26, vol_min_periods=13 (never stated)",
+    "7_daily_to_weekly": "mean of daily values with min_days_per_week=3",
+    "8_smoothing": "20-week trailing mean on weekly raw values, before ranking",
+    "9_walkforward_grid": "quintile_frac x3 {0.10,0.20,0.30}, funding_weight x3 {0.25,0.5,1.0}, turnover_cap x2 {0.35,0.5}, rank_window_weeks x2 {26,52} = 36 candidates/fold"
+  }
+}
