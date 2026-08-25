@@ -122,9 +122,12 @@ Each factor produces one value per `(symbol, day)` unless stated otherwise. Days
 
 **AVOL** — weekly, not daily:
 ```
-AVOL_t = -log( volume_w_t / mean(volume_w_{t-12 .. t-1}) )
+AVOL_t = -log( Sum_{w=t-11..t} volume_w )
 ```
-Requires 12 prior weeks. `[AMBIGUOUS]` The paper's table renders as `− log Σ12w volume`; a ratio-to-trailing-mean is the standard A-share abnormal-volume construction and is what's implemented here. Config: `avol_lookback_weeks = 12`.
+Requires 12 weeks. The paper's table renders `− log Σ12w volume` (the negative log
+of the trailing 12-week volume total); that is what is implemented. The earlier
+ratio-to-trailing-mean construction was dropped as a mis-reading. Config:
+`avol_lookback_weeks = 12`.
 
 **Q (smart money)** — within each day, score every hourly bar `S_n = |r_n| / sqrt(v_n)`. Take the top 20% of bars by `S_n`. Compute VWAP over that subset (`Σ c_n·v_n / Σ v_n`) and VWAP over all bars. Factor = ratio. Requires ≥ 10 bars in the day. Config: `q_top_frac = 0.20`.
 > Sign: the paper inverts this relative to its A-share source (reversal → momentum-consistent). Table 2 carries **no** leading minus, so use the ratio as-is: higher = long. Record this as a known researcher degree of freedom.
@@ -475,7 +478,8 @@ Sweep `cost_multiple ∈ {1,2,4,8,16,32}` for `turnover_cap = 1.0` (uncapped) an
 
 Every `[AMBIGUOUS]` item above, for the record. Each is a config field with a stated default; none should be resolved by guessing at runtime.
 
-1. `AVOL` denominator: ratio to 12-week trailing mean volume.
+1. `AVOL`: paper table renders `−log Σ12w volume`; implemented as the negative log
+   of the trailing 12-week volume total (weeks t-11..t). No ratio-to-trailing-mean.
 2. `CPVv` dispersion window: within-week s.d. of daily correlations.
 3. `TSKD` difference ordering: average daily asymmetry over the week, then difference.
 4. `funding_weight` magnitude: never stated in the paper.

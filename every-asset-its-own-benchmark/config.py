@@ -13,7 +13,7 @@ class Config:
     require_finite_positive_prices: bool = True
     # factors
     smooth_window_weeks: int = 20
-    avol_lookback_weeks: int = 12
+    avol_lookback_weeks: int = 12   # AVOL = -log(Sum of trailing N-week volume)
     q_top_frac: float = 0.20
     min_days_per_week: int = 3
     tskd_min_bars_per_side: int = 20

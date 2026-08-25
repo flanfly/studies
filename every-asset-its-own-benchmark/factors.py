@@ -238,9 +238,13 @@ def aggregate_daily_to_weekly(daily_panel, anchor, min_days_per_week=3):
 
 
 def compute_avol(volume_w, lookback_weeks=12):
-    """AVOL_t = -log( volume_w_t / mean(volume_w_{t-lookback..t-1}) )."""
-    mean = volume_w.shift(1).rolling(lookback_weeks, min_periods=lookback_weeks).mean()
-    return -np.log(volume_w / mean)
+    """AVOL_t = -log( sum of volume_w over the trailing `lookback_weeks` weeks ).
+
+    Per the paper (Table renders as `-log Sum_12w volume`): the raw factor is the
+    negative log of the 12-week trailing volume total (weeks t-11..t).
+    """
+    tot = volume_w.rolling(lookback_weeks, min_periods=lookback_weeks).sum()
+    return -np.log(tot)
 
 
 def compute_quad(ret_w, oi_w):
