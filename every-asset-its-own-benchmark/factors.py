@@ -21,6 +21,9 @@ FACTOR_NAMES = [
     "WRspread", "TopChg", "Quad", "TKU", "TSKD",
 ]
 
+# daily factor columns computed per symbol (TSKD stored as the daily LEVEL)
+DAILY_FACTORS = ("Q", "RSJ", "OFI", "CPVm", "CPVrho", "TKU", "TSKD_level")
+
 
 # --------------------------------------------------------------------------
 # daily intraday computation (heavy) - parallel over symbols
@@ -37,13 +40,6 @@ def _compute_symbol_daily(sym_df, cfg):
     b = sym_df["taker_buy_base"].to_numpy()
     day = sym_df["open_time"].dt.normalize().dt.tz_localize(None).to_numpy()
 
-    # 5-minute log returns
-    r5 = np.full(len(c), np.nan)
-    r5[1:] = np.log(c[1:] / np.maximum(c[:-1], 1e-12))
-    r5 = np.where(np.isfinite(r5), r5, np.nan)
-    del r5  # not used directly for factors defined here; 5m returns unused
-    # (TKU/TSKD use volume/trades; 5m return not required)
-
     # --- hourly aggregation (within symbol) ---
     hdf = sym_df.copy()
     hdf["h"] = hdf["open_time"].dt.floor("h")
@@ -58,7 +54,6 @@ def _compute_symbol_daily(sym_df, cfg):
     hr = np.full(len(hc), np.nan)
     hr[1:] = np.log(hc[1:] / np.maximum(hc[:-1], 1e-12))
     hr = np.where(np.isfinite(hr), hr, np.nan)
-    hS = np.abs(hr) / np.sqrt(hv)
     hday = h["day"].to_numpy()
 
     # day axis from 5m
@@ -70,7 +65,7 @@ def _compute_symbol_daily(sym_df, cfg):
     ud_h, hstart = np.unique(hday, return_index=True)
     hidx = {d: i for i, d in enumerate(ud_h)}
 
-    res = {k: [] for k in ("Q", "RSJ", "OFI", "CPVm", "CPVrho", "TKU", "TSKD")}
+    res = {k: [] for k in ("Q", "RSJ", "OFI", "CPVm", "CPVrho", "TKU", "TSKD_level")}
 
     for i in range(nidx):
         d = day_axis[i]
@@ -88,7 +83,6 @@ def _compute_symbol_daily(sym_df, cfg):
         if hs >= 0 and he > hs:
             nb = he - hs
             cday = hc[hs:he]; vday = hv[hs:he]; rday = hr[hs:he]; bday = hb[hs:he]
-            vi = np.isfinite(rday)
             # Q
             if nb >= 10:
                 Sv = np.abs(rday) / np.sqrt(np.maximum(vday, 1e-12))
@@ -144,26 +138,16 @@ def _compute_symbol_daily(sym_df, cfg):
             xB = np.log(v5[Bm] / nn5[Bm])
             xS = np.log(v5[Sm] / nn5[Sm])
             if len(xB) >= cfg.tskd_min_bars_per_side and len(xS) >= cfg.tskd_min_bars_per_side:
-                res["TSKD"].append(float(stats.skew(xB, bias=False) - stats.skew(xS, bias=False)))
+                # store the daily asymmetry LEVEL; the difference that enters the
+                # factor is applied at the weekly stage (tskd_diff_order).
+                res["TSKD_level"].append(float(stats.skew(xB, bias=False) - stats.skew(xS, bias=False)))
             else:
-                res["TSKD"].append(np.nan)
+                res["TSKD_level"].append(np.nan)
         else:
             res["TKU"].append(np.nan)
-            res["TSKD"].append(np.nan)
+            res["TSKD_level"].append(np.nan)
 
     out = {name: (day_axis, np.array(res[name])) for name in res}
-    return out
-
-
-def _process_chunk(args):
-    panel5m, symbols, cfg = args
-    out = {}
-    for sym in symbols:
-        sub = panel5m[panel5m["symbol"] == sym]
-        if len(sub) == 0:
-            continue
-        sub = sub.sort_values("open_time")
-        out[sym] = _compute_symbol_daily(sub, cfg)
     return out
 
 
@@ -191,7 +175,7 @@ def compute_daily_panels(panel5m, symbols, cfg):
     for r in results:
         all_sym.update(r)
 
-    per_factor = {f: {} for f in ("Q", "RSJ", "OFI", "CPVm", "CPVrho", "TKU", "TSKD")}
+    per_factor = {f: {} for f in DAILY_FACTORS}
     for sym, dd in all_sym.items():
         for f in per_factor:
             if f in dd:
@@ -205,6 +189,7 @@ def compute_daily_panels(panel5m, symbols, cfg):
 
 
 def _compute_chunk_daily(args):
+    """Compute daily factors for a chunk of (panel5m, symbols, cfg)."""
     panel5m, symbols, cfg = args
     out = {}
     for sym in symbols:
@@ -224,13 +209,20 @@ def aggregate_daily_to_weekly(daily_panel, anchor, min_days_per_week=3):
     """Mean daily values over each week, requiring >= min_days valid days.
 
     daily_panel: date x symbol. Returns week x symbol.
+    Raises if any +-inf survives; infs are never valid factor values and would
+    poison the weekly mean.
     """
+    arr = daily_panel.to_numpy(dtype=float)
+    if len(arr):
+        n_inf = int(np.isinf(arr).sum())
+        assert n_inf == 0, f"aggregate_daily_to_weekly: {n_inf} inf in input panel"
     idx = pd.DatetimeIndex(daily_panel.index)
     wk = week_label(idx, anchor)
     df = daily_panel.copy()
     df["__week"] = wk
-    cnt = df.groupby("__week").apply(lambda g: g.notna().sum(axis=0))
-    val = df.groupby("__week").mean()
+    vals = df.drop(columns=["__week"])
+    cnt = vals.groupby(wk).apply(lambda g: g.notna().sum(axis=0))
+    val = vals.groupby(wk).mean()
     val = val.where(cnt >= min_days_per_week, np.nan)
     val = val.reindex(columns=daily_panel.columns).sort_index()
     val = val.astype(float)
@@ -238,13 +230,17 @@ def aggregate_daily_to_weekly(daily_panel, anchor, min_days_per_week=3):
 
 
 def compute_avol(volume_w, lookback_weeks=12):
-    """AVOL_t = -log( sum of volume_w over the trailing `lookback_weeks` weeks ).
+    """AVOL_t = -log( volume_w[t] / mean(volume_w[t-lookback .. t-1]) ).
 
-    Per the paper (Table renders as `-log Sum_12w volume`): the raw factor is the
-    negative log of the 12-week trailing volume total (weeks t-11..t).
+    Abnormal turnover: current week's dollar volume relative to its own
+    trailing baseline. The baseline is shifted so week t is not in its own
+    denominator.
     """
-    tot = volume_w.rolling(lookback_weeks, min_periods=lookback_weeks).sum()
-    return -np.log(tot)
+    base = volume_w.shift(1).rolling(lookback_weeks,
+                                     min_periods=lookback_weeks).mean()
+    ratio = volume_w / base.replace(0, np.nan)
+    ratio = ratio.where(ratio > 0)
+    return -np.log(ratio)
 
 
 def compute_quad(ret_w, oi_w):
@@ -273,19 +269,47 @@ def build_weekly_raw_factors_from_daily(daily, symbols, weekly, cfg):
     panels["AVOL"] = compute_avol(vol, cfg.avol_lookback_weeks)
 
     for name, col in [("Q", "Q"), ("RSJ", "RSJ"), ("OFI", "OFI"),
-                      ("CPVm", "CPVm"), ("TKU", "TKU"), ("TSKD", "TSKD")]:
+                      ("CPVm", "CPVm"), ("TKU", "TKU")]:
         d = daily[col].reindex(columns=symbols)
         panels[name] = aggregate_daily_to_weekly(d, cfg.anchor, cfg.min_days_per_week)
 
-    # CPVv from CPVrho daily (dispersion): weekly = -std(rho over days in week), >=4 days
+    # TSKD: weekly mean of the daily asymmetry LEVEL, then the difference. The
+    # paper's predictor is the change in asymmetry; the level itself is not.
+    d = daily["TSKD_level"].reindex(columns=symbols)
+    if cfg.tskd_diff_order == "avg_then_diff":
+        A_w = aggregate_daily_to_weekly(d, cfg.anchor, cfg.min_days_per_week)
+        panels["TSKD"] = A_w - A_w.shift(1)
+    elif cfg.tskd_diff_order == "diff_then_avg":
+        dA = d.diff(axis=0)
+        # mask differences that span a calendar gap > 1 day (per symbol)
+        daydiff = pd.Series(pd.DatetimeIndex(d.index)).diff().dt.days
+        dA = dA.where(daydiff.values[:, None] <= 1)
+        panels["TSKD"] = aggregate_daily_to_weekly(dA, cfg.anchor, cfg.min_days_per_week)
+    else:
+        raise ValueError(f"unknown tskd_diff_order {cfg.tskd_diff_order}")
+
+    # CPVv from CPVrho daily (dispersion): within-week std of daily rho, or a
+    # trailing-20d std sampled at the week's last day. Day threshold from cfg.
     cp = daily["CPVrho"].reindex(columns=symbols)
-    idx = pd.DatetimeIndex(cp.index)
-    wk = week_label(idx, cfg.anchor)
-    df = cp.copy(); df["__week"] = wk
-    cnt = df.groupby("__week").apply(lambda g: g.notna().sum(axis=0))
-    std = df.groupby("__week").std(ddof=1)
-    std = std.where(cnt >= 4, np.nan).sort_index()
-    panels["CPVv"] = -std.astype(float)
+    if cfg.cpvv_window == "week":
+        idx = pd.DatetimeIndex(cp.index)
+        wk = week_label(idx, cfg.anchor)
+        df = cp.copy(); df["__week"] = wk
+        vals = df.drop(columns=["__week"])
+        cnt = vals.groupby(wk).apply(lambda g: g.notna().sum(axis=0))
+        std = vals.groupby(wk).std(ddof=1)
+        std = std.where(cnt >= cfg.cpvv_min_days_week, np.nan).sort_index()
+        panels["CPVv"] = -std.astype(float)
+    elif cfg.cpvv_window == "trailing_20d":
+        roll = cp.rolling(20, min_periods=cfg.cpvv_min_days_week).std(ddof=1)
+        idx = pd.DatetimeIndex(roll.index)
+        wk = week_label(idx, cfg.anchor)
+        df = roll.copy(); df["__week"] = wk
+        last = df.groupby(wk, sort=False).apply(
+            lambda g: g.drop(columns=["__week"]).iloc[-1])
+        panels["CPVv"] = -last.astype(float)
+    else:
+        raise ValueError(f"unknown cpvv_window {cfg.cpvv_window}")
 
     # positioning factors -> all NaN (data unavailable)
     ref_idx = panels["AVOL"].index

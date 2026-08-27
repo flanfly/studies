@@ -13,17 +13,34 @@ from ranking import score_panel, rank_xs
 from portfolio import build_book, combine_weights, apply_turnover_cap
 from returns import build_returns, build_funding_shift
 from config import Config
+from paths import CACHE_ROOT
 
-CACHE_ROOT = "/home/kai/studies/bbb/cache"
 
-
-def load_panels(anchor):
+def load_panels(anchor, cfg=None):
     """Load prebuilt weekly panels for an anchor from the cache dir.
 
     Returns dict: factors (factor->week x symbol), close_w, fwd_ret_w, adv_w,
     ret_w, volume_w, funding_w, symbols.
+    If cfg is given, the anchor's manifest is checked against it and an
+    exception raised on mismatch, so a stale cache can never silently feed a
+    shuffled config.
     """
     d = os.path.join(CACHE_ROOT, anchor)
+    manifest_p = os.path.join(d, "manifest.json")
+    if cfg is not None and os.path.exists(manifest_p):
+        import json
+        with open(manifest_p) as fh:
+            man = json.load(fh)
+        mcfg = man.get("config", {})
+        dcfg = cfg.as_dict()
+        for k in ("require_continuous_trading", "require_finite_positive_prices",
+                  "book_terminal_return", "q_top_frac", "min_days_per_week",
+                  "tskd_min_bars_per_side", "tskd_diff_order", "cpvv_window",
+                  "avol_lookback_weeks"):
+            if mcfg.get(k) != dcfg.get(k):
+                raise ValueError(
+                    f"cache manifest for {anchor} says {k}={mcfg.get(k)!r} "
+                    f"but requested cfg says {dcfg.get(k)!r}; rebuild the cache")
     weekly = {
         k: pd.read_parquet(os.path.join(d, f"{k}.parquet"))
         for k in ("close_w", "fwd_ret_w", "adv_w", "ret_w", "volume_w", "funding_w")

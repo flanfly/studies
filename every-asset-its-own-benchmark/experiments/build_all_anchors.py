@@ -12,23 +12,23 @@ from resample import build_weekly, build_weekly_funding
 from factors import build_weekly_raw_factors_from_daily, FACTOR_NAMES
 from build_daily import load_daily_panels
 from config import Config
+from paths import CACHE_ROOT
 
-CACHE_ROOT = "/home/kai/studies/bbb/cache"
 ANCHORS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 
 
 def build_all():
+    cfg = Config(nprocs=12)
     p5 = get_5m()
     funding = get_funding()
-    daily = load_daily_panels()
-    cfg = Config(nprocs=12)
+    daily = load_daily_panels(cfg)
     for anchor in ANCHORS:
         out = os.path.join(CACHE_ROOT, anchor)
         os.makedirs(out, exist_ok=True)
         if os.path.exists(os.path.join(out, "factor_AVOL.parquet")):
             print(f"{anchor}: cached, skip", flush=True)
             continue
-        weekly = build_weekly(p5, anchor)
+        weekly = build_weekly(p5, anchor, cfg.book_terminal_return)
         symbols = apply_universe_screen(weekly["close_w"],
                                         cfg.require_continuous_trading,
                                         cfg.require_finite_positive_prices)

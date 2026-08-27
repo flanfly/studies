@@ -15,6 +15,7 @@ from config import Config
 from pipeline import load_panels, run_pipeline
 from experiments.util import save_csv
 import metrics as M
+from paths import CACHE_ROOT
 
 ANCHORS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 TRAIN = 104
@@ -68,7 +69,7 @@ def run_anchor(anchor):
 def run():
     rows = []
     for anchor in ANCHORS:
-        p = f"/home/kai/studies/bbb/cache/{anchor}/factor_AVOL.parquet"
+        p = os.path.join(CACHE_ROOT, anchor, "factor_AVOL.parquet")
         if not os.path.exists(p):
             print(f"{anchor}: panels not built, skipping", flush=True)
             continue

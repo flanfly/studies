@@ -8,17 +8,19 @@ from dataclasses import dataclass, field, asdict
 class Config:
     # data / resampling
     anchor: str = "MON"
+    book_terminal_return: bool = True  # book each symbol's final observed return
     # universe
-    require_continuous_trading: bool = True
+    require_continuous_trading: bool = False  # survivorship screen is opt-in
     require_finite_positive_prices: bool = True
     # factors
     smooth_window_weeks: int = 20
-    avol_lookback_weeks: int = 12   # AVOL = -log(Sum of trailing N-week volume)
+    avol_lookback_weeks: int = 12   # AVOL = -log(vol[t] / mean(vol[t-12..t-1]))
     q_top_frac: float = 0.20
     min_days_per_week: int = 3
     tskd_min_bars_per_side: int = 20
-    tskd_diff_order: str = "avg_then_diff"
-    cpvv_window: str = "week"
+    tskd_diff_order: str = "avg_then_diff"  # "avg_then_diff" | "diff_then_avg"
+    cpvv_window: str = "week"               # "week" (within-week std) | "trailing_20d"
+    cpvv_min_days_week: int = 4
     # ranking
     ranking_frame: str = "TS"            # "XS" | "TS" | "XS_standardised"
     rank_window_weeks: int = 52
@@ -42,6 +44,14 @@ class Config:
     factors: tuple | None = None
     # compute
     nprocs: int = 1
+
+    # ---- factor-cache subset (changes require a daily-cache rebuild) ----
+    def factor_cache_key(self):
+        """Hash of the config fields that change daily-factor values."""
+        import hashlib, json
+        d = {k: getattr(self, k) for k in
+             ("q_top_frac", "tskd_min_bars_per_side", "tskd_diff_order")}
+        return hashlib.md5(json.dumps(d, sort_keys=True).encode()).hexdigest()[:12]
 
     def factor_list(self):
         if self.factors is not None:

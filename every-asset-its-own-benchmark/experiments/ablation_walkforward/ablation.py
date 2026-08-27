@@ -35,6 +35,7 @@ from factors import build_weekly_raw_factors_from_daily           # noqa: E402
 from config import Config                                         # noqa: E402
 from pipeline import run_pipeline                                 # noqa: E402
 import metrics as M                                               # noqa: E402
+import registry                                                    # noqa: E402
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 os.makedirs(OUT, exist_ok=True)
@@ -53,7 +54,7 @@ def build_panels(anchor, nprocs):
                  clip_forward_return=None,          # no clip
                  nprocs=nprocs)
     p5 = get_5m()
-    weekly_all = build_weekly(p5, anchor)
+    weekly_all = build_weekly(p5, anchor, cfg.book_terminal_return)
     symbols = apply_universe_screen(weekly_all["close_w"],
                                     require_continuous_trading=False,
                                     require_finite_positive_prices=True)
@@ -142,6 +143,13 @@ def main():
             ts = safe_sharpe(rt)
             es = safe_sharpe(re_)
             scores.append((label, nf, ts))
+            # every evaluated configuration is a trial: log weekly Sharpe
+            # on the TRAINING block (the block that informed the choice).
+            rw = rt.dropna()
+            if len(rw) > 1:
+                sw = float(rw.mean() / rw.std(ddof=1))
+                registry.log(cfg, sw, n_weeks=int(len(rw)), anchor=anchor,
+                             context=f"walkforward_fold{fold}")
             active_tr = int((w.iloc[tr].abs().sum(axis=1) > 0).sum())
             active_te = int((w.iloc[te].abs().sum(axis=1) > 0).sum())
             cand_rows.append({

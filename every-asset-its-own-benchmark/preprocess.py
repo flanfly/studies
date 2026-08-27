@@ -22,13 +22,12 @@ from resample import build_weekly, build_weekly_funding
 from factors import build_weekly_raw_factors_from_daily, FACTOR_NAMES
 from build_daily import build_daily_panels, load_daily_panels
 from config import Config
-
-CACHE_ROOT = "/home/kai/studies/bbb/cache"
+from paths import CACHE_ROOT
 
 
 def _screen_symbols(anchor, cfg):
     p5 = get_5m()
-    weekly = build_weekly(p5, anchor)
+    weekly = build_weekly(p5, anchor, cfg.book_terminal_return)
     symbols = apply_universe_screen(
         weekly["close_w"], cfg.require_continuous_trading,
         cfg.require_finite_positive_prices)
@@ -36,10 +35,13 @@ def _screen_symbols(anchor, cfg):
 
 
 def ensure_daily_panels(cfg, symbols):
-    daily = load_daily_panels()
-    if daily is None or len(daily) < 7:
+    daily = load_daily_panels(cfg)
+    if daily is None or len(daily) < len(DAILY_FACTORS_NEEDED):
         daily = build_daily_panels(symbols, cfg, cfg.nprocs)
     return daily
+
+
+DAILY_FACTORS_NEEDED = ("Q", "RSJ", "OFI", "CPVm", "CPVrho", "TKU", "TSKD_level")
 
 
 def build_anchor(anchor, cfg):
@@ -47,7 +49,7 @@ def build_anchor(anchor, cfg):
     os.makedirs(out_dir, exist_ok=True)
 
     p5 = get_5m()
-    weekly = build_weekly(p5, anchor)
+    weekly = build_weekly(p5, anchor, cfg.book_terminal_return)
     symbols = apply_universe_screen(
         weekly["close_w"], cfg.require_continuous_trading,
         cfg.require_finite_positive_prices)
@@ -66,6 +68,14 @@ def build_anchor(anchor, cfg):
     n_sym = weekly["close_w"].notna().sum(axis=1)
     n_sym.to_frame("n").to_parquet(os.path.join(out_dir, "n_symbols_by_week.parquet"))
 
+    n_min, n_med, n_max = (int(v) for v in (n_sym.min(), n_sym.median(), n_sym.max()))
+    # with a per-week universe the early sample can be thin; a 20% quintile on a
+    # 12-symbol cross-section is 2-name legs (vol, not signal).
+    active = n_sym[n_sym >= cfg.min_cross_section]
+    if len(active) < len(n_sym):
+        print(f"  WARN: {len(n_sym) - len(active)} weeks below min_cross_section="
+              f"{cfg.min_cross_section}", flush=True)
+
     manifest = {
         "anchor": anchor,
         "n_symbols": len(symbols),
@@ -73,6 +83,7 @@ def build_anchor(anchor, cfg):
         "weeks_min": str(weekly["close_w"].index.min()),
         "weeks_max": str(weekly["close_w"].index.max()),
         "config": cfg.as_dict(),
+        "n_symbols_by_week": {"min": n_min, "median": n_med, "max": n_max},
     }
     with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2, default=str)
@@ -102,7 +113,7 @@ def main():
     else:
         from pipeline import load_panels
         weekly, _, symbols = load_panels(a.anchor)
-    daily = load_daily_panels()
+    daily = load_daily_panels(cfg)
     # Rebuild from per-symbol files (idempotent; reuses existing symbol dailies),
     # so the combined panels always cover the current symbol set.
     daily = build_daily_panels(symbols, cfg, cfg.nprocs)

@@ -47,7 +47,7 @@ def main():
                  nprocs=12)
 
     p5 = get_5m()
-    weekly_all = build_weekly(p5, anchor)
+    weekly_all = build_weekly(p5, anchor, cfg.book_terminal_return)
     symbols = apply_universe_screen(weekly_all["close_w"],
                                     require_continuous_trading=False,   # <-- the fix
                                     require_finite_positive_prices=True)

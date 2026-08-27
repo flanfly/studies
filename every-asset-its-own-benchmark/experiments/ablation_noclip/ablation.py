@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 
+import numpy as np
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,6 +31,7 @@ from factors import build_weekly_raw_factors_from_daily           # noqa: E402
 from config import Config                                         # noqa: E402
 from pipeline import run_pipeline                                 # noqa: E402
 import metrics as M                                               # noqa: E402
+import registry                                                    # noqa: E402
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 os.makedirs(OUT, exist_ok=True)
@@ -44,7 +46,7 @@ def build_panels(anchor, nprocs):
                  clip_forward_return=None,          # no clip
                  nprocs=nprocs)
     p5 = get_5m()
-    weekly_all = build_weekly(p5, anchor)
+    weekly_all = build_weekly(p5, anchor, cfg.book_terminal_return)
     symbols = apply_universe_screen(weekly_all["close_w"],
                                     require_continuous_trading=False,
                                     require_finite_positive_prices=True)
@@ -120,6 +122,19 @@ def main():
         c = base_cfg(f)
         r = run(weekly, factor, c, f"remove_{f}")
         rows.append(r)
+
+    # log every evaluated config to the registry (Phase 4.3): each ablation is
+    # a trial; context tags the trial set. weekly SR = annualised / sqrt(52).
+    for row in rows:
+        c = Config(anchor=anchor, require_continuous_trading=False,
+                   clip_forward_return=None, funding_weight=0.5,
+                   construction="books", book_weighting="risk_parity",
+                   factors=None if row["experiment"] == "baseline_all"
+                   else tuple(x for x in ALL_FACTORS if x != row["experiment"][7:]),
+                   nprocs=12)
+        sw = float(row["sharpe"] / np.sqrt(52.0))
+        registry.log(c, sw, n_weeks=int(row["n_weeks"]), anchor=anchor,
+                     context="ablation")
 
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(OUT, "ablation.csv"), index=False)

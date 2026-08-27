@@ -9,8 +9,8 @@ from config import Config
 from pipeline import load_panels, run_pipeline
 import metrics as M
 import registry
+from paths import OUT
 
-OUT = "/home/kai/studies/bbb/experiments/out"
 os.makedirs(OUT, exist_ok=True)
 
 
@@ -19,14 +19,20 @@ def panels(anchor="MON"):
     return weekly, factor_raw, symbols
 
 
-def evaluate(cfg, weekly, factor_raw, log=True):
-    """Run a config, log to registry, return (sharpe, result, summary)."""
+def evaluate(cfg, weekly, factor_raw, log=True, context=""):
+    """Run a config, log to registry, return (sharpe, result, summary).
+
+    Registry stores the WEEKLY (per-period) Sharpe, which the DSR formula
+    expects, not annualised.
+    """
     res = run_pipeline(cfg, weekly, factor_raw)
     r = res["returns"]
     sharpe = M.annualized_sharpe(r)
+    rw = r.dropna()
+    sharpe_weekly = float(rw.mean() / rw.std(ddof=1)) if len(rw) > 1 else float("nan")
     if log:
-        registry.log(cfg, sharpe, extra={"anchor": cfg.anchor,
-                                        "n_weeks": int(r.dropna().shape[0])})
+        registry.log(cfg, sharpe_weekly, n_weeks=len(rw), anchor=cfg.anchor,
+                     context=context)
     sm = M.summary(r, res["turnover"])
     return sharpe, res, sm
 

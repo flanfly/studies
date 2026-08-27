@@ -14,7 +14,7 @@ def to_score(rank, n):
     return ((rank - 0.5) / n - 0.5) * 2.0
 
 
-def rank_xs(f, min_cross_section=1):
+def rank_xs(f):
     """Cross-sectional score: rank f[i,t] among valid assets at week t.
 
     f: week x symbol. Returns (score, n_per_week).
@@ -25,7 +25,6 @@ def rank_xs(f, min_cross_section=1):
     # row-wise: score = ((rank - 0.5)/n - 0.5)*2 ; n aligns to rows (axis=0)
     score = ((r - 0.5).div(n, axis=0) - 0.5) * 2.0
     score = score.where(f.notna())
-    score = score[~score.index.duplicated()]
     return score, n
 
 

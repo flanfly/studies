@@ -19,8 +19,8 @@ import os
 import pandas as pd
 import numpy as np
 
-FUTURES_PARQUET = "/home/kai/node/data/studies/bn-futures-5m.parquet"
-FUNDING_PARQUET = "/home/kai/node/data/studies/bn-funding-rates.parquet"
+FUTURES_PARQUET = "/home/kai/node/data/studies/prev/bn-futures-5m.parquet"
+FUNDING_PARQUET = "/home/kai/node/data/studies/prev/bn-funding-rates.parquet"
 
 _RENAME = {
     "open_time": "open_time",
@@ -70,11 +70,17 @@ def get_funding() -> pd.DataFrame:
     return df.sort_values(["symbol", "funding_time"]).reset_index(drop=True)
 
 
-def apply_universe_screen(weekly_close, require_continuous_trading=True,
+def apply_universe_screen(weekly_close, require_continuous_trading=False,
                           require_finite_positive_prices=True):
     """Return the list of retained symbols given the weekly close panel.
 
     weekly_close: weeks x symbols DataFrame of last-5m close per week.
+
+    With require_continuous_trading=False (default) a symbol is kept if it has
+    any finite, positive close — i.e. membership is point-in-time and delisted
+    symbols stay as long as they trade. True is the explicitly-flagged
+    survivorship experiment: keep only symbols trading unbroken through the
+    panel's final week.
     """
     if require_finite_positive_prices:
         ok = []
@@ -101,10 +107,12 @@ def apply_universe_screen(weekly_close, require_continuous_trading=True,
                 continue
             if valid.index[-1] != last_week:
                 continue  # stopped trading mid-panel
-            # unbroken run from first valid week to panel last week
+            # compare against the panel's OWN index slice, not a generated
+            # 7D range: if the panel itself has a missing week the generated
+            # range silently fails every symbol.
             weeks = valid.index
-            expected = pd.date_range(weeks[0], last_week, freq="7D")
-            if len(weeks) == len(expected) and (weeks == expected).all():
+            span = sub.index[sub.index.get_loc(weeks[0]):]
+            if len(weeks) == len(span) and (weeks == span).all():
                 keep.append(sym)
         return keep
     return list(ok)
