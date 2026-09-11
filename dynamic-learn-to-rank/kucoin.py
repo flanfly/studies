@@ -94,19 +94,41 @@ l.basicConfig(
 )
 
 
+RETRY_STATUSES = {502, 503}
+
+
+async def _get_with_backoff(
+    c: AsyncClient,
+    url: str,
+    params: dict[str, str] | None = None,
+    *,
+    base_delay: float = 1.0,
+    max_delay: float = 60.0,
+) -> httpx.Response:
+    """GET `url`, retrying transient failures (connection errors, HTTP 502/503)
+    with exponential backoff."""
+    delay = base_delay
+    while True:
+        try:
+            resp = await c.get(url, params=params)
+        except Exception as e:
+            l.error(f"{url}: {e}")
+        else:
+            if resp.status_code not in RETRY_STATUSES:
+                return resp
+            l.warning(f"{url}: got HTTP {resp.status_code}, retrying in {delay:.1f}s")
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, max_delay)
+
+
 async def kc_list(c: AsyncClient, prefix: str) -> list[str]:
     q = {
         "delimiter": "/",
         "prefix": prefix,
     }
-    while True:
-        try:
-            resp = await c.get("https://historical-data.kucoin.com/", params=q)
-            break
-        except Exception as e:
-            l.error(f"{prefix}: {e}")
-            await asyncio.sleep(1)
-
+    resp = await _get_with_backoff(
+        c, "https://historical-data.kucoin.com/", params=q
+    )
     resp.raise_for_status()
     model = ListBucketResult.from_xml(resp.content)
 
@@ -120,14 +142,7 @@ async def kc_fetch_zip(
     tscols: list[str] = [],
     symbol: str | None = None,
 ) -> pl.DataFrame:
-    while True:
-        try:
-            resp = await c.get(f"https://historical-data.kucoin.com/{path}")
-            break
-        except Exception as e:
-            l.error(f"{path}: {e}")
-            await asyncio.sleep(1)
-
+    resp = await _get_with_backoff(c, f"https://historical-data.kucoin.com/{path}")
     resp.raise_for_status()
 
     with io.BytesIO(resp.content) as bio:
