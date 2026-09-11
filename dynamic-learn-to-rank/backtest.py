@@ -98,9 +98,10 @@ def load_data(path: str):
 
 def select_universe(C: np.ndarray, V: np.ndarray, grid: np.ndarray, t_test: int,
                     n_assets: int = N_ASSETS, look_months: int = 3,
-                    min_cov: float = 0.85) -> np.ndarray:
-    """Top-N by trailing 3-month average dollar volume, requiring coverage.
-    Uses only data strictly before t_test."""
+                    min_cov: float = 0.85, full_panel: bool = False) -> np.ndarray:
+    """Trailing 3-month average dollar volume ranking, requiring coverage.
+    Uses only data strictly before t_test.  With full_panel=True, all eligible
+    symbols are returned (no top-N cut)."""
     lo = month_window(grid, grid[t_test].astype("datetime64[us]"), -look_months)
     if t_test - lo < 60:
         return np.array([], dtype=int)
@@ -110,7 +111,8 @@ def select_universe(C: np.ndarray, V: np.ndarray, grid: np.ndarray, t_test: int,
     dvol = np.nanmean(cv, axis=0)
     ok = (cov_frac >= min_cov) & ~np.isnan(dvol) & ~np.isnan(C[t_test])
     idx = np.where(ok)[0]
-    return idx[np.argsort(-dvol[idx])][:n_assets]
+    idx = idx[np.argsort(-dvol[idx])]
+    return idx if full_panel else idx[:n_assets]
 
 
 # ----------------------------------------------------------------------------- A2C agent
@@ -147,7 +149,7 @@ def train_a2c(Snorm: np.ndarray, R: np.ndarray, t_range: np.ndarray, seed: int,
     torch.manual_seed(seed)
     np.random.seed(seed)
     N = R.shape[1]
-    net = A2CNet(N_ASSETS * H, N)
+    net = A2CNet(N * H, N)
     opt = torch.optim.Adam(net.parameters(), lr=LR)
 
     obs, acts, rews, = [], [], []
@@ -199,8 +201,9 @@ def train_a2c(Snorm: np.ndarray, R: np.ndarray, t_range: np.ndarray, seed: int,
 
 
 def agent_scores(net: A2CNet, Snorm: np.ndarray, t_range: np.ndarray) -> np.ndarray:
-    """Deterministic (mean) scores, shape (len(t_range), N)."""
-    states = np.empty((len(t_range), N_ASSETS * H), dtype=np.float32)
+    """Deterministic (mean) scores, shape (len(t_range), N) with N = Snorm.shape[1]."""
+    N = Snorm.shape[1]
+    states = np.empty((len(t_range), N * H), dtype=np.float32)
     for j, t in enumerate(t_range):
         states[j] = Snorm[t - H + 1: t + 1].T.reshape(-1)
     with torch.no_grad():
@@ -283,7 +286,8 @@ def metrics(rets: np.ndarray) -> dict:
 
 # ----------------------------------------------------------------------------- fold runner
 def run_fold(C: np.ndarray, V: np.ndarray, R_all: np.ndarray, grid: np.ndarray, t_test: int,
-             seed: int, passes: int = 1, w_vol: int = W_VOL, tau: float = TAU) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+             seed: int, passes: int = 1, w_vol: int = W_VOL, tau: float = TAU,
+             full_panel: bool = False) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Train on the 4 months before t_test, trade the month starting t_test.
 
     Evaluated returns for a fold: returns over (t, t+1] with t+1 in the test
@@ -299,9 +303,10 @@ def run_fold(C: np.ndarray, V: np.ndarray, R_all: np.ndarray, grid: np.ndarray, 
     if t_lo < 0 or t_test_hi - t_test < 30:
         return {}
 
-    uni = select_universe(C, V, grid, t_test)
-    if len(uni) < N_ASSETS:
+    uni = select_universe(C, V, grid, t_test, full_panel=full_panel)
+    if len(uni) < (20 if full_panel else N_ASSETS):
         return {}
+    n = len(uni)
 
     # --- prices (forward-fill gaps) and train-only min-max normalization ------
     Cw = C[t_lo: t_test_hi][:, uni].copy()
@@ -377,7 +382,7 @@ def run_fold(C: np.ndarray, V: np.ndarray, R_all: np.ndarray, grid: np.ndarray, 
     gates_open = 0
     gates_total = 0
     for name in strategies:
-        w_prev = np.zeros(N_ASSETS)
+        w_prev = np.zeros(n)
         rets = np.zeros(n_test)
         tos = np.zeros(n_test)
         for j, t in enumerate(test_t_local):  # t is LOCAL
@@ -401,7 +406,7 @@ def run_fold(C: np.ndarray, V: np.ndarray, R_all: np.ndarray, grid: np.ndarray, 
             else:
                 gates_open += 1
                 gates_total += 1
-            w = np.zeros(N_ASSETS)
+            w = np.zeros(n)
             if gate:
                 if name.startswith("DRL"):
                     idx = np.argsort(-test_scores[j])
@@ -409,7 +414,7 @@ def run_fold(C: np.ndarray, V: np.ndarray, R_all: np.ndarray, grid: np.ndarray, 
                     cum = np.prod(1 + R[max(0, t - MOM_LOOKBACK + 1): t + 1], axis=0) - 1
                     idx = np.argsort(-cum)
                 else:  # Random
-                    idx = np.argsort(-rng_np.random(N_ASSETS))
+                    idx = np.argsort(-rng_np.random(n))
                 long_idx, short_idx = idx[:K], idx[-K:]
                 if name in ("DRL_rank", "DRL+filt:EW", "JT_mom", "Random"):
                     wl = ws = np.full(K, 1.0 / K)
@@ -441,6 +446,7 @@ def main():
     ap.add_argument("--passes", type=int, default=TRAIN_PASSES)
     ap.add_argument("--w-vol", type=int, default=W_VOL)
     ap.add_argument("--tau", type=float, default=TAU)
+    ap.add_argument("--panel", choices=["top60", "full"], default="top60")
     args = ap.parse_args()
 
     grid, C, V = load_data(args.data)
@@ -467,7 +473,7 @@ def main():
             break
         try:
             out = run_fold(C, V, R_all, grid, t_test, args.seed, args.passes,
-                           args.w_vol, args.tau)
+                           args.w_vol, args.tau, args.panel == "full")
         except Exception as e:
             import traceback; traceback.print_exc()
             print(f"fold {fi} ({grid[t_test]}) FAILED: {e}")
