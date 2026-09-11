@@ -139,7 +139,7 @@ LOG2PI = math.log(2 * math.pi)
 
 
 def train_a2c(Snorm: np.ndarray, R: np.ndarray, t_range: np.ndarray, seed: int,
-              passes: int = 1) -> A2CNet:
+              passes: int = 1, lr: float = LR) -> A2CNet:
     """One chronological pass over the training segment with n-step A2C updates.
 
     For each decision bar t in t_range: state = last H normalized closes,
@@ -150,7 +150,7 @@ def train_a2c(Snorm: np.ndarray, R: np.ndarray, t_range: np.ndarray, seed: int,
     np.random.seed(seed)
     N = R.shape[1]
     net = A2CNet(N * H, N)
-    opt = torch.optim.Adam(net.parameters(), lr=LR)
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
 
     obs, acts, rews, = [], [], []
 
@@ -287,7 +287,7 @@ def metrics(rets: np.ndarray) -> dict:
 # ----------------------------------------------------------------------------- fold runner
 def run_fold(C: np.ndarray, V: np.ndarray, R_all: np.ndarray, grid: np.ndarray, t_test: int,
              seed: int, passes: int = 1, w_vol: int = W_VOL, tau: float = TAU,
-             full_panel: bool = False) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+             full_panel: bool = False, lr: float = LR) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Train on the 4 months before t_test, trade the month starting t_test.
 
     Evaluated returns for a fold: returns over (t, t+1] with t+1 in the test
@@ -338,7 +338,7 @@ def run_fold(C: np.ndarray, V: np.ndarray, R_all: np.ndarray, grid: np.ndarray, 
     train_t = np.arange(H - 1, t_test - 1 - t_lo)  # local indices
     if len(train_t) < 50:
         return {}
-    net = train_a2c(Snorm, R, train_t, seed, passes)
+    net = train_a2c(Snorm, R, train_t, seed, passes, lr)
 
     # in-sample deterministic (mean-action) returns -> meta-filter training set
     det_scores = agent_scores(net, Snorm, train_t)
@@ -447,6 +447,7 @@ def main():
     ap.add_argument("--w-vol", type=int, default=W_VOL)
     ap.add_argument("--tau", type=float, default=TAU)
     ap.add_argument("--panel", choices=["top60", "full"], default="top60")
+    ap.add_argument("--lr", type=float, default=LR)
     args = ap.parse_args()
 
     grid, C, V = load_data(args.data)
@@ -473,7 +474,7 @@ def main():
             break
         try:
             out = run_fold(C, V, R_all, grid, t_test, args.seed, args.passes,
-                           args.w_vol, args.tau, args.panel == "full")
+                           args.w_vol, args.tau, args.panel == "full", args.lr)
         except Exception as e:
             import traceback; traceback.print_exc()
             print(f"fold {fi} ({grid[t_test]}) FAILED: {e}")
