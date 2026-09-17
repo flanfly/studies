@@ -322,6 +322,19 @@ class FundingRate(BaseModel):
     data: Data
 
 
+class MarkIndexPrice(BaseModel):
+    class Data(BaseModel):
+        markPrice: float
+        indexPrice: float
+        granularity: int
+        timestamp: int
+
+    topic: str
+    type: Literal["message"]
+    subject: Literal["mark.index.price"]
+    data: Data
+
+
 class Ticker(BaseModel):
     class Data(BaseModel):
         symbol: str
@@ -384,7 +397,10 @@ Message = Annotated[
         Acknowledge,
         Pong,
         Error,
-        Annotated[Union[FundingRate, Ticker, Trade], Field(discriminator="subject")],
+        Annotated[
+            Union[FundingRate, MarkIndexPrice, Ticker, Trade],
+            Field(discriminator="subject"),
+        ],
     ],
     Field(discriminator="type"),
 ]
@@ -529,20 +545,6 @@ class KuCoinSocket:
             yield msg
 
 
-async def handler(ws):
-    from websockets.exceptions import ConnectionClosed
-
-    i = 0
-
-    try:
-        while True:
-            await ws.send(json.dumps({"hello": f"world: {i}"}))
-            await asyncio.sleep(1)
-            i += 1
-    except ConnectionClosed:
-        pass
-
-
 class MEXCSocket:
     def __init__(self, client: AsyncClient | None = None, topics: Iterable[str] = ()):
         self.client = client or AsyncClient()
@@ -589,13 +591,10 @@ class PairState(BaseModel):
     @computed_field
     @property
     def spot_mid(self) -> float | None:
-        if self.spot_ask_price is not None and self.spot_bid_price is not None:
-            return (self.spot_ask_price + self.spot_bid_price) / 2
-        return None
         if self.spot_ask_price is None or self.spot_ask_price == 0:
-            return self.spot_bid_price
+            return None
         if self.spot_bid_price is None or self.spot_bid_price == 0:
-            return self.spot_ask_price
+            return None
         return (self.spot_ask_price + self.spot_bid_price) / 2
 
     @computed_field
@@ -606,15 +605,15 @@ class PairState(BaseModel):
         if self.spot_ask_price == 0 or self.spot_bid_price == 0:
             return None
 
-        return (self.spot_ask_price - self.spot_bid_price) / self.spot_bid_price * 1e4
+        return (self.spot_ask_price - self.spot_bid_price) / self.spot_mid * 1e4
 
     @computed_field
     @property
     def future_mid(self) -> float | None:
         if self.future_ask_price is None or self.future_ask_price == 0:
-            return self.future_bid_price
+            return None
         if self.future_bid_price is None or self.future_bid_price == 0:
-            return self.future_ask_price
+            return None
         return (self.future_ask_price + self.future_bid_price) / 2
 
     @computed_field
@@ -625,11 +624,7 @@ class PairState(BaseModel):
         if self.future_ask_price == 0 or self.future_bid_price == 0:
             return None
 
-        return (
-            (self.future_ask_price - self.future_bid_price)
-            / self.future_bid_price
-            * 1e4
-        )
+        return (self.future_ask_price - self.future_bid_price) / self.future_mid * 1e4
 
     @computed_field
     @property
@@ -637,7 +632,7 @@ class PairState(BaseModel):
         future_mid = self.future_mid
         spot_mid = self.spot_mid
         if future_mid is not None and spot_mid is not None:
-            return (spot_mid - future_mid) / future_mid * 1e4
+            return (future_mid - spot_mid) / spot_mid * 1e4
         return None
 
 
@@ -654,14 +649,17 @@ class Log:
         await self.queue.put(row)
 
     async def run(self):
-        try:
-            while True:
+        while True:
+            try:
                 self.buffer.append(await self.queue.get())
                 if len(self.buffer) >= self.chunk_size:
                     self.flush()
 
-        except asyncio.QueueShutDown:
-            return
+            except asyncio.QueueShutDown:
+                return
+
+            except Exception as e:
+                l.error(f"Log::run({self.stem}) {e}")
 
     def flush(self):
         fn = f"{self.stem}{self.counter:04d}.parquet"
@@ -874,6 +872,7 @@ async def exchange_data(
             kc_topic_templates = [
                 "/contractMarket/tickerV2:",
                 "/contractMarket/execution:",
+                "/contract/instrument:",
             ]
             kc_topics = [
                 f"{p[0]}{p[1]}"
@@ -890,86 +889,137 @@ async def exchange_data(
                     tg.start_soon(mc_websocket, mc_client, list(b), queue)
 
                 while True:
-                    msg = await queue.get()
-                    now = dt.datetime.now()
-                    match msg:
-                        case FundingRate() as fr:
-                            symbol = kc_symbols[msg.topic.split(":")[-1]]
-                            states[symbol].funding = fr.data.fundingRate * 1e4
-                            await future_funding.log(
-                                [ft.data.timestamp, symbol, fr.data.fundingRate * 1e4]
-                            )
-
-                        case Trade() as t:
-                            symbol = kc_symbols[msg.topic.split(":")[-1]]
-                            states[symbol].last_future = float(t.data.price)
-                            await future_trades.log(
-                                [
-                                    dt.datetime.fromtimestamp(
-                                        t.data.ts / 1_000_000_000
-                                    ),
-                                    symbol,
-                                    t.data.price,
-                                    t.data.size,
-                                    t.data.side,
-                                ]
-                            )
-
-                        case Ticker() as t:
-                            symbol = kc_symbols[msg.topic.split(":")[-1]]
-                            states[symbol].future_ask_price = float(t.data.bestAskPrice)
-                            states[symbol].future_ask_qty = float(t.data.bestAskSize)
-                            states[symbol].future_bid_price = float(t.data.bestBidPrice)
-                            states[symbol].future_bid_qty = float(t.data.bestBidSize)
-                            await future_book.log(
-                                [
-                                    dt.datetime.fromtimestamp(
-                                        t.data.ts / 1_000_000_000
-                                    ),
-                                    symbol,
-                                    t.data.bestAskPrice,
-                                    t.data.bestAskSize,
-                                    t.data.bestBidPrice,
-                                    t.data.bestBidSize,
-                                ]
-                            )
-
-                        case PushDataV3ApiWrapper() as pd:
-                            symbol = mc_symbols[pd.symbol]
-
-                            match pd.WhichOneof("body"):
-                                case "publicAggreDeals":
-                                    states[symbol].last_spot = float(
-                                        pd.publicAggreDeals.deals[-1].price
+                    try:
+                        msg = await queue.get()
+                        now = dt.datetime.now()
+                        match msg:
+                            case FundingRate() as fr:
+                                symbol = kc_symbols[msg.topic.split(":")[-1]]
+                                if symbol is None:
+                                    l.warning(
+                                        f"receive: unknown KuCoin symbol {symbol}"
                                     )
-                                    for d in pd.publicAggreDeals.deals:
-                                        await spot_trades.log(
+                                    continue
+
+                                states[symbol].funding = fr.data.fundingRate * 1e4
+                                await future_funding.log(
+                                    [
+                                        dt.datetime.fromtimestamp(
+                                            fr.data.timestamp / 1_000_000_000
+                                        ),
+                                        symbol,
+                                        fr.data.fundingRate * 1e4,
+                                    ]
+                                )
+
+                            case Trade() as t:
+                                symbol = kc_symbols[msg.topic.split(":")[-1]]
+                                if symbol is None:
+                                    l.warning(
+                                        f"receive: unknown KuCoin symbol {symbol}"
+                                    )
+                                    continue
+
+                                states[symbol].last_future = float(t.data.price)
+                                await future_trades.log(
+                                    [
+                                        dt.datetime.fromtimestamp(
+                                            t.data.ts / 1_000_000_000
+                                        ),
+                                        symbol,
+                                        t.data.price,
+                                        t.data.size,
+                                        t.data.side,
+                                    ]
+                                )
+
+                            case Ticker() as t:
+                                symbol = kc_symbols.get(msg.topic.split(":")[-1])
+                                if symbol is None:
+                                    l.warning(
+                                        f"receive: unknown KuCoin symbol {symbol}"
+                                    )
+                                    continue
+
+                                states[symbol].future_ask_price = float(
+                                    t.data.bestAskPrice
+                                )
+                                states[symbol].future_ask_qty = float(
+                                    t.data.bestAskSize
+                                )
+                                states[symbol].future_bid_price = float(
+                                    t.data.bestBidPrice
+                                )
+                                states[symbol].future_bid_qty = float(
+                                    t.data.bestBidSize
+                                )
+                                await future_book.log(
+                                    [
+                                        dt.datetime.fromtimestamp(
+                                            t.data.ts / 1_000_000_000
+                                        ),
+                                        symbol,
+                                        t.data.bestAskPrice,
+                                        t.data.bestAskSize,
+                                        t.data.bestBidPrice,
+                                        t.data.bestBidSize,
+                                    ]
+                                )
+
+                            case PushDataV3ApiWrapper() as pd:
+                                symbol = mc_symbols.get(pd.symbol)
+                                if symbol is None:
+                                    l.warning(f"receive: unknown MEXC symbol {symbol}")
+                                    continue
+
+                                match pd.WhichOneof("body"):
+                                    case "publicAggreDeals":
+                                        states[symbol].last_spot = float(
+                                            pd.publicAggreDeals.deals[-1].price
+                                        )
+                                        for d in pd.publicAggreDeals.deals:
+                                            await spot_trades.log(
+                                                [
+                                                    dt.datetime.fromtimestamp(
+                                                        d.time / 1_000
+                                                    ),
+                                                    symbol,
+                                                    d.price,
+                                                    d.quantity,
+                                                    (
+                                                        "buy"
+                                                        if d.tradeType == 1
+                                                        else "sell"
+                                                    ),
+                                                ]
+                                            )
+
+                                    case "publicAggreBookTicker":
+                                        d = pd.publicAggreBookTicker
+                                        states[symbol].spot_ask_price = float(
+                                            d.askPrice
+                                        )
+                                        states[symbol].spot_ask_qty = float(
+                                            d.askQuantity
+                                        )
+                                        states[symbol].spot_bid_price = float(
+                                            d.bidPrice
+                                        )
+                                        states[symbol].spot_bid_qty = float(
+                                            d.bidQuantity
+                                        )
+                                        await spot_book.log(
                                             [
                                                 dt.datetime.fromtimestamp(
-                                                    d.time / 1_000
+                                                    d.lastOrderCreateTime / 1_000
                                                 ),
                                                 symbol,
-                                                d.price,
-                                                d.quantity,
-                                                "buy" if d.tradeType == 1 else "sell",
+                                                d.askPrice,
+                                                d.askQuantity,
+                                                d.bidPrice,
+                                                d.bidQuantity,
                                             ]
                                         )
 
-                                case "publicAggreBookTicker":
-                                    d = pd.publicAggreBookTicker
-                                    states[symbol].spot_ask_price = float(d.askPrice)
-                                    states[symbol].spot_ask_qty = float(d.askQuantity)
-                                    states[symbol].spot_bid_price = float(d.bidPrice)
-                                    states[symbol].spot_bid_qty = float(d.bidQuantity)
-                                    await spot_book.log(
-                                        [
-                                            dt.datetime.fromtimestamp(
-                                                d.lastOrderCreateTime / 1_000
-                                            ),
-                                            symbol,
-                                            d.askPrice,
-                                            d.askQuantity,
-                                            d.bidPrice,
-                                            d.bidQuantity,
-                                        ]
-                                    )
+                    except Exception as e:
+                        l.error(f"receive: {e}")

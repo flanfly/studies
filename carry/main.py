@@ -5,6 +5,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import logging as l
+
 from receive import (
     exchange_data,
     PairState,
@@ -17,15 +19,17 @@ from receive import (
 global_pair_state: dict[str, PairState] = {}
 
 
-async def run_exchange_stream():
+async def run_exchange_stream(output_dir: str):
     global global_pair_state
 
-    chunk = 100_000_000
-    spot_book = Log("spot-book-", BookSchema, chunk_size=chunk)
-    spot_trades = Log("spot-trades-", TradesSchema, chunk_size=chunk)
-    future_book = Log("future-book-", BookSchema, chunk_size=chunk)
-    future_trades = Log("future-trades-", TradesSchema, chunk_size=chunk)
-    future_funding = Log("future-funding-", FundingSchema, chunk_size=chunk)
+    chunk = 10_000_000
+    spot_book = Log(f"{output_dir}/spot-book-", BookSchema, chunk_size=chunk)
+    spot_trades = Log(f"{output_dir}/spot-trades-", TradesSchema, chunk_size=chunk)
+    future_book = Log(f"{output_dir}/future-book-", BookSchema, chunk_size=chunk)
+    future_trades = Log(f"{output_dir}/future-trades-", TradesSchema, chunk_size=chunk)
+    future_funding = Log(
+        f"{output_dir}/future-funding-", FundingSchema, chunk_size=chunk
+    )
 
     try:
         await asyncio.gather(
@@ -53,7 +57,7 @@ async def run_exchange_stream():
 
 @asynccontextmanager
 async def exchange_stream(app: FastAPI):
-    t = asyncio.create_task(run_exchange_stream())
+    t = asyncio.create_task(run_exchange_stream("/home/kai/node/data/studies/"))
     yield
     t.cancel()
     try:
@@ -75,8 +79,8 @@ async def websocket_endpoint(websocket: WebSocket):
             msg = {k: v.model_dump(mode="json") for k, v in global_pair_state.items()}
             await websocket.send_json(msg)
             await asyncio.sleep(0.5)
-    except WebSocketDisconnect:
-        pass
+    except Exception as e:
+        l.error(f"websocket_endpoint: {e} ({type(e).__name__})")
 
 
 app_dir = Path(__file__).parent / "web" / "dist"

@@ -20,9 +20,10 @@ type PairState = {
   future_mid: number | null;
   future_spread_bps: number | null;
   basis_bps: number | null;
+  net_bps: number | null;
 };
 const PairStateFieldWidths = {
-  'basis_bps': 1, 'funding': 1, 'spot_mid': 5, 'spot_spread_bps': 1, 'future_mid': 5, 'future_spread_bps': 1
+  'net_bps': 1, 'basis_bps': 1, 'funding': 1, 'spot_mid': 5, 'spot_spread_bps': 1, 'future_mid': 5, 'future_spread_bps': 1
 } as const satisfies Record<string, number>
 
 type Row = Record<string, string | number | null>
@@ -41,8 +42,18 @@ export function useWebSocket(url: string) {
         return
       }
 
+      const future_fee_bps = 6
+      const spot_fee_bps = 0
+      const spot_capture_frac = .3
       const pairs = Object.entries(msg as Record<string, PairState>)
-        .toSorted((a, b) => (b[1].basis_bps ?? 0) - (a[1].basis_bps ?? 0))
+        .map((p) => {
+          const basis = p[1]['basis_bps'] ?? 0
+          const future_spread = p[1]['future_spread_bps'] ?? 0
+          const spot_spread = p[1]['spot_spread_bps'] ?? 0
+          p[1]['net_bps'] = basis - 2 * (future_spread / 2 + future_fee_bps) + 2 * (spot_spread / 2 * spot_capture_frac - spot_fee_bps)
+          return p
+        })
+        .toSorted((a, b) => (b[1]['net_bps'] ?? 0) - (a[1]['net_bps'] ?? 0))
 
       const fmt: [string, Row][] = pairs.map(([name, state]) => {
         const row: Row = { ...state }
@@ -72,6 +83,7 @@ function App() {
         <table className="w-full border-collapse rounded-lg border border-gray-200 shadow-sm">
           <tr className="bg-gray-50">
             <th className="px-4 py-3 text-left text-sm font-semibold">ticker</th>
+            <th className="px-4 py-3 text-right text-sm font-semibold">net</th>
             <th className="px-4 py-3 text-right text-sm font-semibold">basis</th>
             <th className="px-4 py-3 text-right text-sm font-semibold">funding</th>
             <th className="px-4 py-3 text-right text-sm font-semibold">spot mid (spread bps)</th>
@@ -80,6 +92,7 @@ function App() {
           {data.map(p => (
             <tr key={p[0]}>
               <td className='px-4 py-2 text-left'>{p[0]}</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['net_bps']}</td>
               <td className='px-4 py-2 text-right tabular-nums'>{p[1]['basis_bps']}</td>
               <td className='px-4 py-2 text-right tabular-nums'>{p[1]['funding']}</td>
               <td className='px-4 py-2 text-right tabular-nums'>{p[1]['spot_mid']} ({p[1]['spot_spread_bps']})</td>
