@@ -74,11 +74,14 @@ class Content(Model, tag="Contents"):
     size: int = element(tag="Size")
 
 
-class ListBucketResult(Model):
+class ListBucketResult(
+    BaseXmlModel, tag="ListBucketResult", ns="s3", nsmap=nsmap, search_mode="unordered"
+):
     name: str = element(tag="Name")
     prefix: str = element(tag="Prefix")
     max_keys: int = element(tag="MaxKeys")
     is_truncated: bool = element(tag="IsTruncated")
+    next_marker: str | None = element(tag="NextMarker", default=None)
 
     common_prefixes: List[CommonPrefix] = element(
         tag="CommonPrefixes", default_factory=list
@@ -95,22 +98,37 @@ l.basicConfig(
 
 
 async def kc_list(c: AsyncClient, prefix: str) -> list[str]:
-    q = {
-        "delimiter": "/",
-        "prefix": prefix,
-    }
+    out: list[str] = []
+    marker: str | None = None
     while True:
-        try:
-            resp = await c.get("https://historical-data.kucoin.com/", params=q)
+        q = {
+            "delimiter": "/",
+            "prefix": prefix,
+        }
+        if marker:
+            q["marker"] = marker
+        while True:
+            try:
+                resp = await c.get("https://historical-data.kucoin.com/", params=q)
+                break
+            except Exception as e:
+                l.error(f"{prefix}: {e}")
+                await asyncio.sleep(1)
+
+        resp.raise_for_status()
+        model = ListBucketResult.from_xml(resp.content)
+
+        out.extend(p.prefix for p in model.common_prefixes)
+        out.extend(c.key for c in model.contents)
+
+        if not model.is_truncated:
             break
-        except Exception as e:
-            l.error(f"{prefix}: {e}")
-            await asyncio.sleep(1)
+        marker = model.next_marker
+        if not marker:
+            l.warning(f"{prefix}: listing truncated but no NextMarker; stopping")
+            break
 
-    resp.raise_for_status()
-    model = ListBucketResult.from_xml(resp.content)
-
-    return [p.prefix for p in model.common_prefixes] + [c.key for c in model.contents]
+    return out
 
 
 async def kc_fetch_zip(
@@ -172,9 +190,9 @@ async def main():
     )
     parser.add_argument(
         "--output",
-        action="store_true",
+        type=str,
+        default="output.parquet",
     )
-
 
     args = parser.parse_args()
 
@@ -185,20 +203,20 @@ async def main():
         l.error("Concurrency must be at least 1.")
         return
 
-    # await download(
-    #    FUNDING_SCHEMA,
-    #    "data/futures/daily/fundingRates/",
-    #    "",
-    #    "kc-funding-rates.parquet",
-    #    args.concurrency,
-    # )
     await download(
-        FUTURES_SCHEMA,
-        "data/futures/daily/klines/",
-        "5m/",
+        FUNDING_SCHEMA,
+        "data/futures/daily/fundingRates/",
+        "",
         args.output,
         args.concurrency,
     )
+    # await download(
+    #    FUTURES_SCHEMA,
+    #    "data/futures/daily/klines/",
+    #    "5m/",
+    #    args.output,
+    #    args.concurrency,
+    # )
 
 
 async def download(
