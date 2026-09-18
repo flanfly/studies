@@ -17,6 +17,7 @@ import io
 import zipfile
 from hashlib import sha256
 import argparse
+from functools import wraps
 
 import polars as pl
 import pyarrow as pa
@@ -95,6 +96,24 @@ l.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stderr,
 )
+
+
+def with_backoff(fn, start=10, step=1, limit=15):
+    @wraps(fn)
+    async def run(*args, **kwargs):
+        i = start
+        while True:
+            wait = 2.0**i / 1000.0
+
+            try:
+                return await fn(*args, **kwargs)
+            except e:
+                l.error(f"{e}: wait {wait}s")
+                await asyncio.sleep(wait)
+
+            i = min(i + 1, limit)
+
+    return run
 
 
 async def kc_list(c: AsyncClient, prefix: str) -> list[str]:
@@ -184,6 +203,10 @@ async def main():
         default=20,
     )
     parser.add_argument(
+        "-d", "--dataset", type=str, help="Data set to download.", default="ohlcv-12h"
+    )
+
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging.",
@@ -203,20 +226,36 @@ async def main():
         l.error("Concurrency must be at least 1.")
         return
 
-    await download(
-        FUNDING_SCHEMA,
-        "data/futures/daily/fundingRates/",
-        "",
-        args.output,
-        args.concurrency,
-    )
-    # await download(
-    #    FUTURES_SCHEMA,
-    #    "data/futures/daily/klines/",
-    #    "5m/",
-    #    args.output,
-    #    args.concurrency,
-    # )
+    match args.dataset:
+        case "ohlcv-5m":
+            await download(
+                FUTURES_SCHEMA,
+                "data/futures/daily/klines/",
+                "5m/",
+                args.output,
+                args.concurrency,
+            )
+
+        case "ohlcv-12h":
+            await download(
+                FUTURES_SCHEMA,
+                "data/futures/daily/klines/",
+                "12h/",
+                args.output,
+                args.concurrency,
+            )
+
+        case "funding-rates":
+            await download(
+                FUNDING_SCHEMA,
+                "data/futures/daily/fundingRates/",
+                "",
+                args.output,
+                args.concurrency,
+            )
+
+        case _:
+            l.error(f"unknown data set {args.dataset}")
 
 
 async def download(
@@ -234,10 +273,12 @@ async def download(
             if "symbol" not in schema:
                 symbol = pfx.removeprefix(level1).split("/")[0]
 
-            return await kc_fetch_zip(c, pfx, schema, tscols=["time"], symbol=symbol)
+            return await with_backoff(kc_fetch_zip)(
+                c, pfx, schema, tscols=["time"], symbol=symbol
+            )
 
         async def list_dir(pfx: str):
-            return stream.iterate(await kc_list(c, f"{pfx}{level2}"))
+            return stream.iterate(await with_backoff(kc_list)(c, f"{pfx}{level2}"))
 
         gen = (
             stream.iterate(await kc_list(c, level1))
