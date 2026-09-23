@@ -37,10 +37,16 @@ BOM_PERIOD = 5
 
 
 def nyse_holidays():
+    if hasattr(nyse_holidays, "_cache"):
+        return nyse_holidays._cache
+
     tables = pd.read_html("https://www.nyse.com/trade/hours-calendars")
     holidays = pl.DataFrame(tables[0])
-    now = dt.datetime.now().replace(
-        microsecond=0, second=0, minute=0, hour=0, tzinfo=ZoneInfo("EST")
+    # year window keyed off the NYC calendar (the box may run in any tz)
+    now = dt.datetime.combine(
+        dt.datetime.now(ZoneInfo("America/New_York")).date(),
+        dt.time(0),
+        tzinfo=ZoneInfo("EST"),
     )
 
     frag = []
@@ -68,7 +74,8 @@ def nyse_holidays():
             l.warning(f"unexpected column type: {type(ystr)}")
             continue
 
-    return pl.DataFrame(frag).sort("ts")
+    nyse_holidays._cache = pl.DataFrame(frag).sort("ts")
+    return nyse_holidays._cache
 
 
 async def closing_prices(c, sym: str, since: dt.datetime) -> pl.DataFrame:
@@ -132,8 +139,12 @@ async def historical_data(c, spy=None, ief=None) -> pl.DataFrame:
         pl.col("ts").dt.month().alias("month"),
     ]
 
-    td = dt.datetime.now().replace(
-        microsecond=0, second=0, minute=0, hour=0, tzinfo=ZoneInfo("EST")
+    # today, by the NYC calendar, at midnight EST (candle-stamp convention:
+    # daily candles are keyed at 00:00 EST; the in-progress candle is not)
+    td = dt.datetime.combine(
+        dt.datetime.now(ZoneInfo("America/New_York")).date(),
+        dt.time(0),
+        tzinfo=ZoneInfo("EST"),
     )
 
     # Labelled calendar (all days): weekends and NYSE holidays keep their name
@@ -306,8 +317,9 @@ async def main():
         asyncio=True,
     )
 
-    now = dt.datetime.now()
-    td = now.replace(microsecond=0, second=0, minute=0, hour=0, tzinfo=ZoneInfo("EST"))
+    # today, by the NYC calendar, at midnight EST (candle-stamp convention)
+    now = dt.datetime.now(ZoneInfo("America/New_York"))
+    td = dt.datetime.combine(now.date(), dt.time(0), tzinfo=ZoneInfo("EST"))
     start_date = td - dt.timedelta(days=90)
 
     spy, ief, q = await asyncio.gather(
@@ -318,17 +330,13 @@ async def main():
     spy_q, ief_q = q
 
     sdf = lambda p: pl.DataFrame([[td, p]], schema=["ts", "close"], orient="row")
-    spy = pl.concat(
-        [
-            spy,
-            sdf(spy_q.ask_price),
-        ]
+    # keep="last" dedupes the quote against the in-progress candle on EST-month
+    # days, where Schwab stamps today's candle at 00:00 EST (= the quote's ts)
+    spy = pl.concat([spy, sdf(spy_q.ask_price)]).unique(
+        subset="ts", keep="last", maintain_order=True
     )
-    ief = pl.concat(
-        [
-            ief,
-            sdf(ief_q.ask_price),
-        ]
+    ief = pl.concat([ief, sdf(ief_q.ask_price)]).unique(
+        subset="ts", keep="last", maintain_order=True
     )
 
     df = await historical_data(c, spy, ief)
@@ -338,9 +346,21 @@ async def main():
         next_close = (nyc_now + dt.timedelta(days=1)).replace(
             microsecond=0, second=59, minute=59, hour=15
         )
+        next_open = (nyc_now + dt.timedelta(days=1)).replace(
+            microsecond=0, second=59, minute=29, hour=9
+        )
+
     else:
         next_close = nyc_now.replace(microsecond=0, second=59, minute=59, hour=15)
-    rem = (next_close - nyc_now).total_seconds()
+        next_open = nyc_now.replace(microsecond=0, second=59, minute=29, hour=9)
+
+    rem_close = (next_close - nyc_now).total_seconds()
+    rem_open = (next_open - nyc_now).total_seconds()
+    is_open = (
+        rem_open < 0
+        and nyc_now.weekday() not in [5, 6]
+        and nyc_now not in nyse_holidays()["ts"]
+    )
 
     # horizon: last decision day before today through the bom exit after the
     # next decision day. The two legs span eom_period + bom_period trading
@@ -385,9 +405,12 @@ async def main():
         table.add_row(date, pressure, position, decision, style=style)
 
     console.print(table)
-    console.print(
-        f'\nTime in NYC: {nyc_now.strftime("%H:%M")}, {int(rem // 3600)}h{int((rem % 3600) // 60)}m until close.'
-    )
+
+    line = f'\nTime in NYC: {nyc_now.strftime("%H:%M")}'
+    if not is_open:
+        line += f", {int(rem_open // 3600)}h{int((rem_open % 3600) // 60)}m until open"
+    line += f", {int(rem_close // 3600)}h{int((rem_close % 3600) // 60)}m until close."
+    console.print(line)
 
 
 if __name__ == "__main__":
