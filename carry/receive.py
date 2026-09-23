@@ -9,6 +9,7 @@ import json
 import base64
 import hmac
 import hashlib
+from pathlib import Path
 
 import polars as pl
 
@@ -429,9 +430,18 @@ async def kc_fut_contracts(client: AsyncClient) -> Contracts:
     return model
 
 
-async def mc_book(client: AsyncClient) -> pl.DataFrame:
-    resp = await client.get("https://api.mexc.com/api/v3/ticker/bookTicker")
+async def mc_public_get(client: AsyncClient, url: str) -> httpx.Response:
+    # Public endpoint: flag so MexcAuth skips signing -- MEXC 400s on signed
+    # requests to public endpoints.
+    req = client.build_request("GET", url)
+    req.extensions["public"] = True
+    resp = await client.send(req)
     resp.raise_for_status()
+    return resp
+
+
+async def mc_book(client: AsyncClient) -> pl.DataFrame:
+    resp = await mc_public_get(client, "https://api.mexc.com/api/v3/ticker/bookTicker")
 
     return pl.DataFrame(
         resp.json(),
@@ -446,8 +456,7 @@ async def mc_book(client: AsyncClient) -> pl.DataFrame:
 
 
 async def mc_exchange_info(client: AsyncClient) -> ExchangeInfo:
-    resp = await client.get("https://api.mexc.com/api/v3/exchangeInfo")
-    resp.raise_for_status()
+    resp = await mc_public_get(client, "https://api.mexc.com/api/v3/exchangeInfo")
 
     return ExchangeInfo(**resp.json())
 
@@ -643,7 +652,6 @@ class Log:
         self.queue = asyncio.Queue(maxsize=1024)
         self.buffer = []
         self.stem = stem
-        self.counter = 0
 
     async def log(self, row):
         await self.queue.put(row)
@@ -662,12 +670,17 @@ class Log:
                 l.error(f"Log::run({self.stem}) {e}")
 
     def flush(self):
-        fn = f"{self.stem}{self.counter:04d}.parquet"
+        if not self.buffer:
+            return
+
+        ts = dt.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        n = 0
+        while Path(fn := f"{self.stem}{ts}{'' if n == 0 else f'-{n}'}.parquet").exists():
+            n += 1
         l.info(f"write {fn}")
         pl.DataFrame(self.buffer, orient="row", schema=self.schema).write_parquet(fn)
 
         self.buffer = []
-        self.counter += 1
 
 
 async def kc_ping(ws, interval: int):
@@ -748,12 +761,21 @@ async def kc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queu
                     ping.cancel()
                     await asyncio.gather(ping, return_exceptions=True)
 
-        except* (WebSocketNetworkError, WebSocketDisconnect) as e:
+        except* (
+            httpx.TransportError,
+            WebSocketNetworkError,
+            WebSocketDisconnect,
+            anyio.EndOfStream,
+            anyio.IncompleteRead,
+        ) as e:
             if time.monotonic() - t0 > 30:
                 backoff = 1.0  # healthy run, restart the backoff ladder
             delay = backoff * random.uniform(0.5, 1.5)
             backoff = min(backoff * 2, 30)
-            l.warning(f"kc_websocket: connection lost, reconnect in {delay:.1f}s")
+            l.warning(
+                f"kc_websocket: connection lost ({e.exceptions[0]!r}), "
+                f"reconnect in {delay:.1f}s"
+            )
             await asyncio.sleep(delay)
 
 
@@ -782,12 +804,22 @@ async def mc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queu
                     ping.cancel()
                     await asyncio.gather(ping, return_exceptions=True)
 
-        except* (WebSocketNetworkError, WebSocketDisconnect) as e:
+        except* (
+            httpx.TransportError,
+            WebSocketNetworkError,
+            WebSocketDisconnect,
+            ValueError,
+            anyio.EndOfStream,
+            anyio.IncompleteRead,
+        ) as e:
             if time.monotonic() - t0 > 30:
                 backoff = 1.0  # healthy run, restart the backoff
             delay = backoff * random.uniform(0.5, 1.5)
             backoff = min(backoff * 2, 30)
-            l.warning(f"mc_websocket: connection lost, reconnect in {delay:.1f}s")
+            l.warning(
+                f"mc_websocket: connection lost ({e.exceptions[0]!r}), "
+                f"reconnect in {delay:.1f}s"
+            )
             await asyncio.sleep(delay)
 
 

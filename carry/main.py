@@ -55,14 +55,22 @@ async def run_exchange_stream(output_dir: str):
         future_funding.flush()
 
 
+def _log_task_result(t: asyncio.Task):
+    if t.cancelled():
+        return
+    if (exc := t.exception()) is not None:
+        l.error("exchange stream crashed: %r", exc, exc_info=exc)
+
+
 @asynccontextmanager
 async def exchange_stream(app: FastAPI):
-    t = asyncio.create_task(run_exchange_stream("/home/kai/node/data/studies/"))
+    t = asyncio.create_task(run_exchange_stream("/home/kai/node/data/carry/"))
+    t.add_done_callback(_log_task_result)
     yield
     t.cancel()
     try:
         await t
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         pass
 
 
