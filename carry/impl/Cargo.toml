@@ -12,3 +12,6 @@ futures = "0.3.34"
 chrono = "0.4.45"
 async-stream = "0.3.6"
 polars = { version = "0.55.2", features = ["async", "dtype-datetime", "lazy", "parquet"] }
+log = "0.4.34"
+env_logger = "0.11.11"
+tokio-stream = { version = "0.1.19", features = ["full"] }
