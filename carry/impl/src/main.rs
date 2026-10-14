@@ -6,12 +6,10 @@ use std::iter;
 use std::pin::pin;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use log::{info, warn};
+use log::warn;
 
 use async_stream::try_stream;
 use futures::stream::{Stream, StreamExt};
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
 use chrono::DateTime;
 
@@ -45,12 +43,6 @@ struct Instrument(Str);
 impl Instrument {
     pub fn new(kind: Kind, venue: impl AsRef<str>, symbol: impl AsRef<str>) -> Self {
         Self(format!("{}:{}:{}", kind.to_str(), venue.as_ref(), symbol.as_ref()).into())
-    }
-    pub fn venue(&self) -> Str {
-        unimplemented!()
-    }
-    pub fn symbol(&self) -> Str {
-        unimplemented!()
     }
     pub fn kind(&self) -> Kind {
         if self.0.starts_with("fut:") {
@@ -286,29 +278,6 @@ struct MexcFilter {
     ask_multiplier_down: Option<String>,
 }
 
-pub fn dup_stream<S>(
-    mut s: S,
-    cap: Option<usize>,
-) -> (
-    impl Stream<Item = Result<S::Item, BroadcastStreamRecvError>>,
-    impl Stream<Item = Result<S::Item, BroadcastStreamRecvError>>,
-)
-where
-    S: Stream + Unpin + Send + 'static,
-    S::Item: Clone + Send + 'static,
-{
-    let (tx, rx1) = broadcast::channel(cap.unwrap_or(100));
-    let rx2 = tx.subscribe(); // subscribe before the first send
-    tokio::spawn(async move {
-        while let Some(item) = s.next().await {
-            if tx.send(item).is_err() {
-                break;
-            } // all receivers dropped
-        }
-    });
-    (BroadcastStream::new(rx1), BroadcastStream::new(rx2))
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -344,26 +313,21 @@ async fn main() -> Result<()> {
 
     //println!("{:?}", base_kc);
     //println!("{:?}", base_mc);
-    //
-    let (qstrm1, qstrm2) = dup_stream(
-        continuous(resample(join_causality(
-            from_parquet("mexc", Kind::Spot, "../spot-book-resampled-10min.parquet")?,
-            from_parquet(
-                "kucoin",
-                Kind::Future,
-                "../future-book-resampled-10min.parquet",
-            )?,
-        ))),
-        None,
-    );
 
-    let qstrm1 = pin!(qstrm1);
-    let qstrm2 = pin!(qstrm2);
-    let strm = simulate(join_signals_and_quotes(signals(qstrm1), qstrm2));
+    let strm = simulate(signals(continuous(resample(join_causality(
+        from_parquet("mexc", Kind::Spot, "../spot-book-resampled-10min.parquet")?,
+        from_parquet(
+            "kucoin",
+            Kind::Future,
+            "../future-book-resampled-10min.parquet",
+        )?,
+    )))));
     let mut strm = pin!(strm);
 
+    let mut pnl_bps = 0.0;
     while let Some(sig) = strm.next().await {
-        println!("{:?}", sig);
+        pnl_bps += sig?;
+        println!("{:.02}%", pnl_bps / 10e4);
     }
 
     Ok(())
@@ -397,14 +361,13 @@ where
         let mut s1 = pin!(strm1);
         let mut s2 = pin!(strm2);
 
-        // one buffered item per side; take(), yield, refill
         let mut left = s1.next().await;
         let mut right = s2.next().await;
 
         loop {
             let take_left = match (&left, &right) {
                 (Some(Ok(l)), Some(Ok(r))) => l.observed_at <= r.observed_at,
-                (Some(_), _) => true,  // left-only, or left holds an error
+                (Some(_), _) => true,
                 (None, Some(_)) => false,
                 (None, None) => break,
             };
@@ -415,37 +378,6 @@ where
             } else {
                 yield right.take().unwrap()?;
                 right = s2.next().await;
-            }
-        }
-    }
-}
-
-fn join_signals_and_quotes<S, T>(strm1: S, strm2: T) -> impl Stream<Item = Result<SignalOrQuote>>
-where
-    S: Stream<Item = Result<Signal>>,
-    T: Stream<Item = Result<Quote>>,
-{
-    try_stream! {
-        let mut s1 = pin!(strm1);
-        let mut s2 = pin!(strm2);
-
-        let mut sig = s1.next().await;
-        let mut q = s2.next().await;
-
-        loop {
-            let take_sig = match (&sig, &q) {
-                (Some(Ok(s)), Some(Ok(q))) => s.created_at < q.observed_at,
-                (Some(_), _) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
-            };
-
-            if take_sig {
-                yield sig.take().unwrap()?.into();
-                sig = s1.next().await;
-            } else {
-                yield q.take().unwrap()?.into();
-                q = s2.next().await;
             }
         }
     }
@@ -651,7 +583,8 @@ const MAX_FILL_MS: u64 = 24 * 60 * 60 * 1000;
 struct Signal {
     pub created_at: Timestamp,
     pub pair: Pair,
-    pub net_dev: f64,
+    pub net_basis: f64,
+    pub triggered: bool,
 }
 
 fn signals<S>(strm: S) -> impl Stream<Item = Result<Signal>>
@@ -715,59 +648,78 @@ where
 
             ring[i] = row;
 
-            if row.basis.is_finite() {
-                // mean basis
-                let (mu_s, mu_c) = ring
-                    .iter()
-                    .filter_map(
-                        |&Row { ts, basis, .. }| {
-                            if ts.is_null() { None } else { Some(basis) }
-                        },
-                    )
-                    .fold((0.0, 0.0), |(s, c), b| (s + b, c + 1.0));
-                let mu = mu_s / mu_c;
-                let net_dev = row.basis - mu - 2.0 * row.cost;
+            // mean basis
+            let (mu_s, mu_c) = ring
+                .iter()
+                .filter_map(
+                    |&Row { ts, basis, .. }| {
+                        if ts.is_null() { None } else { Some(basis) }
+                    },
+                )
+                .fold((0.0, 0.0), |(s, c), b| (s + b, c + 1.0));
+            let mu = mu_s / mu_c;
+            let net_dev = row.basis - mu - 2.0 * row.cost;
+            let net_basis = row.basis - 2.0 * row.cost;
 
-                if net_dev > 200.0 {
-                    let signal = Signal{ created_at: Timestamp::now()?, pair: q.pair.clone(), net_dev };
-                    yield signal;
-                }
+            if net_dev.is_finite() {
+                let signal = Signal{
+                    created_at: Timestamp::now()?,
+                    pair: q.pair.clone(),
+                    net_basis,
+                    triggered: net_dev > 200.0,
+                };
+
+                yield signal;
             }
         }
     }
 }
 
-enum SignalOrQuote {
-    Signal(Signal),
-    Quote(Quote),
+struct Position {
+    pair: Pair,
+    entry_net_basis: f64,
+    entry_ts: Timestamp,
+    current_net_basis: f64,
+    current_ts: Timestamp,
 }
 
-impl From<Signal> for SignalOrQuote {
-    fn from(signal: Signal) -> Self {
-        SignalOrQuote::Signal(signal)
-    }
-}
-
-impl From<Quote> for SignalOrQuote {
-    fn from(quote: Quote) -> Self {
-        SignalOrQuote::Quote(quote)
-    }
-}
+const HOLDING_MS: u64 = 3 * 60 * 60 * 1000; // 3h in ms
 
 fn simulate<S>(strm: S) -> impl Stream<Item = Result<f64>>
 where
-    S: Stream<Item = Result<SignalOrQuote>>,
+    S: Stream<Item = Result<Signal>>,
 {
     try_stream! {
         let mut strm = pin!(strm);
+        let mut book = HashMap::<Pair,Position>::default();
 
-        while let Some(soq) = strm.next().await {
-            match soq? {
-                SignalOrQuote::Signal(_) => {}
-                SignalOrQuote::Quote(_) => {}
+        while let Some(sig) = strm.next().await {
+            let sig = sig?;
+
+            match book.get_mut(&sig.pair) {
+                Some(pos) => {
+                    pos.current_ts = sig.created_at;
+                    pos.current_net_basis = sig.net_basis;
+
+                    if sig.created_at.ms() <= pos.entry_ts.ms() + HOLDING_MS {
+                        yield pos.entry_net_basis - pos.current_net_basis;
+                    }
+                }
+                None => {
+                    let pos = Position{
+                        pair: sig.pair.clone(),
+                        entry_net_basis: sig.net_basis,
+                        entry_ts: sig.created_at,
+                        current_net_basis: sig.net_basis,
+                        current_ts: sig.created_at
+                    };
+                    book.insert(sig.pair.clone(), pos);
+                }
             }
 
-            yield 0.0;
+            if !sig.triggered {
+                book.remove(&sig.pair);
+            }
         }
     }
 }
