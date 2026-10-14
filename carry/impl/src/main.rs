@@ -400,10 +400,12 @@ fn from_parquet(
             let now = Timestamp::now()?;
             let symbol = b.column("symbol")?.str()?;
             let ts = b.column("ts")?.datetime()?;
-            let bid = b.column("bid_price")?.f64()?;
-            let bid_qty = b.column("bid_qty")?.i64()?;
-            let ask = b.column("ask_price")?.f64()?;
-            let ask_qty = b.column("ask_qty")?.i64()?;
+
+            // bug in the python script
+            let bid = b.column("ask_price")?.f64()?;
+            let bid_qty = b.column("ask_qty")?.i64()?;
+            let ask = b.column("bid_price")?.f64()?;
+            let ask_qty = b.column("bid_qty")?.i64()?;
 
             // normalize the physical timestamp to ms
             let to_ms = match ts.time_unit() {
@@ -619,12 +621,12 @@ where
             row.ts = q.observed_at.masked_min();
             match q.instrument.kind() {
                 Kind::Spot => {
-                    row.spot_bid = q.ask;
-                    row.spot_ask = q.bid;
+                    row.spot_bid = q.bid;
+                    row.spot_ask = q.ask;
                 }
                 Kind::Future => {
-                    row.fut_bid = q.ask;
-                    row.fut_ask = q.bid;
+                    row.fut_bid = q.bid;
+                    row.fut_ask = q.ask;
                 }
             }
 
