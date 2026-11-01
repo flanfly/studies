@@ -1,15 +1,18 @@
 use core::fmt;
+use std::array;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::iter;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use log::warn;
+use chrono::format::parse;
+use log::{info, warn};
 
 use async_stream::try_stream;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::{FuturesUnordered, Stream, StreamExt};
 
 use chrono::DateTime;
 
@@ -18,6 +21,12 @@ use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use anyhow::{Result, anyhow};
+
+use simba::simd::{SimdValue, f64x8};
+
+use tokio::select;
+use tokio::sync::Semaphore;
+use tokio::task::spawn_blocking;
 
 type Str = Cow<'static, str>;
 
@@ -104,6 +113,7 @@ struct Quote {
     pub instrument: Instrument,
     pub pair: Pair,
     pub received_at: Timestamp,
+    // bar close timestamp
     pub observed_at: Timestamp,
     pub bid: f64,
     pub ask: f64,
@@ -152,12 +162,12 @@ struct Settlement {
     // XXX
 }
 
-enum Event {
-    Symbology(Symbology),
-    Quote(Quote),
-    Funding(Funding),
-    Settlement(Settlement),
-}
+//enum Event {
+//    Symbology(Symbology),
+//    Quote(Quote),
+//    Funding(Funding),
+//    Settlement(Settlement),
+//}
 
 /// Generic KuCoin API envelope: `{ "code": "200000", "data": ... }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,20 +324,65 @@ async fn main() -> Result<()> {
     //println!("{:?}", base_kc);
     //println!("{:?}", base_mc);
 
-    let strm = simulate(signals(continuous(resample(join_causality(
-        from_parquet("mexc", Kind::Spot, "../spot-book-resampled-10min.parquet")?,
+    let strm = simulate(arma(basis(join_causality(
+        from_parquet(
+            "mexc",
+            Kind::Spot,
+            Duration::parse("10m"),
+            "../spot-book-resampled-10min.parquet",
+        )?,
         from_parquet(
             "kucoin",
             Kind::Future,
+            Duration::parse("10m"),
             "../future-book-resampled-10min.parquet",
         )?,
-    )))));
+    ))));
     let mut strm = pin!(strm);
 
     let mut pnl_bps = 0.0;
-    while let Some(sig) = strm.next().await {
-        pnl_bps += sig?;
-        println!("{:.02}%", pnl_bps / 10e4);
+    let mut book = HashMap::<Pair, f64>::default();
+    while let Some(ev) = strm.next().await {
+        let ev = ev?;
+        let ts = match ev {
+            Event::Open {
+                created_at,
+                pair,
+                basis,
+                cost,
+                ..
+            } => {
+                println!("[{}] open position on {}", created_at, pair.0);
+                book.insert(pair, basis - cost);
+                created_at
+            }
+            Event::Update { created_at, .. } => created_at,
+            Event::Close {
+                created_at,
+                pair,
+                entry_basis,
+                basis,
+                ..
+            } => {
+                book.remove(&pair);
+                pnl_bps += entry_basis - basis;
+                println!("[{}] close position on {}", created_at, pair.0);
+                created_at
+            }
+        };
+        println!(
+            "[{}] PnL {:.2}% ({:.2}% unrealized)",
+            ts,
+            pnl_bps / 10e4,
+            book.values().sum::<f64>() / 10e4
+        );
+        //pnl_bps += pnl.position_return;
+        //println!(
+        //    "{}: close {} -> {:.02}%",
+        //    pnl.pair,
+        //    pnl.observed_at,
+        //    pnl_bps / 10e4
+        //);
     }
 
     Ok(())
@@ -386,13 +441,71 @@ where
 fn from_parquet(
     venue: impl AsRef<str>,
     kind: Kind,
+    every: Duration,
     path: impl AsRef<str>,
 ) -> Result<impl Stream<Item = Result<Quote>>> {
     // Fallible setup happens eagerly so scan errors surface as a normal Err.
     let lf = LazyFrame::scan_parquet(path.as_ref().into(), ScanArgsParquet::default())?;
     let strm = try_stream! {
-        let mut bi = lf.sort(vec!["ts"],SortMultipleOptions::default()  ).collect_batches(Engine::Auto, true, None, true)?;
-        let venue = venue.as_ref().to_lowercase();
+    let venue = venue.as_ref().to_lowercase();
+    let agg = lf
+        .sort(["ts"], SortMultipleOptions::default())
+        .filter(col("ts").dt().year().gt_eq(lit(2026)))
+        .group_by_dynamic(
+            col("ts"),
+            [col("symbol")],
+            DynamicGroupOptions {
+                every,
+                period: every,
+                offset: Duration::parse("0s"),
+                label: Label::Right,
+                closed_window: ClosedWindow::Left,
+                start_by: StartBy::WindowBound,
+                include_boundaries: false,
+                ..Default::default()
+            },
+        )
+        // bug in the python script
+        .agg([
+            col("bid_price").last().alias("ask"),
+            col("bid_qty").last().alias("ask_qty"),
+            col("ask_price").last().alias("bid"),
+            col("ask_qty").last().alias("bid_qty"),
+         ])
+        .with_columns([((col("bid") + col("ask")) / lit(2.0)).alias("mid"), ]) ;
+
+    let grid = agg
+        .clone()
+        .select([col("symbol").unique()])
+        .cross_join(
+            agg
+            .clone()
+            .select([
+                datetime_range(
+                    Some(col("ts").min()),
+                    Some(col("ts").max()),
+                    Some(every),
+                    None,
+                    ClosedWindow::Both,
+                    None,
+                    None,
+                )?.alias("ts")
+            ]),
+            None);
+
+    let keys = [col("symbol"), col("ts")];
+    let mut bi = grid
+        .join(agg, keys.clone(), keys, JoinArgs::new(JoinType::Left))
+        .sort(["symbol", "ts"], SortMultipleOptions::default())
+        .with_columns([
+            col("ask").fill_null_with_strategy(FillNullStrategy::Forward(None)).over([col("symbol")])?,
+            col("ask_qty").fill_null_with_strategy(FillNullStrategy::Forward(None)).over([col("symbol")])?,
+            col("bid").fill_null_with_strategy(FillNullStrategy::Forward(None)).over([col("symbol")])?,
+            col("bid_qty").fill_null_with_strategy(FillNullStrategy::Forward(None)).over([col("symbol")])?,
+        ])
+        .filter(col("ask").is_not_null())
+        .sort(["ts", "symbol"], SortMultipleOptions::default())
+        .collect_batches(Engine::Auto, true, None, true)?;
 
         while let Some(b) = bi.next() {
             let b = b?;
@@ -401,11 +514,10 @@ fn from_parquet(
             let symbol = b.column("symbol")?.str()?;
             let ts = b.column("ts")?.datetime()?;
 
-            // bug in the python script
-            let bid = b.column("ask_price")?.f64()?;
-            let bid_qty = b.column("ask_qty")?.i64()?;
-            let ask = b.column("bid_price")?.f64()?;
-            let ask_qty = b.column("bid_qty")?.i64()?;
+            let bid = b.column("bid")?.f64()?;
+            let bid_qty = b.column("bid_qty")?.i64()?;
+            let ask = b.column("ask")?.f64()?;
+            let ask_qty = b.column("ask_qty")?.i64()?;
 
             // normalize the physical timestamp to ms
             let to_ms = match ts.time_unit() {
@@ -453,85 +565,6 @@ fn from_parquet(
     };
 
     Ok(strm)
-}
-
-fn resample<S>(strm: S) -> impl Stream<Item = Result<Quote>>
-where
-    S: Stream<Item = Result<Quote>>,
-{
-    try_stream! {
-        let mut latest_quote = HashMap::<Instrument, Quote>::default();
-        let mut strm = pin!(strm);
-
-        while let Some(r) = strm.next().await {
-            let mut q = r?;
-            let is_new = !latest_quote.contains_key(&q.instrument);
-            let ent = latest_quote
-                .entry(q.instrument.clone())
-                .or_insert_with(|| q.clone());
-
-            if is_new || ent.observed_at < q.observed_at {
-                // emit the freshest quote, stamped at its own (minute-masked)
-                // timestamp, and keep it as the new latest for this instrument
-                q.observed_at = q.observed_at.masked_min();
-                *ent = q.clone();
-                yield q;
-            }
-
-        }
-    }
-}
-
-fn continuous<S>(strm: S) -> impl Stream<Item = Result<Quote>>
-where
-    S: Stream<Item = Result<Quote>>,
-{
-    try_stream! {
-        let mut latest_quote = HashMap::<Instrument, Quote>::default();
-        let mut strm = pin!(strm);
-
-        while let Some(r) = strm.next().await {
-            let q = r?;
-                let ent = latest_quote
-                    .entry(q.instrument.clone())
-                    .or_insert_with(|| q.clone());
-
-                // first-ever sighting: ent is a clone of q, so nothing to
-                // fill; just emit it
-                if ent.observed_at >= q.observed_at {
-                    yield q;
-                    continue;
-                }
-
-                // forward-fill the gap at 10-min steps (matching the data's
-                // cadence), but only up to MAX_FILL_MS; beyond that the old
-                // quote is stale and the gap stays a hole (filling it would
-                // just freeze old prices for potentially millions of minutes).
-                let start = ent.observed_at.ms();
-                let end = q.observed_at.ms();
-                let fill_end = end.min(start + MAX_FILL_MS);
-
-                // start at start + FILL_STEP: the ent minute itself was already
-                // emitted (chain-once of the previous cycle), re-emitting it
-                // would duplicate every observation minute.
-                const FILL_STEP: u64 = 10 * 60_000;
-                let ff = (start + FILL_STEP..fill_end)
-                    .step_by(FILL_STEP as usize)
-                    .into_iter()
-                    .map(|ts| {
-                        let mut qq = ent.clone();
-                        qq.observed_at = Timestamp(ts);
-                        qq
-                    })
-                    .chain(iter::once(q.clone()));
-
-                for qq in ff {
-                    yield qq;
-                }
-                *ent = q;
-            }
-
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -582,14 +615,17 @@ const WINDOW: usize = 24 * 60 * 60 / 600; // 24h of 10min observations = 144 slo
 const MAX_FILL_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug)]
-struct Signal {
+struct Basis {
+    // latest input bar's closing ts
+    pub observed_at: Timestamp,
+    // inference ts
     pub created_at: Timestamp,
     pub pair: Pair,
-    pub net_basis: f64,
-    pub triggered: bool,
+    pub basis: f64,
+    pub cost: f64,
 }
 
-fn signals<S>(strm: S) -> impl Stream<Item = Result<Signal>>
+fn basis<S>(strm: S) -> impl Stream<Item = Result<Basis>>
 where
     S: Stream<Item = Result<Quote>>,
 {
@@ -600,25 +636,22 @@ where
     let spot_maker_bps = 0.0;
 
     try_stream! {
-        let mut rings = HashMap::<Pair, [Row; WINDOW]>::default();
+        let mut rows = HashMap::<Pair, Row>::default();
         let mut strm = pin!(strm);
 
         while let Some(r) = strm.next().await {
             let q = r?;
-            let ring = rings
+            let row = rows
                 .entry(q.pair.clone())
-                .or_insert_with(|| [Row::default(); WINDOW]);
-            let i = ((q.observed_at.ms() / 600_000) % WINDOW as u64) as usize;
-            let mut row = ring[i];
+                .or_insert_with(Row::default);
             let ts = q.observed_at.masked_min();
 
-            if row.ts < ts {
-                row = Default::default();
-            } else if row.ts > ts {
-                warn!("stale quote {:?}", q);
+            if row.ts > ts {
+                warn!("stale data recv {:?}", q);
             }
 
-            row.ts = q.observed_at.masked_min();
+            row.ts = ts;
+
             match q.instrument.kind() {
                 Kind::Spot => {
                     row.spot_bid = q.bid;
@@ -648,30 +681,204 @@ where
                     + fut_maker_bps;
             }
 
-            ring[i] = row;
-
-            // mean basis
-            let (mu_s, mu_c) = ring
-                .iter()
-                .filter_map(
-                    |&Row { ts, basis, .. }| {
-                        if ts.is_null() { None } else { Some(basis) }
-                    },
-                )
-                .fold((0.0, 0.0), |(s, c), b| (s + b, c + 1.0));
-            let mu = mu_s / mu_c;
-            let net_dev = row.basis - mu - 2.0 * row.cost;
-            let net_basis = row.basis - 2.0 * row.cost;
-
-            if net_dev.is_finite() {
-                let signal = Signal{
+            if row.basis.is_finite() {
+                let basis = Basis{
+                    observed_at: row.ts,
                     created_at: Timestamp::now()?,
                     pair: q.pair.clone(),
-                    net_basis,
-                    triggered: net_dev > 200.0,
+                    cost: row.cost,
+                    basis : row.basis,
                 };
 
-                yield signal;
+                yield basis;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Signal {
+    // latest input bar's closing ts
+    pub observed_at: Timestamp,
+    // inference ts
+    pub created_at: Timestamp,
+    pub pair: Pair,
+    pub deviation: f64,
+    pub cost: f64,
+    pub basis: f64,
+}
+
+#[derive(Clone)]
+struct InferenceAux {
+    pub observed_at: Timestamp,
+    pub pair: Pair,
+    // basis net of round-trip cost, the series the ARMA is fitted on
+    pub basis: f64,
+    pub cost: f64,
+}
+
+fn arma<S>(strm: S) -> impl Stream<Item = Result<Signal>>
+where
+    S: Stream<Item = Result<Basis>>,
+{
+    let max_iter = 100;
+    let lambda = 10e-3;
+    let delta_bic_threshold = 1.0;
+
+    // pairs co-fitted in a single SIMD ARMA call
+    const LANES: usize = 8;
+
+    try_stream! {
+        // per-pair rolling window of basis minus two times entry cost (assumes entry = exit cost)
+        let mut y = HashMap::<Pair, Box<[f64; WINDOW]>>::default();
+        // last fitted ARMA params, used to warm-start the next window
+        let mut phi = HashMap::<Pair, f64>::default();
+        let mut theta = HashMap::<Pair, f64>::default();
+        let mut aux = HashMap::<Pair, InferenceAux>::default();
+
+        let mut ts: Option<Timestamp> = None;
+
+        let mut res_strm = FuturesUnordered::new();
+        let mut q_strm = pin!(strm);
+
+        let sem = Arc::new(Semaphore::new(
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
+        ));
+
+        // tokio::select! evaluates each handler as plain code inside the
+        // generated async block, so `?` cannot be used there; stash the error
+        // and propagate it after the select.
+        let mut fail: Option<anyhow::Error> = None;
+
+        loop {
+            select!{
+                Some(r) = q_strm.next() => {
+                    match r {
+                        Err(e) => fail = Some(e),
+                        Ok(q) => {
+                            let bar = q.observed_at;
+
+                            match ts {
+                                None => ts = Some(bar),
+                                Some(prev) if bar < prev => warn!("late quote: {:?}", q),
+                                Some(prev) if bar > prev => {
+                                    let win = ((prev.ms() / 600_000) % WINDOW as u64) as usize;
+                                    let entries: Vec<(&Pair, &Box<[f64; WINDOW]>)> = y
+                                        .iter()
+                                        .filter(|(_, yw)| yw.iter().cloned().all(f64::is_finite))
+                                        .collect();
+
+                                    for chunk in entries.chunks(LANES) {
+                                        // oldest -> newest for the window ending at `ts`
+                                        let yv = (0..WINDOW)
+                                            .map(|k| {
+                                                let idx = (win + 1 + k) % WINDOW;
+                                                f64x8::from(std::array::from_fn(|l| {
+                                                    chunk
+                                                        .get(l)
+                                                        .map(|(_, yw)| yw[idx])
+                                                        .unwrap_or(f64::NAN)
+                                                }))
+                                            })
+                                            .collect::<Vec<_>>();
+                                        let mut phiv = [f64x8::from(std::array::from_fn(|l| {
+                                            chunk
+                                                .get(l)
+                                                .and_then(|(p, _)| phi.get(*p).copied())
+                                                .filter(|v| v.is_finite())
+                                                .unwrap_or(0.0)
+                                        }))];
+                                        let mut thetav = [f64x8::from(std::array::from_fn(|l| {
+                                            chunk
+                                                .get(l)
+                                                .and_then(|(p, _)| theta.get(*p).copied())
+                                                .filter(|v| v.is_finite())
+                                                .unwrap_or(0.0)
+                                        }))];
+                                        let auxv: Box<[Option<InferenceAux>]> = (0..LANES)
+                                            .map(|l| {
+                                                chunk
+                                                    .get(l)
+                                                    .and_then(|(p, _)| aux.get(*p))
+                                                    .cloned()
+                                            })
+                                            .collect();
+
+                                        info!("flush ARMA buffer");
+                                        let permit = sem
+                                            .clone()
+                                            .acquire_owned()
+                                            .await
+                                            .expect("semaphore not closed");
+                                        res_strm.push(spawn_blocking(move || {
+                                            let _permit = permit;
+                                            fast_arma::arma::<f64x8, 1, 1>(
+                                                &yv,
+                                                &mut phiv,
+                                                &mut thetav,
+                                                lambda,
+                                                max_iter,
+                                            )
+                                            .map(|fit| (auxv, fit, phiv, thetav))
+                                        }));
+                                    }
+
+                                    ts = Some(bar);
+                                }
+                                Some(_) => {
+                                    let i = ((bar.ms() / 600_000) % WINDOW as u64) as usize;
+                                    let wy = y
+                                        .entry(q.pair.clone())
+                                        .or_insert_with(|| Box::new([f64::NAN; WINDOW]));
+                                    wy[i] = q.basis - q.cost;
+
+                                    aux.insert(q.pair.clone(), InferenceAux {
+                                        observed_at: bar,
+                                        pair: q.pair.clone(),
+                                        basis: q.basis,
+                                        cost: q.cost,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Some(r) = res_strm.next() => {
+                    match r {
+                        Err(e) => fail = Some(e.into()),
+                        Ok(Err(e)) => fail = Some(e),
+                        Ok(Ok((auxv, fit, phiv, thetav))) => {
+                            let now = Timestamp::now().unwrap_or_default();
+                            let dbic = fit.delta_bic();
+
+                            for (l, aux) in auxv.iter().enumerate() {
+                                let Some(aux) = aux else { continue };
+
+                                phi.insert(aux.pair.clone(), phiv[0].extract(l));
+                                theta.insert(aux.pair.clone(), thetav[0].extract(l));
+
+                                if dbic.extract(l) > delta_bic_threshold {
+                                    let net_dev = aux.basis - 2.0*aux.cost - thetav[0].extract(l);
+                                    yield Signal{
+                                        observed_at: aux.observed_at,
+                                        created_at: now,
+                                        deviation: net_dev,
+                                        basis: aux.basis,
+                                        cost: aux.cost,
+                                        pair: aux.pair.clone(),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+
+                else => break,
+            }
+
+            if let Some(e) = fail.take() {
+                Err(e)?;
             }
         }
     }
@@ -679,48 +886,117 @@ where
 
 struct Position {
     pair: Pair,
-    entry_net_basis: f64,
+    entry_basis: f64,
     entry_ts: Timestamp,
-    current_net_basis: f64,
-    current_ts: Timestamp,
+    entry_cost: f64,
+    last_basis: f64,
+    last_deviation: f64,
+    last_cost: f64,
+    last_ts: Timestamp,
 }
 
-const HOLDING_MS: u64 = 3 * 60 * 60 * 1000; // 3h in ms
+#[derive(Debug)]
+enum Event {
+    Open {
+        created_at: Timestamp,
+        pair: Pair,
+        basis: f64,
+        cost: f64,
+        deviation: f64,
+    },
+    Update {
+        created_at: Timestamp,
+        pair: Pair,
+        entry_at: Timestamp,
+        entry_basis: f64,
+        basis: f64,
+        cost: f64,
+        deviation: f64,
+    },
+    Close {
+        created_at: Timestamp,
+        pair: Pair,
+        entry_at: Timestamp,
+        entry_basis: f64,
+        basis: f64,
+        cost: f64,
+        deviation: f64,
+    },
+}
 
-fn simulate<S>(strm: S) -> impl Stream<Item = Result<f64>>
+fn simulate<S>(strm: S) -> impl Stream<Item = Result<Event>>
 where
     S: Stream<Item = Result<Signal>>,
 {
+    let threshold = 200.0;
+    let holding_ms = 3 * 60 * 60 * 1000; // 3h in ms
+
     try_stream! {
         let mut strm = pin!(strm);
         let mut book = HashMap::<Pair,Position>::default();
 
         while let Some(sig) = strm.next().await {
             let sig = sig?;
+            let now = sig.observed_at.clone();
+            let pos = book.keys().cloned().collect::<Box<[_]>>();
 
-            match book.get_mut(&sig.pair) {
-                Some(pos) => {
-                    pos.current_ts = sig.created_at;
-                    pos.current_net_basis = sig.net_basis;
+            // close
+            for pair in pos {
+                if now.ms() <= book[&pair].entry_ts.ms() + holding_ms {
+                    continue;
+                }
 
-                    if sig.created_at.ms() <= pos.entry_ts.ms() + HOLDING_MS {
-                        yield pos.entry_net_basis - pos.current_net_basis;
-                    }
-                }
-                None => {
-                    let pos = Position{
-                        pair: sig.pair.clone(),
-                        entry_net_basis: sig.net_basis,
-                        entry_ts: sig.created_at,
-                        current_net_basis: sig.net_basis,
-                        current_ts: sig.created_at
-                    };
-                    book.insert(sig.pair.clone(), pos);
-                }
+                let pos = book.remove(&pair).unwrap();
+                yield Event::Close {
+                    created_at: now.clone(),
+                    pair: pair.clone(),
+                    entry_at: pos.entry_ts,
+                    entry_basis: pos.entry_basis,
+                    basis: pos.last_basis,
+                    cost: pos.last_cost + pos.entry_cost,
+                    deviation: pos.last_deviation,
+               };
             }
 
-            if !sig.triggered {
-                book.remove(&sig.pair);
+            // open
+            if !book.contains_key(&sig.pair) && sig.deviation > threshold {
+                let pos = Position{
+                    pair: sig.pair.clone(),
+                    entry_basis: sig.basis,
+                    entry_ts: now.clone(),
+                    entry_cost: sig.cost,
+                    last_basis: sig.basis,
+                    last_ts: now.clone(),
+                    last_cost: sig.cost,
+                    last_deviation: sig.deviation,
+                };
+                book.insert(sig.pair.clone(), pos);
+
+                yield Event::Open{
+                    created_at: sig.observed_at,
+                    pair: sig.pair.clone(),
+                    basis: sig.basis,
+                    cost: sig.cost,
+                    deviation: sig.deviation,
+                };
+            }
+
+            // update
+            if let Some(pos) = book.get_mut(&sig.pair) {
+                pos.last_ts = now;
+                pos.last_basis = sig.basis;
+                pos.last_deviation = sig.deviation;
+                pos.last_cost = sig.cost;
+
+                yield Event::Update{
+                    created_at: now,
+                    pair: pos.pair.clone(),
+                    entry_at: pos.entry_ts.clone(),
+                    entry_basis: pos.entry_basis,
+                    basis: sig.basis,
+                    cost: sig.cost,
+                    deviation: sig.deviation,
+                }
             }
         }
     }
