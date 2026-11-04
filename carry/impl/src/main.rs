@@ -1,24 +1,31 @@
 use core::fmt;
-use std::array;
+use std::array::from_fn;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::iter;
 use std::pin::pin;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::format::parse;
-use log::{info, warn};
+use std::path::PathBuf;
 
-use async_stream::try_stream;
-use futures::stream::{FuturesUnordered, Stream, StreamExt};
+use clap::{Parser, Subcommand};
+use governor::{Quota, RateLimiter};
+use log::{error, info, warn};
+use nonzero_ext::nonzero;
+
+use async_stream::{stream, try_stream};
+use futures::stream::{BoxStream, FuturesUnordered, Stream, StreamExt, select_all};
+use futures::{SinkExt, join};
 
 use chrono::DateTime;
 
 use polars::prelude::*;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use anyhow::{Result, anyhow};
 
@@ -27,8 +34,19 @@ use simba::simd::{SimdValue, f64x8};
 use tokio::select;
 use tokio::sync::Semaphore;
 use tokio::task::spawn_blocking;
+use tokio::time::{sleep, timeout};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
+
+use prost::Message as _;
 
 type Str = Cow<'static, str>;
+
+pub mod mexcpb {
+    include!(concat!(env!("OUT_DIR"), "/mexc_proto.rs"));
+}
+use mexcpb::PushDataV3ApiWrapper;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -237,7 +255,19 @@ pub struct KucoinFutureSymbol {
 struct MexcExchangeInfo {
     timezone: String,
     server_time: u64,
+    #[serde(default)]
+    rate_limits: Vec<MexcRateLimit>,
     symbols: Vec<MexcSymbol>,
+}
+
+/// A rate-limit rule from `exchangeInfo.rateLimits`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MexcRateLimit {
+    rate_limit_type: String,
+    interval: String,
+    interval_num: u32,
+    limit: u32,
 }
 
 /// A single tradable pair from `exchangeInfo`.
@@ -288,55 +318,598 @@ struct MexcFilter {
     ask_multiplier_down: Option<String>,
 }
 
+#[derive(Parser)]
+#[command(name = "app", version, about = "spot/futures carry backtester")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Replay historical order books from parquet files
+    History {
+        /// spot order-book parquet path
+        #[arg(short, long)]
+        spot: PathBuf,
+        /// futures order-book parquet path
+        #[arg(short, long)]
+        futures: PathBuf,
+    },
+    /// Trade live
+    Live,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
+    // rustls has both `ring` (polars) and `aws-lc-rs` (reqwest) compiled in;
+    // pick one explicitly or the websocket TLS handshake panics.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    //let (kucoin, mexc) = try_join!(
-    //    reqwest::get("https://api-futures.kucoin.com/api/v1/contracts/active")
-    //        .await?
-    //        .json::<KucoinResponse<Vec<KucoinFutureSymbol>>>(),
-    //    reqwest::get("https://api.mexc.com/api/v3/exchangeInfo?symbol=GMEUSDT")
-    //        .await?
-    //        .json::<MexcExchangeInfo>()
-    //)?;
+    match Cli::parse().command {
+        Command::History { spot, futures } => history(spot, futures).await,
+        Command::Live => live().await,
+    }
+}
 
-    //let mut base_mc = vec![];
-    //let mut base_kc = vec![];
+async fn live() -> Result<()> {
+    let strm = simulate(arma(basis(fuse_and_resample(StdDuration::from_secs(600), quotes()))));
+    let mut strm = pin!(strm);
+    while let Some(x) = strm.next().await {
+        println!("{:?}", x);
+    }
+    Ok(())
+}
 
-    //for c in kucoin.data.into_iter() {
-    //    base_kc.push(c.base_currency);
-    //}
+struct Instruments {
+    venue: Str,
+    kind: Kind,
+    // pair -> venue-specific identifer
+    pairs: HashMap<Pair, String>,
+}
 
-    //for s in mexc.symbols.into_iter() {
-    //    if s.base_asset == "GME" {
-    //        println!("{:#?}", s);
-    //        return Ok(());
-    //    }
-    //    base_mc.push(s.base_asset);
-    //}
+// mc_symbology -[ Instruments ]-> mc_ticker -[ Quote (10min bars, continouos) ]->
+//                              from_parquet -[ Quote (10min bars, continouos) ]->
 
-    //base_kc.sort();
-    //base_kc.dedup();
-    //base_mc.sort();
-    //base_mc.dedup();
+/// kucoin sends price/qty as strings, e.g. `[["246.72", "40"]]`
+fn de_levels<'de, D>(de: D) -> std::result::Result<Vec<(f64, f64)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<(String, String)>::deserialize(de)?;
+    Ok(raw
+        .into_iter()
+        .map(|(px, qty)| (px.parse().unwrap_or(f64::NAN), qty.parse().unwrap_or(0.0)))
+        .collect())
+}
 
-    //println!("{:?}", base_kc);
-    //println!("{:?}", base_mc);
+#[derive(Deserialize)]
+struct KuCoinBboEvent {
+    #[serde(rename = "d")]
+    data: KuCoinOrderBook,
+}
 
+#[derive(Deserialize)]
+struct KuCoinOrderBook {
+    #[serde(rename = "a", deserialize_with = "de_levels")]
+    ask: Vec<(f64, f64)>,
+    #[serde(rename = "b", deserialize_with = "de_levels")]
+    bid: Vec<(f64, f64)>,
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "M")]
+    timestamp: u64,
+}
+
+impl Quote {
+    pub fn from_kucoin(p: Pair, i: Instrument, ev: KuCoinBboEvent) -> Quote {
+        let (bid, bid_qty) = ev.data.bid[0];
+        let (ask, ask_qty) = ev.data.ask[0];
+        Quote {
+            instrument: i,
+            pair: p,
+            received_at: Timestamp::now().unwrap_or_default(),
+            // M is nanoseconds
+            observed_at: Timestamp(ev.data.timestamp / 1_000_000),
+            bid,
+            bid_qty: bid_qty.max(0.0) as u64,
+            ask,
+            ask_qty: ask_qty.max(0.0) as u64,
+        }
+    }
+
+    fn from_mexc(p: Pair, i: Instrument, ev: PushDataV3ApiWrapper) -> Quote {
+        let mut q = Quote {
+            instrument: i,
+            pair: p,
+            received_at: Timestamp::now().unwrap_or_default(),
+            // sendTime is milliseconds
+            observed_at: Timestamp(ev.send_time.unwrap_or_default() as u64),
+            bid: f64::NAN,
+            ask: f64::NAN,
+            bid_qty: 0,
+            ask_qty: 0,
+        };
+        if let Some(mexcpb::push_data_v3_api_wrapper::Body::PublicAggreBookTicker(b)) = ev.body {
+            q.bid = b.bid_price.parse().unwrap_or(f64::NAN);
+            q.bid_qty = b.bid_quantity.parse::<f64>().unwrap_or(0.0).max(0.0) as u64;
+            q.ask = b.ask_price.parse().unwrap_or(f64::NAN);
+            q.ask_qty = b.ask_quantity.parse::<f64>().unwrap_or(0.0).max(0.0) as u64;
+        }
+        q
+    }
+}
+
+#[derive(Serialize)]
+struct MexcSubscribe {
+    method: String,
+    params: Vec<String>,
+    id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KuCoinSubscribe {
+    id: String,
+    action: String,
+    channel: String,
+    trade_type: String,
+    symbol: String,
+    depth: String,
+    rpi_filter: usize,
+}
+
+fn mkid() -> String {
+    static ID: AtomicU64 = AtomicU64::new(1);
+    ID.fetch_add(1, Ordering::Relaxed).to_string()
+}
+
+fn subscribe_kucoin_bbo(
+    tickers: Vec<(Pair, Instrument)>,
+    cancel: CancellationToken,
+) -> impl Stream<Item = Quote> {
+    let handshake_timeout = StdDuration::from_secs(10);
+    let max_attempts: usize = 3;
+
+    stream! {
+        let Ok((conn, _)) = connect_async("wss://x-push-futures.kucoin.com").await else {
+            error!("kucoin connection failed");
+            return;
+        };
+        let (mut tx, mut rx) = conn.split();
+
+        // read welcome
+        let Ok(Some(Ok(welmsg))) = timeout(handshake_timeout, rx.next()).await else {
+            error!("kucoin handshake failed");
+            return;
+        };
+        let Some(wel) = welmsg.into_text().ok().and_then(|s| serde_json::from_str::<Value>(s.as_str()).ok()) else {
+            error!("kucoin handshake ill-formed");
+            return;
+        };
+
+        let ping_interval = StdDuration::from_millis(wel.get("pingInterval").and_then(|v| v.as_u64()).unwrap_or(18_000));
+        // no burst: a 30-message burst makes kucoin reject some subscriptions
+        let limit = RateLimiter::direct(Quota::per_second(nonzero!(30u32)).allow_burst(nonzero!(1u32)));
+        let mut out_queue = VecDeque::<(usize, KuCoinSubscribe)>::default();
+        // id -> (deadline, json)
+        let mut ack_queue = HashMap::<String, (Instant, usize, KuCoinSubscribe)>::default();
+        // lowercased venue symbol -> (pair, instrument)
+        let lookup: HashMap<String, (Pair, Instrument)> = tickers
+            .iter()
+            .map(|(p, i)| {
+                let symbol = i.0.rsplit(':').next().unwrap_or_default().to_lowercase();
+                (symbol, (p.clone(), i.clone()))
+            })
+            .collect();
+
+        // fill out queue with subscription msgs
+        out_queue.extend(tickers.iter().map(|(_, i)| (0, KuCoinSubscribe {
+            id: mkid(),
+            action: "subscribe".to_string(),
+            channel: "obu".to_string(),
+            trade_type: "FUTURES".to_string(),
+            symbol: i.0.rsplit(':').next().unwrap_or_default().to_uppercase(),
+            depth: "1".to_string(),
+            rpi_filter: 0,
+        })));
+
+        loop {
+            let next_resend = ack_queue
+                .values()
+                .map(|(t, _, _)| *t)
+                .min()
+                .map(|t| t.saturating_duration_since(Instant::now()))
+                .unwrap_or_default();
+
+            select!{
+                _ = cancel.cancelled() => break,
+
+                _ = limit.until_ready(), if !out_queue.is_empty() => {
+                    let (attempts, msg) = out_queue.pop_front().unwrap();
+                    match serde_json::to_string(&msg) {
+                        Ok(payload) => {
+                            if let Err(e) = tx.send(Message::text(payload)).await {
+                                error!("kucoin send failed: {e}");
+                                continue;
+                            }
+                            ack_queue.insert(msg.id.clone(), (Instant::now() + StdDuration::from_secs(5), attempts, msg));
+                        }
+                        Err(e) => error!("kucoin encode failed: {e}"),
+                    }
+                }
+
+                _ = sleep(next_resend), if !ack_queue.is_empty() => {
+                    let now = Instant::now();
+                    let expired: Vec<String> = ack_queue
+                        .iter()
+                        .filter(|(_, (t, _, _))| *t <= now)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for k in expired {
+                        if let Some((_, attempts, msg)) = ack_queue.remove(&k) {
+                            warn!("kucoin resend (no ack): {}", msg.symbol);
+                            out_queue.push_back((attempts, msg));
+                        }
+                    }
+                }
+
+                m = rx.next() => {
+                    let Some(Ok(m)) = m else {
+                        error!("kucoin recv failed");
+                        continue;
+                    };
+                    let Ok(m) = m.into_text() else {
+                        error!("kucoin ill-formed message");
+                        continue;
+                    };
+                    let Ok(m) = serde_json::from_str::<Value>(m.as_str()) else {
+                        error!("kucoin ill-formed message {m}");
+                        continue;
+                    };
+                    if m.get("T").and_then(|v| v.as_str()) == Some("obu.FUTURES") {
+                        let Ok(ev) = serde_json::from_value::<KuCoinBboEvent>(m) else {
+                            error!("kucoin ill-formed obu message");
+                            continue;
+                        };
+                        if ev.data.bid.is_empty() || ev.data.ask.is_empty() {
+                            continue;
+                        }
+                        let key = ev.data.symbol.to_lowercase();
+                        let Some((p, i)) = lookup.get(&key) else {
+                            error!("kucoin unknown symbol {}", ev.data.symbol);
+                            continue;
+                        };
+                        yield Quote::from_kucoin(p.clone(), i.clone(), ev);
+                    } else if let Some(r) = m.get("result") {
+                        // remove from ack
+                        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                        match ack_queue.remove(id) {
+                            Some((_, attempts, sub)) => {
+                                if r.as_bool() == Some(true) {
+                                    // subscribed
+                                } else if attempts + 1 < max_attempts {
+                                    error!("kucoin subscription failed, retrying: {}", sub.symbol);
+                                    out_queue.push_back((attempts + 1, sub));
+                                } else {
+                                    error!("kucoin subscription failed, giving up: {}", sub.symbol);
+                                }
+                            }
+                            None => error!("kucoin ack for unknown msg"),
+                        }
+                    } else if m.get("op").and_then(|v| v.as_str()) == Some("pong") {
+                        // do nothing
+                    } else {
+                        error!("kucoin unknown msg shape {m:?}");
+                    }
+                }
+
+                /* send ping (ignore limit) */
+                _ = sleep(ping_interval) => {
+                    let _ = tx.send(Message::text(json!({"id": mkid(), "op": "ping"}).to_string())).await;
+                }
+            }
+        }
+    }
+}
+
+fn subscribe_mexc_bbo(
+    tickers: Vec<(Pair, Instrument)>,
+    rate_limit: u32,
+    cancel: CancellationToken,
+) -> impl Stream<Item = Quote> {
+    let max_attempts: usize = 3;
+
+    stream! {
+        let Ok((conn, _)) = connect_async("wss://wbs-api.mexc.com/ws").await else {
+            error!("mexc connection failed");
+            return;
+        };
+        let (mut tx, mut rx) = conn.split();
+
+        // mexc sends no welcome frame; it just drops the connection if it sees no PING within 30s
+        let ping_interval = StdDuration::from_secs(30);
+        let quota = Quota::per_second(std::num::NonZeroU32::new(rate_limit).unwrap_or(nonzero!(1u32)));
+        let limit = RateLimiter::direct(quota.allow_burst(nonzero!(1u32)));
+        let mut out_queue = VecDeque::<(usize, MexcSubscribe)>::default();
+        // id -> (deadline, attempts, sub)
+        let mut ack_queue = HashMap::<String, (Instant, usize, MexcSubscribe)>::default();
+        // lowercased venue symbol -> (pair, instrument)
+        let lookup: HashMap<String, (Pair, Instrument)> = tickers
+            .iter()
+            .map(|(p, i)| {
+                let symbol = i.0.rsplit(':').next().unwrap_or_default().to_lowercase();
+                (symbol, (p.clone(), i.clone()))
+            })
+            .collect();
+
+        // fill out queue with subscription msgs
+        out_queue.extend(tickers.iter().map(|(_, i)| (0, MexcSubscribe {
+            method: "SUBSCRIPTION".to_string(),
+            params: vec![format!("spot@public.aggre.bookTicker.v3.api.pb@100ms@{}", i.0.rsplit(':').next().unwrap_or_default().to_uppercase())],
+            id: mkid(),
+        })));
+
+        loop {
+            let next_resend = ack_queue
+                .values()
+                .map(|(t, _, _)| *t)
+                .min()
+                .map(|t| t.saturating_duration_since(Instant::now()))
+                .unwrap_or_default();
+
+            select!{
+                _ = cancel.cancelled() => break,
+
+                _ = limit.until_ready(), if !out_queue.is_empty() => {
+                    let (attempts, msg) = out_queue.pop_front().unwrap();
+                    match serde_json::to_string(&msg) {
+                        Ok(payload) => {
+                            if let Err(e) = tx.send(Message::text(payload)).await {
+                                error!("mexc send failed: {e}");
+                                continue;
+                            }
+                            ack_queue.insert(msg.id.clone(), (Instant::now() + StdDuration::from_secs(5), attempts, msg));
+                        }
+                        Err(e) => error!("mexc encode failed: {e}"),
+                    }
+                }
+
+                _ = sleep(next_resend), if !ack_queue.is_empty() => {
+                    let now = Instant::now();
+                    let expired: Vec<String> = ack_queue
+                        .iter()
+                        .filter(|(_, (t, _, _))| *t <= now)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for k in expired {
+                        if let Some((_, attempts, msg)) = ack_queue.remove(&k) {
+                            warn!("mexc resend (no ack): {}", msg.params[0]);
+                            out_queue.push_back((attempts, msg));
+                        }
+                    }
+                }
+
+                m = rx.next() => {
+                    let Some(Ok(m)) = m else {
+                        error!("mexc recv failed");
+                        continue;
+                    };
+                    let m = match m {
+                        Message::Binary(payload) => {
+                            let Ok(ev) = PushDataV3ApiWrapper::decode(&payload[..]) else {
+                                error!("mexc ill-formed push");
+                                continue;
+                            };
+                            let key = ev.symbol.as_deref().unwrap_or_default().to_lowercase();
+                            let Some((p, i)) = lookup.get(&key) else {
+                                error!("mexc unknown symbol {:?}", ev.symbol);
+                                continue;
+                            };
+                            yield Quote::from_mexc(p.clone(), i.clone(), ev);
+                            continue;
+                        }
+                        Message::Text(m) => m,
+                        _ => continue,
+                    };
+                    let Ok(m) = serde_json::from_str::<Value>(m.as_str()) else {
+                        error!("mexc ill-formed message {m}");
+                        continue;
+                    };
+                    if m.get("msg").and_then(|v| v.as_str()) == Some("PONG") {
+                        // do nothing
+                    } else if let Some(code) = m.get("code") {
+                        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                        match ack_queue.remove(id) {
+                            Some((_, attempts, sub)) => {
+                                if code.as_i64() == Some(0) {
+                                    // subscribed
+                                } else if attempts + 1 < max_attempts {
+                                    error!("mexc subscription failed, retrying: {}", sub.params[0]);
+                                    out_queue.push_back((attempts + 1, sub));
+                                } else {
+                                    error!("mexc subscription failed, giving up: {}", sub.params[0]);
+                                }
+                            }
+                            None => error!("mexc ack for unknown msg"),
+                        }
+                    } else {
+                        error!("mexc unknown msg shape {m:?}");
+                    }
+                }
+
+                /* send ping (ignore limit) */
+                _ = sleep(ping_interval) => {
+                    let _ = tx.send(Message::text(json!({"method": "PING"}).to_string())).await;
+                }
+            }
+        }
+    }
+}
+
+async fn kucoin_exchange_state() -> Result<HashMap<Pair, Instrument>> {
+    let res = reqwest::get("https://api-futures.kucoin.com/api/v1/contracts/active")
+        .await?
+        .json::<KucoinResponse<Vec<KucoinFutureSymbol>>>()
+        .await?;
+    let s: HashMap<Pair, Instrument> = res
+        .data
+        .into_iter()
+        .filter_map(|s| {
+            if s.status != "Open" {
+                return None;
+            }
+            if s.quote_currency.to_lowercase() != "usdt" {
+                return None;
+            }
+            let (i, p) = instrument_and_pair("kucoin", Kind::Future, &s.base_currency, &s.symbol);
+            Some((p, i))
+        })
+        .collect();
+    Ok(s)
+}
+
+async fn mexc_exchange_state() -> Result<(HashMap<Pair, Instrument>, u32)> {
+    let res = reqwest::get("https://api.mexc.com/api/v3/exchangeInfo")
+        .await?
+        .json::<MexcExchangeInfo>()
+        .await?;
+
+    let rate_limit = res
+        .rate_limits
+        .iter()
+        .find(|r| r.interval.eq_ignore_ascii_case("second"))
+        .map(|r| r.limit)
+        .unwrap_or(30);
+
+    let ret: HashMap<Pair, Instrument> = res
+        .symbols
+        .into_iter()
+        .filter_map(|s| {
+            if s.quote_asset.to_lowercase() != "usdt" {
+                return None;
+            }
+            if !s.is_spot_trading_allowed {
+                return None;
+            }
+            if s.status != "1" {
+                return None;
+            }
+            let (i, p) = instrument_and_pair("mexc", Kind::Spot, &s.base_asset, &s.symbol);
+            Some((p, i))
+        })
+        .collect();
+    Ok((ret, rate_limit))
+}
+
+fn quotes() -> impl Stream<Item = Result<Quote>> {
+    // mexc silently drops every subscription beyond 30 channels on one connection
+    let mexc_subscriptions_count = 30;
+    let kucoin_subscriptions_count = 25;
+    let poll_interval = StdDuration::from_secs(3600);
+
+    stream! {
+        let mut pairs = HashSet::<Pair>::default();
+        let mut strms: Vec<BoxStream<'static, Quote>> = Vec::new();
+
+        loop {
+            let (Ok((mut mexc, rate_limit)), Ok(mut kucoin)) = join!(mexc_exchange_state(), kucoin_exchange_state()) else {
+                error!("symbol update failed");
+                sleep(poll_interval).await;
+                continue;
+            };
+
+            // pairs listed on both venues
+            let common: Vec<Pair> = mexc
+                .keys()
+                .filter(|p| kucoin.contains_key(*p))
+                .cloned()
+                .collect();
+            let s = common.iter().cloned().collect::<HashSet<_>>();
+            if strms.is_empty() || pairs != s {
+                pairs = s;
+                strms = common
+                    .chunks(mexc_subscriptions_count)
+                    .map(|chunk| {
+                        let tickers = chunk.iter().map(|p| (p.clone(), mexc.remove(p).unwrap())).collect::<Vec<_>>();
+                        subscribe_mexc_bbo(tickers, rate_limit, CancellationToken::new()).boxed()
+                    })
+                    .chain(
+                        common
+                        .chunks(kucoin_subscriptions_count)
+                        .map(|chunk| {
+                            let tickers = chunk.iter().map(|p| (p.clone(), kucoin.remove(p).unwrap())).collect::<Vec<_>>();
+                            subscribe_kucoin_bbo(tickers, CancellationToken::new()).boxed()
+                        })
+                    )
+                    .collect();
+            }
+
+            info!(
+                "subscribe to {} pairs over {} connections",
+                pairs.len(),
+                strms.len()
+            );
+
+            let mut quotes = select_all(strms.iter_mut());
+            let deadline = sleep(poll_interval);
+            tokio::pin!(deadline);
+            loop {
+                select!{
+                    _ = &mut deadline => break,
+                    q = quotes.next() => {
+                        if let Some(q) = q {
+                            yield Ok(q);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn fuse_and_resample<S>(interval: StdDuration, strm: S) -> impl Stream<Item = Result<Quote>>
+where
+    S: Stream<Item = Result<Quote>>,
+{
+    try_stream! {
+        let mut strm = pin!(strm);
+        let mut quotes = HashMap::<Instrument, Quote>::default();
+
+        loop {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+            let phase = StdDuration::from_nanos((now.as_nanos() % interval.as_nanos()) as u64);
+            let delay = interval - phase;
+            let mut fail = None;
+
+            select!{
+                _ = sleep(delay) => {
+                    for (_, q) in quotes.iter() {
+                        yield q.clone();
+                    }
+                }
+
+                q = strm.next() => {
+                    match q {
+                        Some(Ok(q)) => { quotes.insert(q.instrument.clone(), q); }
+                        Some(Err(e)) => fail = Some(e),
+                        None => {}
+                    }
+                }
+            }
+
+            if let Some(e) = fail {
+                Err(e)?;
+            }
+        }
+    }
+}
+
+async fn history(spot: PathBuf, futures: PathBuf) -> Result<()> {
     let strm = simulate(arma(basis(join_causality(
-        from_parquet(
-            "mexc",
-            Kind::Spot,
-            Duration::parse("10m"),
-            "../spot-book-resampled-10min.parquet",
-        )?,
-        from_parquet(
-            "kucoin",
-            Kind::Future,
-            Duration::parse("10m"),
-            "../future-book-resampled-10min.parquet",
-        )?,
+        from_parquet("mexc", Kind::Spot, Duration::parse("10m"), spot)?,
+        from_parquet("kucoin", Kind::Future, Duration::parse("10m"), futures)?,
     ))));
     let mut strm = pin!(strm);
 
@@ -376,13 +949,6 @@ async fn main() -> Result<()> {
             pnl_bps / 10e4,
             book.values().sum::<f64>() / 10e4
         );
-        //pnl_bps += pnl.position_return;
-        //println!(
-        //    "{}: close {} -> {:.02}%",
-        //    pnl.pair,
-        //    pnl.observed_at,
-        //    pnl_bps / 10e4
-        //);
     }
 
     Ok(())
@@ -391,19 +957,20 @@ async fn main() -> Result<()> {
 fn instrument_and_pair(
     venue: impl AsRef<str>,
     kind: Kind,
+    base: impl AsRef<str>,
     symbol: impl AsRef<str>,
 ) -> (Instrument, Pair) {
     let symbol = symbol.as_ref().to_lowercase();
     let venue = venue.as_ref().to_lowercase();
 
-    match (venue.as_ref(), kind, symbol.as_ref()) {
+    match (venue.as_ref(), kind, base.as_ref()) {
         ("mexc", Kind::Spot, "gme") => (
-            Instrument::new(Kind::Spot, "kucoin", "gmememe"),
+            Instrument::new(Kind::Spot, "kucoin", symbol),
             Pair("gmememe".into()),
         ),
-        (venue, kind, symbol) => (
+        (venue, kind, base) => (
             Instrument::new(kind, venue, symbol),
-            Pair(symbol.to_string().into()),
+            Pair(base.to_string().into()),
         ),
     }
 }
@@ -442,10 +1009,11 @@ fn from_parquet(
     venue: impl AsRef<str>,
     kind: Kind,
     every: Duration,
-    path: impl AsRef<str>,
+    path: impl AsRef<std::path::Path>,
 ) -> Result<impl Stream<Item = Result<Quote>>> {
     // Fallible setup happens eagerly so scan errors surface as a normal Err.
-    let lf = LazyFrame::scan_parquet(path.as_ref().into(), ScanArgsParquet::default())?;
+    let path = path.as_ref().to_string_lossy().into_owned();
+    let lf = LazyFrame::scan_parquet(PlRefPath::from(path.as_str()), ScanArgsParquet::default())?;
     let strm = try_stream! {
     let venue = venue.as_ref().to_lowercase();
     let agg = lf
@@ -548,7 +1116,7 @@ fn from_parquet(
                 let ask = ask.ok_or(anyhow!("missing ask col"))?;
                 let ask_qty = ask_qty.ok_or(anyhow!("missing ask_qty col"))?.max(0) as u64;
 
-                let (instrument, pair) = instrument_and_pair(&venue,kind,sym);
+                let (instrument, pair) = instrument_and_pair(&venue,kind,sym,sym);
 
                 yield Quote {
                     instrument,
@@ -608,11 +1176,6 @@ impl Default for Row {
     }
 }
 const WINDOW: usize = 24 * 60 * 60 / 600; // 24h of 10min observations = 144 slots
-
-/// don't forward-fill quotes older than this (ms); past it, the data is
-/// considered stale and the gap is left as a hole instead of being padded
-/// with millions of frozen quotes.
-const MAX_FILL_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug)]
 struct Basis {
@@ -773,7 +1336,7 @@ where
                                         let yv = (0..WINDOW)
                                             .map(|k| {
                                                 let idx = (win + 1 + k) % WINDOW;
-                                                f64x8::from(std::array::from_fn(|l| {
+                                                f64x8::from(from_fn(|l| {
                                                     chunk
                                                         .get(l)
                                                         .map(|(_, yw)| yw[idx])
@@ -781,14 +1344,14 @@ where
                                                 }))
                                             })
                                             .collect::<Vec<_>>();
-                                        let mut phiv = [f64x8::from(std::array::from_fn(|l| {
+                                        let mut phiv = [f64x8::from(from_fn(|l| {
                                             chunk
                                                 .get(l)
                                                 .and_then(|(p, _)| phi.get(*p).copied())
                                                 .filter(|v| v.is_finite())
                                                 .unwrap_or(0.0)
                                         }))];
-                                        let mut thetav = [f64x8::from(std::array::from_fn(|l| {
+                                        let mut thetav = [f64x8::from(from_fn(|l| {
                                             chunk
                                                 .get(l)
                                                 .and_then(|(p, _)| theta.get(*p).copied())
