@@ -3,13 +3,13 @@ use std::array::from_fn;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
-use std::iter;
+use std::mem;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
-
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use governor::{Quota, RateLimiter};
@@ -22,7 +22,11 @@ use futures::{SinkExt, join};
 
 use chrono::DateTime;
 
-use polars::prelude::*;
+use polars::prelude::{
+    ClosedWindow, DataFrame, Duration, DynamicGroupOptions, Engine, FillNullStrategy, JoinArgs,
+    JoinType, Label, LazyFrame, ParquetCompression, ParquetWriter, PlRefPath, ScanArgsParquet,
+    SortMultipleOptions, StartBy, TimeUnit, col, datetime_range, df, lit,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -104,10 +108,6 @@ impl Timestamp {
     pub fn ms(&self) -> u64 {
         self.0
     }
-
-    pub fn is_null(&self) -> bool {
-        self.0 == 0
-    }
 }
 
 impl fmt::Display for Timestamp {
@@ -122,10 +122,6 @@ impl fmt::Display for Timestamp {
     }
 }
 
-struct Lots(u64);
-
-struct Ticks(u64);
-
 #[derive(Debug, Clone)]
 struct Quote {
     pub instrument: Instrument,
@@ -139,88 +135,11 @@ struct Quote {
     pub ask_qty: u64,
 }
 
-struct Currency {
-    id: Str,
-    venue: Str,
-    full_name: Str,
-}
-
-enum Status {
-    Active,
-    CantTrade,
-    CantDeposit,
-}
-
-struct Symbology {
-    pub instrument: Instrument,
-    pub pair: Pair,
-    pub status: Status,
-    pub kind: Kind,
-    pub base: Currency,
-    pub quote: Currency,
-    pub lot_size: f64,
-    pub tick_size: f64,
-    pub multiplier: f64,
-    pub maker_fee_rate: f64,
-    pub taker_fee_rate: f64,
-    pub taker_fix_fee: f64,
-    pub maker_fix_fee: f64,
-    pub received_at: Timestamp,
-}
-
-struct Funding {
-    pub received_at: Timestamp,
-    pub instrument: Instrument,
-    // XXX
-}
-
-struct Settlement {
-    pub received_at: Timestamp,
-    pub instrument: Instrument,
-    // XXX
-}
-
-//enum Event {
-//    Symbology(Symbology),
-//    Quote(Quote),
-//    Funding(Funding),
-//    Settlement(Settlement),
-//}
-
 /// Generic KuCoin API envelope: `{ "code": "200000", "data": ... }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KucoinResponse<T> {
     code: String,
     data: T,
-}
-
-/// A single currency entry from `GET /api/v3/currencies`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct KucoinCurrency {
-    currency: String,
-    name: String,
-    full_name: String,
-    precision: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct KucoinSpotSymbol {
-    symbol: String,
-    name: String,
-    base_currency: String,
-    quote_currency: String,
-    base_min_size: String,
-    quote_min_size: String,
-    base_max_size: String,
-    quote_max_size: String,
-    base_increment: String,
-    quote_increment: String,
-    price_increment: String,
-    price_limit_rate: String,
-    enable_trading: bool,
-    fee_category: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -342,7 +261,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // rustls has both `ring` (polars) and `aws-lc-rs` (reqwest) compiled in;
     // pick one explicitly or the websocket TLS handshake panics.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -354,23 +273,13 @@ async fn main() -> Result<()> {
 }
 
 async fn live() -> Result<()> {
-    let strm = simulate(arma(basis(fuse_and_resample(StdDuration::from_secs(600), quotes()))));
+    let strm = simulate(arma(basis(resample(StdDuration::from_secs(600), persist_quotes("pq/bbo", quotes())))));
     let mut strm = pin!(strm);
     while let Some(x) = strm.next().await {
         println!("{:?}", x);
     }
     Ok(())
 }
-
-struct Instruments {
-    venue: Str,
-    kind: Kind,
-    // pair -> venue-specific identifer
-    pairs: HashMap<Pair, String>,
-}
-
-// mc_symbology -[ Instruments ]-> mc_ticker -[ Quote (10min bars, continouos) ]->
-//                              from_parquet -[ Quote (10min bars, continouos) ]->
 
 /// kucoin sends price/qty as strings, e.g. `[["246.72", "40"]]`
 fn de_levels<'de, D>(de: D) -> std::result::Result<Vec<(f64, f64)>, D::Error>
@@ -472,142 +381,164 @@ fn subscribe_kucoin_bbo(
     let handshake_timeout = StdDuration::from_secs(10);
     let max_attempts: usize = 3;
 
+    let conn_limit = RateLimiter::direct(Quota::per_second(nonzero!(1u32)));
+
     stream! {
-        let Ok((conn, _)) = connect_async("wss://x-push-futures.kucoin.com").await else {
-            error!("kucoin connection failed");
-            return;
-        };
-        let (mut tx, mut rx) = conn.split();
+        'outer: loop {
+            conn_limit.until_ready().await;
 
-        // read welcome
-        let Ok(Some(Ok(welmsg))) = timeout(handshake_timeout, rx.next()).await else {
-            error!("kucoin handshake failed");
-            return;
-        };
-        let Some(wel) = welmsg.into_text().ok().and_then(|s| serde_json::from_str::<Value>(s.as_str()).ok()) else {
-            error!("kucoin handshake ill-formed");
-            return;
-        };
+            let Ok((conn, _)) = connect_async("wss://x-push-futures.kucoin.com").await else {
+                error!("kucoin connection failed");
+                continue;
+            };
+            let (mut tx, mut rx) = conn.split();
 
-        let ping_interval = StdDuration::from_millis(wel.get("pingInterval").and_then(|v| v.as_u64()).unwrap_or(18_000));
-        // no burst: a 30-message burst makes kucoin reject some subscriptions
-        let limit = RateLimiter::direct(Quota::per_second(nonzero!(30u32)).allow_burst(nonzero!(1u32)));
-        let mut out_queue = VecDeque::<(usize, KuCoinSubscribe)>::default();
-        // id -> (deadline, json)
-        let mut ack_queue = HashMap::<String, (Instant, usize, KuCoinSubscribe)>::default();
-        // lowercased venue symbol -> (pair, instrument)
-        let lookup: HashMap<String, (Pair, Instrument)> = tickers
-            .iter()
-            .map(|(p, i)| {
-                let symbol = i.0.rsplit(':').next().unwrap_or_default().to_lowercase();
-                (symbol, (p.clone(), i.clone()))
-            })
-            .collect();
+            // read welcome
+            let Ok(Some(Ok(welmsg))) = timeout(handshake_timeout, rx.next()).await else {
+                error!("kucoin handshake failed");
+                continue;
+            };
+            let Some(wel) = welmsg.into_text().ok().and_then(|s| serde_json::from_str::<Value>(s.as_str()).ok()) else {
+                error!("kucoin handshake ill-formed");
+                continue;
+            };
 
-        // fill out queue with subscription msgs
-        out_queue.extend(tickers.iter().map(|(_, i)| (0, KuCoinSubscribe {
-            id: mkid(),
-            action: "subscribe".to_string(),
-            channel: "obu".to_string(),
-            trade_type: "FUTURES".to_string(),
-            symbol: i.0.rsplit(':').next().unwrap_or_default().to_uppercase(),
-            depth: "1".to_string(),
-            rpi_filter: 0,
-        })));
+            let ping_interval = StdDuration::from_millis(wel.get("pingInterval").and_then(|v| v.as_u64()).unwrap_or(18_000));
+            // no burst: a 30-message burst makes kucoin reject some subscriptions
+            let sub_limit = RateLimiter::direct(Quota::per_second(nonzero!(30u32)).allow_burst(nonzero!(1u32)));
+            let mut out_queue = VecDeque::<(usize, KuCoinSubscribe)>::default();
+            // id -> (deadline, json)
+            let mut ack_queue = HashMap::<String, (Instant, usize, KuCoinSubscribe)>::default();
+            // lowercased venue symbol -> (pair, instrument)
+            let lookup: HashMap<String, (Pair, Instrument)> = tickers
+                .iter()
+                .map(|(p, i)| {
+                    let symbol = i.0.rsplit(':').next().unwrap_or_default().to_lowercase();
+                    (symbol, (p.clone(), i.clone()))
+                })
+                .collect();
 
-        loop {
-            let next_resend = ack_queue
-                .values()
-                .map(|(t, _, _)| *t)
-                .min()
-                .map(|t| t.saturating_duration_since(Instant::now()))
-                .unwrap_or_default();
+            // fill out queue with subscription msgs
+            out_queue.extend(tickers.iter().map(|(_, i)| (0, KuCoinSubscribe {
+                id: mkid(),
+                action: "subscribe".to_string(),
+                channel: "obu".to_string(),
+                trade_type: "FUTURES".to_string(),
+                symbol: i.0.rsplit(':').next().unwrap_or_default().to_uppercase(),
+                depth: "1".to_string(),
+                rpi_filter: 0,
+            })));
 
-            select!{
-                _ = cancel.cancelled() => break,
+            loop {
+                let next_resend = ack_queue
+                    .values()
+                    .map(|(t, _, _)| *t)
+                    .min()
+                    .map(|t| t.saturating_duration_since(Instant::now()))
+                    .unwrap_or_default();
 
-                _ = limit.until_ready(), if !out_queue.is_empty() => {
-                    let (attempts, msg) = out_queue.pop_front().unwrap();
-                    match serde_json::to_string(&msg) {
-                        Ok(payload) => {
-                            if let Err(e) = tx.send(Message::text(payload)).await {
-                                error!("kucoin send failed: {e}");
+                select!{
+                    _ = cancel.cancelled() => return,
+
+                    _ = sub_limit.until_ready(), if !out_queue.is_empty() => {
+                        let (attempts, msg) = out_queue.pop_front().unwrap();
+                        match serde_json::to_string(&msg) {
+                            Ok(payload) => {
+                                if let Err(e) = tx.send(Message::text(payload)).await {
+                                    error!("kucoin send failed: {e}");
+                                    continue;
+                                }
+                                ack_queue.insert(msg.id.clone(), (Instant::now() + StdDuration::from_secs(5), attempts, msg));
+                            }
+                            Err(e) => error!("kucoin encode failed: {e}"),
+                        }
+                    }
+
+                    _ = sleep(next_resend), if !ack_queue.is_empty() => {
+                        let now = Instant::now();
+                        let expired: Vec<String> = ack_queue
+                            .iter()
+                            .filter(|(_, (t, _, _))| *t <= now)
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        for k in expired {
+                            if let Some((_, attempts, msg)) = ack_queue.remove(&k) {
+                                warn!("kucoin resend (no ack): {}", msg.symbol);
+                                out_queue.push_back((attempts, msg));
+                            }
+                        }
+                    }
+
+                    m = rx.next() => {
+                        let s = match m {
+                            Some(Ok(Message::Text(s))) => s,
+                            // kucoin pushes its JSON payloads as binary frames
+                            Some(Ok(Message::Binary(payload))) => match String::from_utf8(payload.to_vec()) {
+                                Ok(s) => s.into(),
+                                Err(e) => {
+                                    error!("kucoin ill-formed binary: {e}");
+                                    continue
+                                }
+                            },
+                            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+                            Some(Ok(Message::Frame(_))) => {
+                                warn!("kucoin frame");
+                                continue
+                            }
+                            Some(Ok(Message::Close(_))) | None => {
+                                error!("kucoin disconnected");
+                                continue 'outer;
+                            }
+                            Some(Err(err)) => {
+                                error!("kucoin recv failed: {}", err);
+                                continue 'outer;
+                            }
+                        };
+                        let Ok(m) = serde_json::from_str::<Value>(s.as_str()) else {
+                            error!("kucoin ill-formed message {s}");
+                            continue;
+                        };
+                        if m.get("T").and_then(|v| v.as_str()) == Some("obu.FUTURES") {
+                            let Ok(ev) = serde_json::from_value::<KuCoinBboEvent>(m) else {
+                                error!("kucoin ill-formed obu message");
+                                continue;
+                            };
+                            if ev.data.bid.is_empty() || ev.data.ask.is_empty() {
                                 continue;
                             }
-                            ack_queue.insert(msg.id.clone(), (Instant::now() + StdDuration::from_secs(5), attempts, msg));
-                        }
-                        Err(e) => error!("kucoin encode failed: {e}"),
-                    }
-                }
-
-                _ = sleep(next_resend), if !ack_queue.is_empty() => {
-                    let now = Instant::now();
-                    let expired: Vec<String> = ack_queue
-                        .iter()
-                        .filter(|(_, (t, _, _))| *t <= now)
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in expired {
-                        if let Some((_, attempts, msg)) = ack_queue.remove(&k) {
-                            warn!("kucoin resend (no ack): {}", msg.symbol);
-                            out_queue.push_back((attempts, msg));
-                        }
-                    }
-                }
-
-                m = rx.next() => {
-                    let Some(Ok(m)) = m else {
-                        error!("kucoin recv failed");
-                        continue;
-                    };
-                    let Ok(m) = m.into_text() else {
-                        error!("kucoin ill-formed message");
-                        continue;
-                    };
-                    let Ok(m) = serde_json::from_str::<Value>(m.as_str()) else {
-                        error!("kucoin ill-formed message {m}");
-                        continue;
-                    };
-                    if m.get("T").and_then(|v| v.as_str()) == Some("obu.FUTURES") {
-                        let Ok(ev) = serde_json::from_value::<KuCoinBboEvent>(m) else {
-                            error!("kucoin ill-formed obu message");
-                            continue;
-                        };
-                        if ev.data.bid.is_empty() || ev.data.ask.is_empty() {
-                            continue;
-                        }
-                        let key = ev.data.symbol.to_lowercase();
-                        let Some((p, i)) = lookup.get(&key) else {
-                            error!("kucoin unknown symbol {}", ev.data.symbol);
-                            continue;
-                        };
-                        yield Quote::from_kucoin(p.clone(), i.clone(), ev);
-                    } else if let Some(r) = m.get("result") {
-                        // remove from ack
-                        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                        match ack_queue.remove(id) {
-                            Some((_, attempts, sub)) => {
-                                if r.as_bool() == Some(true) {
-                                    // subscribed
-                                } else if attempts + 1 < max_attempts {
-                                    error!("kucoin subscription failed, retrying: {}", sub.symbol);
-                                    out_queue.push_back((attempts + 1, sub));
-                                } else {
-                                    error!("kucoin subscription failed, giving up: {}", sub.symbol);
+                            let key = ev.data.symbol.to_lowercase();
+                            let Some((p, i)) = lookup.get(&key) else {
+                                error!("kucoin unknown symbol {}", ev.data.symbol);
+                                continue;
+                            };
+                            yield Quote::from_kucoin(p.clone(), i.clone(), ev);
+                        } else if let Some(r) = m.get("result") {
+                            // remove from ack
+                            let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                            match ack_queue.remove(id) {
+                                Some((_, attempts, sub)) => {
+                                    if r.as_bool() == Some(true) {
+                                        // subscribed
+                                    } else if attempts + 1 < max_attempts {
+                                        error!("kucoin subscription failed, retrying: {}", sub.symbol);
+                                        out_queue.push_back((attempts + 1, sub));
+                                    } else {
+                                        error!("kucoin subscription failed, giving up: {}", sub.symbol);
+                                    }
                                 }
+                                None => error!("kucoin ack for unknown msg"),
                             }
-                            None => error!("kucoin ack for unknown msg"),
+                        } else if m.get("op").and_then(|v| v.as_str()) == Some("pong") {
+                            // do nothing
+                        } else {
+                            error!("kucoin unknown msg shape {m:?}");
                         }
-                    } else if m.get("op").and_then(|v| v.as_str()) == Some("pong") {
-                        // do nothing
-                    } else {
-                        error!("kucoin unknown msg shape {m:?}");
                     }
-                }
 
-                /* send ping (ignore limit) */
-                _ = sleep(ping_interval) => {
-                    let _ = tx.send(Message::text(json!({"id": mkid(), "op": "ping"}).to_string())).await;
+                    /* send ping (ignore limit) */
+                    _ = sleep(ping_interval) => {
+                        let _ = tx.send(Message::text(json!({"id": mkid(), "op": "ping"}).to_string())).await;
+                    }
                 }
             }
         }
@@ -621,129 +552,227 @@ fn subscribe_mexc_bbo(
 ) -> impl Stream<Item = Quote> {
     let max_attempts: usize = 3;
 
+    let conn_limit = RateLimiter::direct(Quota::per_second(nonzero!(1u32)));
+
     stream! {
-        let Ok((conn, _)) = connect_async("wss://wbs-api.mexc.com/ws").await else {
-            error!("mexc connection failed");
-            return;
-        };
-        let (mut tx, mut rx) = conn.split();
+        'outer: loop {
+            conn_limit.until_ready().await;
 
-        // mexc sends no welcome frame; it just drops the connection if it sees no PING within 30s
-        let ping_interval = StdDuration::from_secs(30);
-        let quota = Quota::per_second(std::num::NonZeroU32::new(rate_limit).unwrap_or(nonzero!(1u32)));
-        let limit = RateLimiter::direct(quota.allow_burst(nonzero!(1u32)));
-        let mut out_queue = VecDeque::<(usize, MexcSubscribe)>::default();
-        // id -> (deadline, attempts, sub)
-        let mut ack_queue = HashMap::<String, (Instant, usize, MexcSubscribe)>::default();
-        // lowercased venue symbol -> (pair, instrument)
-        let lookup: HashMap<String, (Pair, Instrument)> = tickers
-            .iter()
-            .map(|(p, i)| {
-                let symbol = i.0.rsplit(':').next().unwrap_or_default().to_lowercase();
-                (symbol, (p.clone(), i.clone()))
-            })
-            .collect();
+            let Ok((conn, _)) = connect_async("wss://wbs-api.mexc.com/ws").await else {
+                error!("mexc connection failed");
+                continue;
+            };
+            let (mut tx, mut rx) = conn.split();
 
-        // fill out queue with subscription msgs
-        out_queue.extend(tickers.iter().map(|(_, i)| (0, MexcSubscribe {
-            method: "SUBSCRIPTION".to_string(),
-            params: vec![format!("spot@public.aggre.bookTicker.v3.api.pb@100ms@{}", i.0.rsplit(':').next().unwrap_or_default().to_uppercase())],
-            id: mkid(),
-        })));
+            // mexc sends no welcome frame; it just drops the connection if it sees no PING within 30s
+            let ping_interval = StdDuration::from_secs(30);
+            let quota = Quota::per_second(std::num::NonZeroU32::new(rate_limit).unwrap_or(nonzero!(1u32)));
+            let limit = RateLimiter::direct(quota.allow_burst(nonzero!(1u32)));
+            let mut out_queue = VecDeque::<(usize, MexcSubscribe)>::default();
+            // id -> (deadline, attempts, sub)
+            let mut ack_queue = HashMap::<String, (Instant, usize, MexcSubscribe)>::default();
+            // lowercased venue symbol -> (pair, instrument)
+            let lookup: HashMap<String, (Pair, Instrument)> = tickers
+                .iter()
+                .map(|(p, i)| {
+                    let symbol = i.0.rsplit(':').next().unwrap_or_default().to_lowercase();
+                    (symbol, (p.clone(), i.clone()))
+                })
+                .collect();
 
-        loop {
-            let next_resend = ack_queue
-                .values()
-                .map(|(t, _, _)| *t)
-                .min()
-                .map(|t| t.saturating_duration_since(Instant::now()))
-                .unwrap_or_default();
+            // fill out queue with subscription msgs
+            out_queue.extend(tickers.iter().map(|(_, i)| (0, MexcSubscribe {
+                method: "SUBSCRIPTION".to_string(),
+                params: vec![format!("spot@public.aggre.bookTicker.v3.api.pb@100ms@{}", i.0.rsplit(':').next().unwrap_or_default().to_uppercase())],
+                id: mkid(),
+            })));
 
-            select!{
-                _ = cancel.cancelled() => break,
+            loop {
+                let next_resend = ack_queue
+                    .values()
+                    .map(|(t, _, _)| *t)
+                    .min()
+                    .map(|t| t.saturating_duration_since(Instant::now()))
+                    .unwrap_or_default();
 
-                _ = limit.until_ready(), if !out_queue.is_empty() => {
-                    let (attempts, msg) = out_queue.pop_front().unwrap();
-                    match serde_json::to_string(&msg) {
-                        Ok(payload) => {
-                            if let Err(e) = tx.send(Message::text(payload)).await {
-                                error!("mexc send failed: {e}");
-                                continue;
-                            }
-                            ack_queue.insert(msg.id.clone(), (Instant::now() + StdDuration::from_secs(5), attempts, msg));
-                        }
-                        Err(e) => error!("mexc encode failed: {e}"),
-                    }
-                }
+                select!{
+                    _ = cancel.cancelled() => return,
 
-                _ = sleep(next_resend), if !ack_queue.is_empty() => {
-                    let now = Instant::now();
-                    let expired: Vec<String> = ack_queue
-                        .iter()
-                        .filter(|(_, (t, _, _))| *t <= now)
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in expired {
-                        if let Some((_, attempts, msg)) = ack_queue.remove(&k) {
-                            warn!("mexc resend (no ack): {}", msg.params[0]);
-                            out_queue.push_back((attempts, msg));
-                        }
-                    }
-                }
-
-                m = rx.next() => {
-                    let Some(Ok(m)) = m else {
-                        error!("mexc recv failed");
-                        continue;
-                    };
-                    let m = match m {
-                        Message::Binary(payload) => {
-                            let Ok(ev) = PushDataV3ApiWrapper::decode(&payload[..]) else {
-                                error!("mexc ill-formed push");
-                                continue;
-                            };
-                            let key = ev.symbol.as_deref().unwrap_or_default().to_lowercase();
-                            let Some((p, i)) = lookup.get(&key) else {
-                                error!("mexc unknown symbol {:?}", ev.symbol);
-                                continue;
-                            };
-                            yield Quote::from_mexc(p.clone(), i.clone(), ev);
-                            continue;
-                        }
-                        Message::Text(m) => m,
-                        _ => continue,
-                    };
-                    let Ok(m) = serde_json::from_str::<Value>(m.as_str()) else {
-                        error!("mexc ill-formed message {m}");
-                        continue;
-                    };
-                    if m.get("msg").and_then(|v| v.as_str()) == Some("PONG") {
-                        // do nothing
-                    } else if let Some(code) = m.get("code") {
-                        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                        match ack_queue.remove(id) {
-                            Some((_, attempts, sub)) => {
-                                if code.as_i64() == Some(0) {
-                                    // subscribed
-                                } else if attempts + 1 < max_attempts {
-                                    error!("mexc subscription failed, retrying: {}", sub.params[0]);
-                                    out_queue.push_back((attempts + 1, sub));
-                                } else {
-                                    error!("mexc subscription failed, giving up: {}", sub.params[0]);
+                    _ = limit.until_ready(), if !out_queue.is_empty() => {
+                        let (attempts, msg) = out_queue.pop_front().unwrap();
+                        match serde_json::to_string(&msg) {
+                            Ok(payload) => {
+                                if let Err(e) = tx.send(Message::text(payload)).await {
+                                    error!("mexc send failed: {e}");
+                                    continue;
                                 }
+                                ack_queue.insert(msg.id.clone(), (Instant::now() + StdDuration::from_secs(5), attempts, msg));
                             }
-                            None => error!("mexc ack for unknown msg"),
+                            Err(e) => error!("mexc encode failed: {e}"),
                         }
-                    } else {
-                        error!("mexc unknown msg shape {m:?}");
                     }
-                }
 
-                /* send ping (ignore limit) */
-                _ = sleep(ping_interval) => {
-                    let _ = tx.send(Message::text(json!({"method": "PING"}).to_string())).await;
+                    _ = sleep(next_resend), if !ack_queue.is_empty() => {
+                        let now = Instant::now();
+                        let expired: Vec<String> = ack_queue
+                            .iter()
+                            .filter(|(_, (t, _, _))| *t <= now)
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        for k in expired {
+                            if let Some((_, attempts, msg)) = ack_queue.remove(&k) {
+                                warn!("mexc resend (no ack): {}", msg.params[0]);
+                                out_queue.push_back((attempts, msg));
+                            }
+                        }
+                    }
+
+                    m = rx.next() => {
+                        let m = match m {
+                            Some(Ok(m)) => m,
+                            Some(Err(err)) => {
+                                error!("mexc recv failed: {}", err);
+                                continue 'outer;
+                            }
+                            None => {
+                                error!("mexc disconnected");
+                                continue 'outer;
+                            }
+                        };
+                        let m = match m {
+                            Message::Binary(payload) => {
+                                let Ok(ev) = PushDataV3ApiWrapper::decode(&payload[..]) else {
+                                    error!("mexc ill-formed push");
+                                    continue;
+                                };
+                                let key = ev.symbol.as_deref().unwrap_or_default().to_lowercase();
+                                let Some((p, i)) = lookup.get(&key) else {
+                                    error!("mexc unknown symbol {:?}", ev.symbol);
+                                    continue;
+                                };
+                                yield Quote::from_mexc(p.clone(), i.clone(), ev);
+                                continue;
+                            }
+                            Message::Text(m) => m,
+                            _ => continue,
+                        };
+                        let Ok(m) = serde_json::from_str::<Value>(m.as_str()) else {
+                            error!("mexc ill-formed message {m}");
+                            continue;
+                        };
+                        if m.get("msg").and_then(|v| v.as_str()) == Some("PONG") {
+                            // do nothing
+                        } else if let Some(code) = m.get("code") {
+                            let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                            match ack_queue.remove(id) {
+                                Some((_, attempts, sub)) => {
+                                    if code.as_i64() == Some(0) {
+                                        // subscribed
+                                    } else if attempts + 1 < max_attempts {
+                                        error!("mexc subscription failed, retrying: {}", sub.params[0]);
+                                        out_queue.push_back((attempts + 1, sub));
+                                    } else {
+                                        error!("mexc subscription failed, giving up: {}", sub.params[0]);
+                                    }
+                                }
+                                None => error!("mexc ack for unknown msg"),
+                            }
+                        } else {
+                            error!("mexc unknown msg shape {m:?}");
+                        }
+                    }
+
+                    /* send ping (ignore limit) */
+                    _ = sleep(ping_interval) => {
+                        let _ = tx.send(Message::text(json!({"method": "PING"}).to_string())).await;
+                    }
                 }
             }
+        }
+    }
+}
+
+fn persist_quotes<S>(base: impl Into<String>, strm: S) -> impl Stream<Item = Result<Quote>>
+where
+    S: Stream<Item = Result<Quote>>,
+{
+    let batch_size = 1_000_000;
+    let base = base.into();
+
+    try_stream! {
+        let mut strm = pin!(strm);
+
+        let mut instrument = Vec::<String>::with_capacity(batch_size);
+        let mut pair = Vec::<String>::with_capacity(batch_size);
+        let mut received_at = Vec::<i64>::with_capacity(batch_size);
+        let mut observed_at = Vec::<i64>::with_capacity(batch_size);
+        let mut ask = Vec::<f64>::with_capacity(batch_size);
+        let mut ask_qty = Vec::<i64>::with_capacity(batch_size);
+        let mut bid = Vec::<f64>::with_capacity(batch_size);
+        let mut bid_qty = Vec::<i64>::with_capacity(batch_size);
+
+        let mut batch_ts: Option<Timestamp> = None;
+
+        let flush = |ts: Timestamp, mut df: DataFrame| -> Result<()> {
+            if let Some(dir) = Path::new(&base).parent() {
+                if !dir.as_os_str().is_empty() {
+                    fs::create_dir_all(dir)?;
+                }
+            }
+            let fname = format!("{base}-{ts}-{}.parquet", mkid());
+            let file = File::create(&fname)?;
+            ParquetWriter::new(file)
+                .with_compression(ParquetCompression::Zstd(None))
+                .with_row_group_size(Some(batch_size.max(64 * 1024)))
+                .finish(&mut df)?;
+            info!("{fname} written");
+            Ok(())
+        };
+
+        while let Some(q) = strm.next().await {
+            let q = q?;
+
+            instrument.push(q.instrument.0.to_string());
+            pair.push(q.pair.0.to_string());
+            received_at.push(q.received_at.ms() as i64);
+            observed_at.push(q.observed_at.ms() as i64);
+            ask.push(q.ask);
+            ask_qty.push(q.ask_qty as i64);
+            bid.push(q.bid);
+            bid_qty.push(q.bid_qty as i64);
+
+            batch_ts = Some(batch_ts.map(|t| t.min(q.observed_at)).unwrap_or(q.observed_at));
+
+            if instrument.len() >= batch_size {
+                let df = df! {
+                    "instrument" => mem::take(&mut instrument),
+                    "pair" => mem::take(&mut pair),
+                    "received_at" => mem::take(&mut received_at),
+                    "observed_at" => mem::take(&mut observed_at),
+                    "ask" => mem::take(&mut ask),
+                    "ask_qty" => mem::take(&mut ask_qty),
+                    "bid" => mem::take(&mut bid),
+                    "bid_qty" => mem::take(&mut bid_qty),
+                }?;
+                flush(batch_ts.unwrap_or_default(), df)?;
+                batch_ts = None;
+            }
+
+            yield q;
+        }
+
+        if !instrument.is_empty() {
+            let df = df! {
+                "instrument" => mem::take(&mut instrument),
+                "pair" => mem::take(&mut pair),
+                "received_at" => mem::take(&mut received_at),
+                "observed_at" => mem::take(&mut observed_at),
+                "ask" => mem::take(&mut ask),
+                "ask_qty" => mem::take(&mut ask_qty),
+                "bid" => mem::take(&mut bid),
+                "bid_qty" => mem::take(&mut bid_qty),
+            }?;
+            flush(batch_ts.unwrap_or_default(), df)?;
         }
     }
 }
@@ -869,7 +898,7 @@ fn quotes() -> impl Stream<Item = Result<Quote>> {
     }
 }
 
-fn fuse_and_resample<S>(interval: StdDuration, strm: S) -> impl Stream<Item = Result<Quote>>
+fn resample<S>(interval: StdDuration, strm: S) -> impl Stream<Item = Result<Quote>>
 where
     S: Stream<Item = Result<Quote>>,
 {
@@ -881,12 +910,16 @@ where
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
             let phase = StdDuration::from_nanos((now.as_nanos() % interval.as_nanos()) as u64);
             let delay = interval - phase;
+            let next = Timestamp((now + delay).as_millis() as u64);
             let mut fail = None;
 
             select!{
                 _ = sleep(delay) => {
                     for (_, q) in quotes.iter() {
-                        yield q.clone();
+                        let mut q = q.clone();
+                        q.observed_at = next;
+                        q.received_at = Timestamp::now().unwrap();
+                        yield q;
                     }
                 }
 
