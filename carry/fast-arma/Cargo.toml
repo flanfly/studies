@@ -1,0 +1,17 @@
+[package]
+name = "fast-arma"
+version = "0.1.0"
+edition = "2024"
+
+
+[lib]
+name = "fast_arma"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+simba = { version = "0.10.2", features = ["portable_simd"] }
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.154"

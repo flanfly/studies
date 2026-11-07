@@ -21,7 +21,7 @@ async-stream = "0.3.6"
 polars = { version = "0.55.2", features = ["async", "dtype-datetime", "lazy", "parquet", "dynamic_group_by", "range", "cross_join", "dtype-array"] }
 log = "0.4.34"
 env_logger = "0.11.11"
-fast-arma = { version = "0.1.0", path = "../../../src/fast-arma" }
+fast-arma = { version = "0.1.0", path = "../fast-arma" }
 simba = { version = "0.10.2", features = ["portable_simd"] }
 governor = { version = "0.10.4", default-features = false, features = ["jitter", "std"] }
 nonzero_ext = "0.3"
