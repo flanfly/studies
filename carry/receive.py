@@ -741,8 +741,20 @@ async def kc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queu
                 ping = asyncio.create_task(kc_ping(ws, srv.pingInterval / 1000 / 2))
 
                 try:
+                    last_pong = time.monotonic()
                     while True:
-                        raw = await ws.receive_text()
+                        try:
+                            raw = await ws.receive_text(
+                                timeout=2 * srv.pingInterval / 1000
+                            )
+                        except TimeoutError:
+                            l.warning(
+                                "kc_websocket: no messages for "
+                                f"{time.monotonic() - last_pong:.0f}s, "
+                                "forcing reconnect"
+                            )
+                            break
+
                         try:
                             msg = TypeAdapter(Message).validate_json(raw)
                         except ValidationError as e:
@@ -751,6 +763,9 @@ async def kc_websocket(client: AsyncClient, topics: list[str], out: asyncio.Queu
 
                         match msg:
                             case Welcome() | Acknowledge():
+                                continue
+                            case Pong():
+                                last_pong = time.monotonic()
                                 continue
                             case Error() as err:
                                 l.error(f"kc: {err}")
