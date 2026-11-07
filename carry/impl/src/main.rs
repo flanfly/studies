@@ -2,14 +2,14 @@ use core::fmt;
 use std::array::from_fn;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{self, File};
 use std::hash::Hash;
 use std::mem;
-use std::pin::pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
-use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use governor::{Quota, RateLimiter};
@@ -32,6 +32,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use anyhow::{Result, anyhow};
+
+use axum::Router;
+use axum::extract::State;
+use axum::extract::ws::{Message as WsMessage, WebSocketUpgrade};
+use axum::routing::get;
 
 use simba::simd::{SimdValue, f64x8};
 
@@ -87,11 +92,11 @@ impl Instrument {
 }
 
 // global pair identifer: btc, eth,...
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
 struct Pair(Str);
 
 // ms unix utc timestamp
-#[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 struct Timestamp(u64);
 
 impl Timestamp {
@@ -124,6 +129,7 @@ impl fmt::Display for Timestamp {
 
 #[derive(Debug, Clone)]
 struct Quote {
+    pub is_aggregation: bool,
     pub instrument: Instrument,
     pub pair: Pair,
     pub received_at: Timestamp,
@@ -273,7 +279,13 @@ async fn main() -> Result<()> {
 }
 
 async fn live() -> Result<()> {
-    let strm = simulate(arma(basis(resample(StdDuration::from_secs(600), persist_quotes("pq/bbo", quotes())))));
+    let strm = simulate(arma(serve(
+        "0.0.0.0:3000",
+        basis(resample(
+            StdDuration::from_secs(600),
+            persist_quotes("pq/bbo", quotes()),
+        )),
+    )));
     let mut strm = pin!(strm);
     while let Some(x) = strm.next().await {
         println!("{:?}", x);
@@ -316,6 +328,7 @@ impl Quote {
         let (bid, bid_qty) = ev.data.bid[0];
         let (ask, ask_qty) = ev.data.ask[0];
         Quote {
+            is_aggregation: false,
             instrument: i,
             pair: p,
             received_at: Timestamp::now().unwrap_or_default(),
@@ -330,6 +343,7 @@ impl Quote {
 
     fn from_mexc(p: Pair, i: Instrument, ev: PushDataV3ApiWrapper) -> Quote {
         let mut q = Quote {
+            is_aggregation: false,
             instrument: i,
             pair: p,
             received_at: Timestamp::now().unwrap_or_default(),
@@ -692,11 +706,83 @@ fn subscribe_mexc_bbo(
     }
 }
 
+struct ServeState {
+    cancel: CancellationToken,
+    latest: Mutex<HashMap<Pair, Basis>>,
+}
+
+fn serve<S>(listen: impl Into<String>, strm: S) -> impl Stream<Item = Result<Basis>>
+where
+    S: Stream<Item = Result<Basis>>,
+{
+    let listen = listen.into();
+    let push_interval = StdDuration::from_millis(500);
+
+    try_stream! {
+        let mut strm = pin!(strm);
+
+        let cancel = CancellationToken::new();
+        let state = Arc::new(ServeState {
+            cancel: cancel.clone(),
+            latest: Mutex::new(HashMap::<Pair, Basis>::new()),
+        });
+
+        let ws_handler =
+            move |ws: WebSocketUpgrade, State(state): State<Arc<ServeState>>| async move {
+                ws.on_upgrade(move |mut socket| async move {
+                    loop {
+                        let payload = {
+                            let latest = state.latest.lock().unwrap();
+                            serde_json::to_string(&*latest).unwrap_or_else(|_| "{}".to_string())
+                        };
+                        if socket.send(WsMessage::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                        select! {
+                            _ = sleep(push_interval) => {}
+                            _ = state.cancel.cancelled() => {
+                                let _ = socket.send(WsMessage::Close(None)).await;
+                                break;
+                            }
+                        }
+                    }
+                })
+            };
+
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind(&listen).await?;
+
+        let shutdown = cancel.clone();
+        let h = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
+                .await
+            {
+                error!("serve failed: {e}");
+            }
+        });
+
+        while let Some(q) = strm.next().await {
+            let q = q?;
+
+            if !q.is_aggregation {
+                state.latest.lock().unwrap().insert(q.pair.clone(), q.clone());
+            }
+            yield q;
+        }
+
+        cancel.cancel();
+        h.await?;
+    }
+}
+
 fn persist_quotes<S>(base: impl Into<String>, strm: S) -> impl Stream<Item = Result<Quote>>
 where
     S: Stream<Item = Result<Quote>>,
 {
-    let batch_size = 1_000_000;
+    let batch_size = 10_000_000;
     let base = base.into();
 
     try_stream! {
@@ -731,6 +817,10 @@ where
 
         while let Some(q) = strm.next().await {
             let q = q?;
+            if q.is_aggregation {
+                yield q;
+                continue;
+            }
 
             instrument.push(q.instrument.0.to_string());
             pair.push(q.pair.0.to_string());
@@ -919,13 +1009,17 @@ where
                         let mut q = q.clone();
                         q.observed_at = next;
                         q.received_at = Timestamp::now().unwrap();
+                        q.is_aggregation =true;
                         yield q;
                     }
                 }
 
                 q = strm.next() => {
                     match q {
-                        Some(Ok(q)) => { quotes.insert(q.instrument.clone(), q); }
+                        Some(Ok(q)) => {
+                            quotes.insert(q.instrument.clone(), q.clone());
+                            yield q;
+                        }
                         Some(Err(e)) => fail = Some(e),
                         None => {}
                     }
@@ -995,13 +1089,18 @@ fn instrument_and_pair(
 ) -> (Instrument, Pair) {
     let symbol = symbol.as_ref().to_lowercase();
     let venue = venue.as_ref().to_lowercase();
+    let base = base.as_ref().to_lowercase();
 
     match (venue.as_ref(), kind, base.as_ref()) {
         ("mexc", Kind::Spot, "gme") => (
-            Instrument::new(Kind::Spot, "kucoin", symbol),
+            Instrument::new(Kind::Spot, "mexc", symbol),
             Pair("gmememe".into()),
         ),
-        (venue, kind, base) => (
+        ("mexc", Kind::Spot, "wen") => (
+            Instrument::new(Kind::Spot, "mexc", symbol),
+            Pair("wenmeme".into()),
+        ),
+        (venue, kind, _) => (
             Instrument::new(kind, venue, symbol),
             Pair(base.to_string().into()),
         ),
@@ -1152,6 +1251,7 @@ fn from_parquet(
                 let (instrument, pair) = instrument_and_pair(&venue,kind,sym,sym);
 
                 yield Quote {
+                    is_aggregation: false,
                     instrument,
                     pair,
                     received_at: now,
@@ -1210,8 +1310,9 @@ impl Default for Row {
 }
 const WINDOW: usize = 24 * 60 * 60 / 600; // 24h of 10min observations = 144 slots
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 struct Basis {
+    pub is_aggregation: bool,
     // latest input bar's closing ts
     pub observed_at: Timestamp,
     // inference ts
@@ -1219,6 +1320,16 @@ struct Basis {
     pub pair: Pair,
     pub basis: f64,
     pub cost: f64,
+
+    pub spot_bid: f64,
+    pub spot_ask: f64,
+    pub spot_mid: f64,
+    pub spot_spread: f64,
+
+    pub fut_bid: f64,
+    pub fut_ask: f64,
+    pub fut_mid: f64,
+    pub fut_spread: f64,
 }
 
 fn basis<S>(strm: S) -> impl Stream<Item = Result<Basis>>
@@ -1232,11 +1343,13 @@ where
     let spot_maker_bps = 0.0;
 
     try_stream! {
-        let mut rows = HashMap::<Pair, Row>::default();
+        let mut live = HashMap::<Pair, Row>::default();
+        let mut agg = HashMap::<Pair, Row>::default();
         let mut strm = pin!(strm);
 
         while let Some(r) = strm.next().await {
             let q = r?;
+            let rows = if q.is_aggregation { &mut agg } else { &mut live };
             let row = rows
                 .entry(q.pair.clone())
                 .or_insert_with(Row::default);
@@ -1245,6 +1358,7 @@ where
             if row.ts > ts {
                 warn!("stale data recv {:?}", q);
             }
+
 
             row.ts = ts;
 
@@ -1277,17 +1391,26 @@ where
                     + fut_maker_bps;
             }
 
-            if row.basis.is_finite() {
-                let basis = Basis{
-                    observed_at: row.ts,
-                    created_at: Timestamp::now()?,
-                    pair: q.pair.clone(),
-                    cost: row.cost,
-                    basis : row.basis,
-                };
+            let basis = Basis{
+                is_aggregation: q.is_aggregation,
+                observed_at: row.ts,
+                created_at: Timestamp::now()?,
+                pair: q.pair.clone(),
+                cost: row.cost,
+                basis : row.basis,
 
-                yield basis;
-            }
+                spot_bid: row.spot_bid,
+                spot_ask: row.spot_ask,
+                spot_mid: row.spot_mid,
+                spot_spread: row.spot_spread,
+
+                fut_bid: row.fut_bid,
+                fut_ask: row.fut_ask,
+                fut_mid: row.fut_mid,
+                fut_spread: row.fut_spread,
+            };
+
+            yield basis;
         }
     }
 }
@@ -1335,7 +1458,7 @@ where
         let mut ts: Option<Timestamp> = None;
 
         let mut res_strm = FuturesUnordered::new();
-        let mut q_strm = pin!(strm);
+        let mut b_strm = pin!(strm);
 
         let sem = Arc::new(Semaphore::new(
             std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
@@ -1348,15 +1471,19 @@ where
 
         loop {
             select!{
-                Some(r) = q_strm.next() => {
+                Some(r) = b_strm.next() => {
                     match r {
                         Err(e) => fail = Some(e),
-                        Ok(q) => {
-                            let bar = q.observed_at;
+                        Ok(b) => {
+                            if !b.is_aggregation {
+                                continue;
+                            }
+
+                            let bar = b.observed_at;
 
                             match ts {
                                 None => ts = Some(bar),
-                                Some(prev) if bar < prev => warn!("late quote: {:?}", q),
+                                Some(prev) if bar < prev => warn!("late quote: {:?}", b),
                                 Some(prev) if bar > prev => {
                                     let win = ((prev.ms() / 600_000) % WINDOW as u64) as usize;
                                     let entries: Vec<(&Pair, &Box<[f64; WINDOW]>)> = y
@@ -1424,15 +1551,15 @@ where
                                 Some(_) => {
                                     let i = ((bar.ms() / 600_000) % WINDOW as u64) as usize;
                                     let wy = y
-                                        .entry(q.pair.clone())
+                                        .entry(b.pair.clone())
                                         .or_insert_with(|| Box::new([f64::NAN; WINDOW]));
-                                    wy[i] = q.basis - q.cost;
+                                    wy[i] = b.basis - b.cost;
 
-                                    aux.insert(q.pair.clone(), InferenceAux {
+                                    aux.insert(b.pair.clone(), InferenceAux {
                                         observed_at: bar,
-                                        pair: q.pair.clone(),
-                                        basis: q.basis,
-                                        cost: q.cost,
+                                        pair: b.pair.clone(),
+                                        basis: b.basis,
+                                        cost: b.cost,
                                     });
                                 }
                             }

@@ -23,7 +23,7 @@ type PairState = {
   net_bps: number | null;
 };
 const PairStateFieldWidths = {
-  'net_bps': 1, 'basis_bps': 1, 'funding': 1, 'spot_mid': 5, 'spot_spread_bps': 1, 'future_mid': 5, 'future_spread_bps': 1
+  'net_bps': 1, 'basis': 1, 'funding': 1, 'spot_mid': 5, 'spot_spread': 1, 'fut_mid': 5, 'fut_spread': 1
 } as const satisfies Record<string, number>
 
 type Row = Record<string, string | number | null>
@@ -47,10 +47,7 @@ export function useWebSocket(url: string) {
       const spot_capture_frac = .3
       const pairs = Object.entries(msg as Record<string, PairState>)
         .map((p) => {
-          const basis = p[1]['basis_bps'] ?? 0
-          const future_spread = p[1]['future_spread_bps'] ?? 0
-          const spot_spread = p[1]['spot_spread_bps'] ?? 0
-          p[1]['net_bps'] = basis - 2 * (future_spread / 2 + future_fee_bps) + 2 * (spot_spread / 2 * spot_capture_frac - spot_fee_bps)
+          p[1]['net_bps'] = p[1]['basis'] - p[1]['cost'];
           return p
         })
         .toSorted((a, b) => (b[1]['net_bps'] ?? 0) - (a[1]['net_bps'] ?? 0))
@@ -75,7 +72,7 @@ export function useWebSocket(url: string) {
 }
 
 function App() {
-  const { data, ready } = useWebSocket('ws://ether:8000/ws');
+  const { data, ready } = useWebSocket('ws://localhost:3000/ws');
 
   return (
     <section id="center" className="mx-auto max-w-4xl px-4 py-8">
@@ -93,10 +90,10 @@ function App() {
             <tr key={p[0]}>
               <td className='px-4 py-2 text-left'>{p[0]}</td>
               <td className='px-4 py-2 text-right tabular-nums'>{p[1]['net_bps']}</td>
-              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['basis_bps']}</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['basis']}</td>
               <td className='px-4 py-2 text-right tabular-nums'>{p[1]['funding']}</td>
-              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['spot_mid']} ({p[1]['spot_spread_bps']})</td>
-              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['future_mid']} ({p[1]['future_spread_bps']})</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['spot_mid']} ({p[1]['spot_spread']})</td>
+              <td className='px-4 py-2 text-right tabular-nums'>{p[1]['fut_mid']} ({p[1]['fut_spread']})</td>
             </tr>))}
         </table>
       )}
