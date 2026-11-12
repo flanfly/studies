@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package events;
+
+// Raw exchange tick, the root event of the pipeline.
+message Quote {
+  bool is_aggregation = 1;
+
+  uint64 observed_at = 2; // bar close time
+  string pair = 3;
+  string instrument = 4;
+
+  double bid = 5;
+  uint64 bid_qty = 6;
+
+  double ask = 7;
+  uint64 ask_qty = 8;
+}
+
+// Spot/futures basis snapshot (the `Basis` struct, served on `/q`).
+message Basis {
+  bool is_aggregation = 1;
+
+  uint64 observed_at = 2; // bar close time
+  string pair = 3;
+
+  double basis = 4;
+  double cost = 5;
+
+  double spot_bid = 6;
+  double spot_ask = 7;
+  double spot_mid = 8;
+  double spot_spread = 9;
+
+  double fut_bid = 10;
+  double fut_ask = 11;
+  double fut_mid = 12;
+  double fut_spread = 13;
+}
+
+// ARMA deviation signal (the `Signal` struct, served on `/s`).
+message Signal {
+  uint64 window_start = 1; // timestamp
+  uint64 window_end = 2; // timestamp
+
+  string pair = 3;
+
+  double deviation = 4;
+  double cost = 5;
+  double basis = 6;
+}
+
+// A position is opened on a signal crossing the entry threshold.
+message Open {
+  string pair = 1;
+  double basis = 2;
+  double cost = 3;
+  double deviation = 4;
+}
+
+// Position closed after the holding period.
+message Close {
+  string pair = 1;
+
+  uint64 entry_at = 2;
+  double entry_basis = 3;
+  double entry_deviation = 4;
+  double entry_cost = 5;
+
+  // exit_at is the event timestamp (close time)
+  uint64 exit_at = 9;
+  double exit_basis = 6;
+  double exit_cost = 7;
+  double exit_deviation = 8;
+}
+
+message Universe {
+  message Market {
+    message Asset {
+      enum State {
+        STATE_UNSPECIFIED = 0;
+        STATE_OPEN = 1;
+        STATE_WITHDRAWALS_SUSPENDED = 2;
+        STATE_HALTED = 3;
+        STATE_DELISTED = 4;
+      }
+
+      string pair = 1;
+      string instrument = 2;
+      State state = 3;
+    }
+
+    string exchange = 1;
+    string kind = 2;
+
+    uint32 messages_per_second = 3;
+    uint32 subscriptions_per_connection = 4;
+
+    repeated Asset assets = 5;
+  }
+
+  repeated Market markets = 1;
+}
+
+message Event {
+  string id = 1;
+  uint64 timestamp = 2;
+
+  oneof payload {
+    Quote quote = 3;
+    Basis basis = 4;
+    Signal signal = 5;
+    Open open_position = 6;
+    Close close_position = 7;
+    Universe universe = 8;
+  }
+}
+
+// A batch of events committed at the same time (e.g. one flush interval).
+message Frame {
+  uint64 timestamp = 1;
+  repeated Event events = 2;
+}
